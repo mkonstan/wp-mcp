@@ -98,7 +98,7 @@ function wpmcp_render_admin() {
             <button type="button" class="button button-primary" onclick="var i=document.getElementById('wpmcp-newtok');i.focus();i.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}if(navigator.clipboard){navigator.clipboard.writeText(i.value).catch(function(){});}var b=this,t=b.textContent;b.textContent=ok?'Copied':'Select + Ctrl C';setTimeout(function(){b.textContent=t;},1500);">Copy</button>
           </p>
           <p>Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
-             Expires in <strong><?php echo esc_html($minted['hours']); ?>h</strong> &middot;
+             Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong> &middot;
              It binds to the IP of the first tool call; once bound, every request must match.</p>
           <p style="margin-top:10px"><strong>Header style</strong> (recommended; keeps the token out of server logs):</p>
           <p>URL: <code><?php echo esc_html($minted['base']); ?></code><br>

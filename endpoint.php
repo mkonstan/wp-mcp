@@ -70,72 +70,15 @@ function wpmcp_authorize(WP_REST_Request $req) {
 
 /* ---------------- tool registry ---------------- */
 function wpmcp_tools() {
-    $tools = array(
-        'site-info' => array(
-            'write' => false,
-            'description' => 'Site name, URL, WordPress version, active theme, active plugin count.',
-            'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
-            'run' => function ($args) {
-                $theme = wp_get_theme();
-                return array(
-                    'name'           => get_bloginfo('name'),
-                    'url'            => home_url(),
-                    'wp_version'     => get_bloginfo('version'),
-                    'active_theme'   => $theme ? ($theme->get('Name') . ' ' . $theme->get('Version')) : null,
-                    'active_plugins' => count((array) get_option('active_plugins', array())),
-                );
-            },
-        ),
-        'list-posts' => array(
-            'write' => false,
-            'description' => 'List recent content. Args: post_type (default "post"), status (default "any"), limit (default 20, max 100).',
-            'inputSchema' => array('type' => 'object', 'properties' => array(
-                'post_type' => array('type' => 'string'),
-                'status'    => array('type' => 'string'),
-                'limit'     => array('type' => 'integer'),
-            )),
-            'run' => function ($args) {
-                $q = new WP_Query(array(
-                    'post_type'      => isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post',
-                    'post_status'    => isset($args['status']) ? sanitize_key($args['status']) : 'any',
-                    'posts_per_page' => isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20,
-                    'no_found_rows'  => true,
-                ));
-                $items = array();
-                foreach ($q->posts as $p) {
-                    $items[] = array(
-                        'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
-                        'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
-                    );
-                }
-                return array('count' => count($items), 'items' => $items);
-            },
-        ),
-        'get-post' => array(
-            'write' => false,
-            'description' => 'Get title/status/raw content for a post or page. Args: id (integer, required).',
-            'inputSchema' => array('type' => 'object',
-                'properties' => array('id' => array('type' => 'integer')),
-                'required' => array('id')),
-            'run' => function ($args) {
-                $id = isset($args['id']) ? (int) $args['id'] : 0;
-                $p = $id ? get_post($id) : null;
-                if (!$p) { return new WP_Error('not_found', 'No post with that ID.'); }
-                return array(
-                    'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
-                    'status' => $p->post_status, 'slug' => $p->post_name, 'content' => $p->post_content,
-                );
-            },
-        ),
-    );
-    if (function_exists('wpmcp_extra_tools')) {
-        $tools = array_merge($tools, wpmcp_extra_tools());
+    $tools = array();
+    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
+        if (function_exists($fn)) { $tools = array_merge($tools, $fn()); }
     }
     // Code tools are exposed only when explicitly enabled in Settings > WP MCP.
     if (function_exists('wpmcp_code_tools') && function_exists('wpmcp_code_enabled') && wpmcp_code_enabled()) {
         $tools = array_merge($tools, wpmcp_code_tools());
     }
-    return $tools;
+    return apply_filters('wpmcp_tools', $tools);
 }
 
 /* ---------------- JSON-RPC dispatch ---------------- */

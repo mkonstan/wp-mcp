@@ -94,6 +94,10 @@ Off by default. When you enable it in **Settings → WP MCP**, an admin token ga
 
 It cannot reach the plugin's own files, so it can't disable its own guard.
 
+## How it works
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the request lifecycle, the per-request tool catalog, the `wpmcp_tools` filter for adding your own tools, and how scopes are enforced.
+
 ## Security
 
 Read [SECURITY.md](SECURITY.md). Short version: the model is solid for its purpose, with two things to know before production, behind a proxy/CDN you must configure the real client IP (a filter is provided), and the path-in-URL option lands the token in access logs (use the header instead).

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with short-lived, admin-minted, IP-pinned session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp/{token}
- * Version: 0.3.2
+ * Version: 0.3.3
  * Author: Max + Claude
  *
  * Auth model (by design):
@@ -17,7 +17,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '0.3.2');
+define('WPMCP_VER', '0.3.3');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS); // 43200s hard cap
 
@@ -171,6 +171,9 @@ function wpmcp_flush_expired_cb() {
     $wpdb->query('DELETE FROM ' . wpmcp_table() . ' WHERE expires_at <= UTC_TIMESTAMP()');
 }
 
-require_once plugin_dir_path(__FILE__) . 'tools.php';
-require_once plugin_dir_path(__FILE__) . 'admin.php';
-require_once plugin_dir_path(__FILE__) . 'endpoint.php';
+function wpmcp_bootstrap() {
+    require_once plugin_dir_path(__FILE__) . 'tools.php';
+    require_once plugin_dir_path(__FILE__) . 'admin.php';
+    require_once plugin_dir_path(__FILE__) . 'endpoint.php';
+}
+wpmcp_bootstrap();

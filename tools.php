@@ -1,9 +1,13 @@
 <?php
 /**
- * WP MCP - tool catalog beyond the core reads.
+ * WP MCP - tool catalog.
  *
- * wpmcp_extra_tools(): content / taxonomy / media / comment tools.
- * wpmcp_code_tools():  the four jailed code-edit tools (active theme only).
+ * wpmcp_core_tools():     site-info / list-posts / get-post.
+ * wpmcp_content_tools():  create-post / update-post / delete-post.
+ * wpmcp_taxonomy_tools(): list-terms / create-term / delete-term.
+ * wpmcp_media_tools():    list-media / get-media / upload-media / delete-media.
+ * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
+ * wpmcp_code_tools():     the four jailed code-edit tools (active theme only).
  * Each tool = array('write'=>bool, 'description'=>str, 'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools().
  */
@@ -132,7 +136,8 @@ function wpmcp_bak_ok($bak) {
 function wpmcp_php_parse_ok($code) {
     if (!defined('TOKEN_PARSE')) { return true; } // can't check on this runtime
     try {
-        token_get_all($code, TOKEN_PARSE);
+        // Intentional: TOKEN_PARSE makes the tokenizer THROW on invalid PHP; the catch below drives code-write's auto-revert. Do not "simplify" — the return value is unused on purpose.
+        token_get_all($code, TOKEN_PARSE); // @phpstan-ignore-line
         return true;
     } catch (ParseError $e) {
         return $e->getMessage();
@@ -176,10 +181,99 @@ function wpmcp_apply_terms($post_id, $terms) {
     }
 }
 
+/** Resolve an editable post by id, or a WP_Error. $badTypeMsg is the bad_type message. */
+function wpmcp_get_editable_post($id, $badTypeMsg) {
+    $id = (int) $id;
+    $p0 = $id ? get_post($id) : null;
+    if (!$p0) { return new WP_Error('not_found', 'No post with that ID.'); }
+    if (!wpmcp_post_type_ok($p0->post_type)) { return new WP_Error('bad_type', $badTypeMsg); }
+    return $p0;
+}
+
+/** Resolve an attachment by id, or a WP_Error. */
+function wpmcp_get_attachment($id) {
+    $id = (int) $id;
+    $p = $id ? get_post($id) : null;
+    if (!$p || $p->post_type !== 'attachment') { return new WP_Error('not_found', 'No attachment with that ID.'); }
+    return $p;
+}
+
+/** Resolve+denylist a code target. Returns array('abs'=>..,'rel'=>..) or a WP_Error. */
+function wpmcp_code_target($a, $mustExist) {
+    $r = wpmcp_code_resolve(isset($a['path']) ? $a['path'] : '', $mustExist);
+    if (!$r['ok']) { return new WP_Error('path', $r['error']); }
+    if (wpmcp_code_denied($r['rel'])) { return new WP_Error('denied', 'That file is on the denylist.'); }
+    return array('abs' => $r['abs'], 'rel' => $r['rel']);
+}
+
 /* ============================================================
- * Content / taxonomy / media / comment tools
+ * Core read tools (site-info / list-posts / get-post)
  * ========================================================== */
-function wpmcp_extra_tools() {
+function wpmcp_core_tools() {
+    return array(
+        'site-info' => array(
+            'write' => false,
+            'description' => 'Site name, URL, WordPress version, active theme, active plugin count.',
+            'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
+            'run' => function ($args) {
+                $theme = wp_get_theme();
+                return array(
+                    'name'           => get_bloginfo('name'),
+                    'url'            => home_url(),
+                    'wp_version'     => get_bloginfo('version'),
+                    'active_theme'   => $theme ? ($theme->get('Name') . ' ' . $theme->get('Version')) : null,
+                    'active_plugins' => count((array) get_option('active_plugins', array())),
+                );
+            },
+        ),
+        'list-posts' => array(
+            'write' => false,
+            'description' => 'List recent content. Args: post_type (default "post"), status (default "any"), limit (default 20, max 100).',
+            'inputSchema' => array('type' => 'object', 'properties' => array(
+                'post_type' => array('type' => 'string'),
+                'status'    => array('type' => 'string'),
+                'limit'     => array('type' => 'integer'),
+            )),
+            'run' => function ($args) {
+                $q = new WP_Query(array(
+                    'post_type'      => isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post',
+                    'post_status'    => isset($args['status']) ? sanitize_key($args['status']) : 'any',
+                    'posts_per_page' => isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20,
+                    'no_found_rows'  => true,
+                ));
+                $items = array();
+                foreach ($q->posts as $p) {
+                    $items[] = array(
+                        'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
+                        'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
+                    );
+                }
+                return array('count' => count($items), 'items' => $items);
+            },
+        ),
+        'get-post' => array(
+            'write' => false,
+            'description' => 'Get title/status/raw content for a post or page. Args: id (integer, required).',
+            'inputSchema' => array('type' => 'object',
+                'properties' => array('id' => array('type' => 'integer')),
+                'required' => array('id')),
+            'run' => function ($args) {
+                $id = isset($args['id']) ? (int) $args['id'] : 0;
+                $p = $id ? get_post($id) : null;
+                if (!$p) { return new WP_Error('not_found', 'No post with that ID.'); }
+                return array(
+                    'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
+                    'status' => $p->post_status, 'slug' => $p->post_name, 'content' => $p->post_content,
+                );
+            },
+        ),
+    );
+}
+
+/* ============================================================
+ * Content tools (create-post / update-post / delete-post)
+ * ========================================================== */
+function wpmcp_content_tools() {
     return array(
 
     'create-post' => array(
@@ -222,9 +316,8 @@ function wpmcp_extra_tools() {
         ), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
-            $p0 = $id ? get_post($id) : null;
-            if (!$p0) { return new WP_Error('not_found', 'No post with that ID.'); }
-            if (!wpmcp_post_type_ok($p0->post_type)) { return new WP_Error('bad_type', 'That item is not an editable content type.'); }
+            $p0 = wpmcp_get_editable_post($id, 'That item is not an editable content type.');
+            if (is_wp_error($p0)) { return $p0; }
             $upd = array('ID' => $id); $changed = array();
             if (isset($a['title']))   { $upd['post_title'] = wp_strip_all_tags((string) $a['title']); $changed[] = 'title'; }
             if (isset($a['content'])) { $upd['post_content'] = (string) $a['content']; $changed[] = 'content'; }
@@ -247,15 +340,23 @@ function wpmcp_extra_tools() {
         ), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
-            $p0 = $id ? get_post($id) : null;
-            if (!$p0) { return new WP_Error('not_found', 'No post with that ID.'); }
-            if (!wpmcp_post_type_ok($p0->post_type)) { return new WP_Error('bad_type', 'That item is not a deletable content type (attachments use delete-media).'); }
+            $p0 = wpmcp_get_editable_post($id, 'That item is not a deletable content type (attachments use delete-media).');
+            if (is_wp_error($p0)) { return $p0; }
             $force = !empty($a['force']);
             $r = wp_delete_post($id, $force);
             if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => $force, 'trashed' => !$force);
         },
     ),
+
+    );
+}
+
+/* ============================================================
+ * Taxonomy tools (list-terms / create-term / delete-term)
+ * ========================================================== */
+function wpmcp_taxonomy_tools() {
+    return array(
 
     'list-terms' => array(
         'write' => false,
@@ -319,6 +420,15 @@ function wpmcp_extra_tools() {
         },
     ),
 
+    );
+}
+
+/* ============================================================
+ * Media tools (list-media / get-media / upload-media / delete-media)
+ * ========================================================== */
+function wpmcp_media_tools() {
+    return array(
+
     'list-media' => array(
         'write' => false,
         'description' => 'List media attachments. Args: search, mime_type, page (default 1), per_page (default 20, max 100).',
@@ -350,8 +460,8 @@ function wpmcp_extra_tools() {
             'properties' => array('id' => array('type' => 'integer')), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
-            $p = $id ? get_post($id) : null;
-            if (!$p || $p->post_type !== 'attachment') { return new WP_Error('not_found', 'No attachment with that ID.'); }
+            $p = wpmcp_get_attachment($id);
+            if (is_wp_error($p)) { return $p; }
             $meta = wp_get_attachment_metadata($id);
             $file = get_attached_file($id);
             return array(
@@ -411,13 +521,22 @@ function wpmcp_extra_tools() {
         ), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
-            $p = $id ? get_post($id) : null;
-            if (!$p || $p->post_type !== 'attachment') { return new WP_Error('not_found', 'No attachment with that ID.'); }
+            $p = wpmcp_get_attachment($id);
+            if (is_wp_error($p)) { return $p; }
             $r = wp_delete_attachment($id, !empty($a['force']));
             if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => true);
         },
     ),
+
+    );
+}
+
+/* ============================================================
+ * Comment tools (list-comments / moderate-comment / reply-comment)
+ * ========================================================== */
+function wpmcp_comment_tools() {
+    return array(
 
     'list-comments' => array(
         'write' => false,
@@ -440,7 +559,7 @@ function wpmcp_extra_tools() {
             foreach ($cs as $c) {
                 $out[] = array('id' => (int) $c->comment_ID, 'post' => (int) $c->comment_post_ID,
                     'author_name' => $c->comment_author, 'content' => $c->comment_content,
-                    'status' => wp_get_comment_status($c->comment_ID), 'date' => $c->comment_date_gmt);
+                    'status' => wp_get_comment_status((int) $c->comment_ID), 'date' => $c->comment_date_gmt);
             }
             return array('count' => count($out), 'items' => $out);
         },
@@ -537,9 +656,8 @@ function wpmcp_code_tools() {
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
-            $r = wpmcp_code_resolve(isset($a['path']) ? $a['path'] : '', true);
-            if (!$r['ok']) { return new WP_Error('path', $r['error']); }
-            if (wpmcp_code_denied($r['rel'])) { return new WP_Error('denied', 'That file is on the denylist.'); }
+            $r = wpmcp_code_target($a, true);
+            if (is_wp_error($r)) { return $r; }
             if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be read.'); }
             if (!is_file($r['abs'])) { return new WP_Error('not_found', 'Not a file.'); }
             if (filesize($r['abs']) > 524288) { return new WP_Error('too_big', 'File exceeds 512KB.'); }
@@ -554,9 +672,8 @@ function wpmcp_code_tools() {
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
         ), 'required' => array('path', 'content')),
         'run' => function ($a) {
-            $r = wpmcp_code_resolve(isset($a['path']) ? $a['path'] : '', false);
-            if (!$r['ok']) { return new WP_Error('path', $r['error']); }
-            if (wpmcp_code_denied($r['rel'])) { return new WP_Error('denied', 'That file is on the denylist.'); }
+            $r = wpmcp_code_target($a, false);
+            if (is_wp_error($r)) { return $r; }
             if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be written.'); }
             $content = isset($a['content']) ? (string) $a['content'] : '';
             if (strlen($content) > 524288) { return new WP_Error('too_big', 'Content exceeds 512KB.'); }
@@ -592,9 +709,8 @@ function wpmcp_code_tools() {
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
-            $r = wpmcp_code_resolve(isset($a['path']) ? $a['path'] : '', true);
-            if (!$r['ok']) { return new WP_Error('path', $r['error']); }
-            if (wpmcp_code_denied($r['rel'])) { return new WP_Error('denied', 'That file is on the denylist.'); }
+            $r = wpmcp_code_target($a, true);
+            if (is_wp_error($r)) { return $r; }
             if (!is_file($r['abs'])) { return new WP_Error('not_found', 'Not a file.'); }
             $bak = $r['abs'] . '.bak';
             if (!wpmcp_bak_ok($bak)) { return new WP_Error('bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
