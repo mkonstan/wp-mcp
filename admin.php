@@ -1,6 +1,8 @@
 <?php
 /**
  * WP MCP - admin settings page (mint / list / revoke tokens, code-editing config). Admin-only.
+ *
+ * Copyright (C) 2026 Max Konstantinovski. GPLv2 or later (see LICENSE).
  */
 if (!defined('ABSPATH')) { exit; }
 

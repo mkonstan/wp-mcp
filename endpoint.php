@@ -1,5 +1,7 @@
 <?php
 /**
+ * Copyright (C) 2026 Max Konstantinovski. GPLv2 or later (see LICENSE).
+ *
  * WP MCP - DIY MCP-over-HTTP endpoint.
  *
  * Routes:

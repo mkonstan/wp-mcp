@@ -3,7 +3,15 @@
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with short-lived, admin-minted, IP-pinned session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp/{token}
  * Version: 0.3.3
- * Author: Max + Claude
+ * Author: Max Konstantinovski
+ * Author URI: https://github.com/mkonstan
+ * License: GPLv2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ *
+ * Copyright (C) 2026 Max Konstantinovski. Designed and built by Max Konstantinovski
+ * (with Claude). This program is free software under the GNU General Public License
+ * v2 or later; see the LICENSE file. Concept, design, and architecture by Max
+ * Konstantinovski — please retain this attribution in derivative works.
  *
  * Auth model (by design):
  *  - Admin mints a token in Settings > WP MCP. Token is shown ONCE.

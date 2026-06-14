@@ -1,5 +1,7 @@
 <?php
 /**
+ * Copyright (C) 2026 Max Konstantinovski. GPLv2 or later (see LICENSE).
+ *
  * WP MCP - tool catalog.
  *
  * wpmcp_core_tools():     site-info / list-posts / get-post.
