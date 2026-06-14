@@ -168,6 +168,9 @@ function wpmcp_render_admin() {
         </table>
         <?php submit_button('Save code settings'); ?>
       </form>
+      <p style="margin-top:24px;color:#666;font-size:12px">
+        ☕ Like WP MCP? <a href="https://github.com/sponsors/mkonstan" target="_blank" rel="noopener">Sponsor the project</a> &mdash; it stays free either way.
+      </p>
     </div>
     <?php
 }

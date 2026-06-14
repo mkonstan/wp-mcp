@@ -102,6 +102,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the request lifecycle, the per-reques
 
 Read [SECURITY.md](SECURITY.md). Short version: the model is solid for its purpose, with two things to know before production, behind a proxy/CDN you must configure the real client IP (a filter is provided), and the path-in-URL option lands the token in access logs (use the header instead).
 
+## Support
+
+WP MCP is free and GPL-licensed — use it however you like. If you like what you
+see and you're putting it to use, you can [sponsor me on GitHub](https://github.com/sponsors/mkonstan)
+and buy me a coffee. ☕ Entirely optional; the plugin is and stays free.
+
 ## License
 
 GPL-2.0-or-later. See [LICENSE](LICENSE).

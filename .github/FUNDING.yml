@@ -1,0 +1,5 @@
+# Shows a "Sponsor" button on the GitHub repo. The github: line is the only
+# one needed for GitHub Sponsors. Until the Sponsors profile at
+# github.com/sponsors/mkonstan is enabled (identity + payout setup), the button
+# renders but the link is inactive.
+github: mkonstan
