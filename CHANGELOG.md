@@ -2,6 +2,14 @@
 
 All notable changes to WP MCP. Versioning is informal pre-1.0.
 
+## 0.3.3
+- Internal refactor, no change to the default tool set or behavior. Split the tool catalog into per-domain provider functions (`wpmcp_core_tools`, `wpmcp_content_tools`, `wpmcp_taxonomy_tools`, `wpmcp_media_tools`, `wpmcp_comment_tools`); `endpoint.php` is now pure transport.
+- Added the `wpmcp_tools` filter so other plugins or themes can add their own tools (filter-added tools default to read scope unless they set `write => true`).
+- Wrapped plugin startup in `wpmcp_bootstrap()`.
+- Extracted shared guard helpers (editable-post, attachment, code-path) to cut duplication.
+- Docs: added ARCHITECTURE.md (request lifecycle and design rationale); README links it.
+- Minor: two type-cast cleanups; documented the intentional `token_get_all` parse check.
+
 ## 0.3.2
 - IP pin now binds on the first **tool call**, not on the discovery handshake, so a client whose setup enumeration comes from a different IP than its live session no longer locks itself out. Once bound, the pin is enforced on every request (discovery included).
 - Version-string hygiene.
