@@ -30,7 +30,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model and design reasoning.
 
 ## Install
 
-1. Download the latest release `wp-mcp.zip`.
+1. Download [`wp-mcp.zip`](https://github.com/mkonstan/wp-mcp/releases/latest/download/wp-mcp.zip) (always the latest release).
 2. In WordPress: **Plugins → Add New → Upload Plugin**, choose the zip, **Install**, then **Activate**.
 3. A new page appears under **Settings → WP MCP**.
 
