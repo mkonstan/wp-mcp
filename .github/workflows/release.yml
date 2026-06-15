@@ -1,0 +1,70 @@
+name: Release
+
+# Build + gate + publish the install zip whenever a version tag is pushed.
+#   git tag v0.3.4 && git push origin v0.3.4
+# produces a GitHub Release with a verified wp-mcp.zip attached.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  release:
+    name: Build, gate, and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      - name: Lint all plugin files
+        run: |
+          for f in wp-mcp.php endpoint.php admin.php tools.php; do
+            php -l "$f"
+          done
+
+      - name: Stage the install set (4 php + LICENSE + README) under wp-mcp/
+        run: |
+          mkdir -p dist/wp-mcp
+          cp wp-mcp.php endpoint.php admin.php tools.php LICENSE README.md dist/wp-mcp/
+
+      - name: Build wp-mcp.zip (top-level wp-mcp/ folder)
+        run: |
+          cd dist
+          zip -r wp-mcp.zip wp-mcp -x '*.bak' '*.log'
+          cd ..
+
+      - name: GATE - extracted content matches source, lints clean, bak-count == 3
+        run: |
+          mkdir -p verify
+          unzip -q dist/wp-mcp.zip -d verify
+          fail=0
+          for f in wp-mcp.php endpoint.php admin.php tools.php LICENSE README.md; do
+            if ! cmp -s "$f" "verify/wp-mcp/$f"; then
+              echo "MISMATCH: $f differs from the zipped copy"; fail=1
+            fi
+          done
+          for f in wp-mcp.php endpoint.php admin.php tools.php; do
+            php -l "verify/wp-mcp/$f" || fail=1
+          done
+          bak=$(grep -c "wpmcp_bak_ok" verify/wp-mcp/tools.php)
+          echo "wpmcp_bak_ok in zip: $bak (expected 3)"
+          test "$bak" -eq 3 || fail=1
+          if [ "$fail" -ne 0 ]; then echo "GATE FAILED - not releasing"; exit 1; fi
+          echo "GATE PASSED"
+
+      - name: Create GitHub Release with the verified zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/wp-mcp.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Automated release of ${GITHUB_REF_NAME}. Self-hosted WordPress MCP server with short-lived, admin-minted, IP-pinned tokens; read/admin scopes; opt-in jailed theme code editing. See CHANGELOG.md." \
+            --verify-tag

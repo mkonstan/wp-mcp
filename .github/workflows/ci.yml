@@ -1,0 +1,37 @@
+name: CI
+
+# Continuous safety net: lint every push and PR so broken PHP never reaches main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: PHP lint (8.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      - name: php -l all plugin files
+        run: |
+          status=0
+          for f in wp-mcp.php endpoint.php admin.php tools.php; do
+            echo "::group::php -l $f"
+            php -l "$f" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Guard - tools.php auto-revert check is present (wpmcp_bak_ok x3)
+        run: |
+          count=$(grep -c "wpmcp_bak_ok" tools.php)
+          echo "wpmcp_bak_ok occurrences: $count (expected 3)"
+          test "$count" -eq 3
