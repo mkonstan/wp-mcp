@@ -27,6 +27,12 @@
  * a load-time call to a real WordPress function, the require fails loudly and names
  * it, instead of being masked by a blanket stub file. Add the one stub the failure
  * names, and record it here.
+ *
+ * CALLING a plugin function needs more than loading it - get_userdata, WP_Error, a
+ * $wpdb and so on. Those live in tests/Support/wp-runtime-stubs.php behind
+ * WordPressRuntime::install(), which a test calls AFTER loadPlugin(). Keeping the two
+ * sets apart is what preserves the property above: nothing a function body needs can
+ * quietly satisfy a new load-time dependency.
  */
 
 declare(strict_types=1);
@@ -57,7 +63,8 @@ final class WordPressStubs
     }
 
     /**
-     * The stub names, so a test can assert the list has not quietly grown.
+     * The LOAD-TIME stub names, so a test can assert the list has not quietly grown.
+     * The runtime set is WordPressRuntime's business, not this list's.
      *
      * @return list<string>
      */
