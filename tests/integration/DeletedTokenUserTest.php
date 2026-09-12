@@ -37,7 +37,15 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
         parent::setUpBeforeClass();
         self::requireSite();
 
-        Fixtures::deleteTokensLabelled(self::LABEL);
+        self::buildFixtures(self::build(...), self::destroy(...));
+    }
+
+    private static function build(): void
+    {
+        // purge(), not just the label: with executionOrder="depends,defects" this
+        // class can run before the one that purges, and a crashed earlier run would
+        // otherwise fail createUser() on a name that is already taken.
+        Fixtures::purge();
 
         self::$userId = Fixtures::createUser(self::LOGIN, 'author');
         self::$token  = Fixtures::mintToken('read', self::LABEL, self::$userId);
@@ -45,12 +53,17 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
 
     public static function tearDownAfterClass(): void
     {
+        self::destroy();
+
+        parent::tearDownAfterClass();
+    }
+
+    private static function destroy(): void
+    {
         // Tolerant by design: the test deletes this user itself, so by the time
         // teardown runs the `wp user delete` is expected to fail.
         Fixtures::deleteUser(self::$userId);
         Fixtures::deleteTokensLabelled(self::LABEL);
-
-        parent::tearDownAfterClass();
     }
 
     /**

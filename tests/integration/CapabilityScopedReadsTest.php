@@ -67,6 +67,13 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         parent::setUpBeforeClass();
         self::requireSite();
 
+        // PHPUnit never calls tearDownAfterClass when setUpBeforeClass throws, so a
+        // failure partway through would leave users, posts and a live token behind.
+        self::buildFixtures(self::build(...), self::destroy(...));
+    }
+
+    private static function build(): void
+    {
         // A previous run killed halfway would leave these names taken.
         Fixtures::purge();
 
@@ -108,6 +115,13 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
 
     public static function tearDownAfterClass(): void
     {
+        self::destroy();
+
+        parent::tearDownAfterClass();
+    }
+
+    private static function destroy(): void
+    {
         // Comments go with the post (force delete removes them), users are reassigned
         // to user 1, tokens go by label. purge() is the net underneath all of it.
         Fixtures::deletePost(self::$privateId);
@@ -117,8 +131,6 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         Fixtures::deleteUser(self::$authorId);
         Fixtures::deleteTokensLabelled(self::LABEL);
         Fixtures::purge();
-
-        parent::tearDownAfterClass();
     }
 
     /**

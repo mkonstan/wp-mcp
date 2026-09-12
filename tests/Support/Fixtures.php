@@ -180,15 +180,21 @@ final class Fixtures
     }
 
     /**
-     * Fixture-named posts still on the site, in any status.
+     * Fixture-named posts still on the site, in any status INCLUDING trash.
+     *
+     * `--post_status=any` is WP_Query's `any`, which excludes trash and auto-draft, so
+     * a fixture post that something trashed rather than force-deleted would be
+     * invisible to the debris check. The statuses are listed explicitly instead.
      *
      * @return array<int, string> id => post_title
      */
     public static function leftoverPosts(): array
     {
-        return self::matchingRows(
-            ['post', 'list', '--post_status=any', '--format=csv', '--fields=ID,post_title']
-        );
+        return self::matchingRows([
+            'post', 'list',
+            '--post_status=publish,future,draft,pending,private,trash,auto-draft,inherit',
+            '--format=csv', '--fields=ID,post_title',
+        ]);
     }
 
     /**

@@ -34,7 +34,10 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
         parent::setUpBeforeClass();
         self::requireSite();
 
-        Fixtures::deleteTokensLabelled(self::LABEL);
+        self::buildFixtures(
+            static fn () => Fixtures::deleteTokensLabelled(self::LABEL),
+            static fn () => Fixtures::deleteTokensLabelled(self::LABEL)
+        );
     }
 
     public static function tearDownAfterClass(): void

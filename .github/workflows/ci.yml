@@ -109,7 +109,49 @@ jobs:
           # @wordpress/env publishes the development instance on port 8888 by
           # default; it is plain HTTP, so TLS verification stays off.
           WPMCP_TEST_URL: http://localhost:8888
+          # WordPress is inside a Docker container, so a host-side wp-cli.phar
+          # --path= cannot see its filesystem. This routes the fixture harness
+          # through `npx @wordpress/env run cli wp` instead. Without it every
+          # fixture-bearing test skips - and a skip is green.
+          WPMCP_WP_ENV: '1'
         run: composer test:integration
+
+      - name: Sprint gates actually executed (a skipped gate is not a gate)
+        env:
+          WPMCP_TEST_URL: http://localhost:8888
+          WPMCP_WP_ENV: '1'
+        # The build plan defines a gate as `phpunit --group sprint-N` green in CI.
+        # Green is not enough: PHPUnit reports a wholly skipped group as green too,
+        # and that is exactly what happened to sprint-1 before WPMCP_WP_ENV existed.
+        #
+        # A class that skipped emits a <testsuite> carrying tests="0" (or no counts at
+        # all) and no <testcase> children, so the check is: at least one <testcase> in
+        # the log, and no WpMcp test class that contributed none.
+        run: |
+          status=0
+          for group in sprint-0 sprint-1; do
+            echo "::group::$group"
+            log="junit-$group.xml"
+            rm -f "$log"
+            vendor/bin/phpunit --group "$group" --log-junit "$log" || status=1
+            if [ ! -f "$log" ]; then
+              echo "::error::$group produced no JUnit log."
+              status=1
+              echo "::endgroup::"
+              continue
+            fi
+            cases=$(grep -c '<testcase ' "$log" || true)
+            empty=$(grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -cv 'tests="[1-9]' || true)
+            echo "$group: testcases=$cases classes-that-ran-nothing=$empty"
+            if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ]; then
+              echo "::error::$group did not execute every one of its test classes. A gate that skips is not a gate."
+              grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -v 'tests="[1-9]' || true
+              status=1
+            fi
+            rm -f "$log"
+            echo "::endgroup::"
+          done
+          exit $status
 
       - name: WordPress logs (on failure)
         if: failure()
