@@ -16,7 +16,8 @@
  *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
- * Registry: a tool without an explicit boolean `write` is not registered.
+ * Registry: a tool without an explicit boolean `write`, a string description and an
+ *   array inputSchema is not registered; a built-in's name cannot be re-declared.
  */
 if (!defined('ABSPATH')) { exit; }
 

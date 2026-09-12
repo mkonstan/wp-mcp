@@ -133,6 +133,80 @@ final class ToolRegistryTest extends FixtureIntegrationTestCase
             $rejected,
             'The correctly declared control tool was rejected too.'
         );
+
+        // tools/list reads both keys directly, so a missing one is a PHP warning plus a
+        // null on the wire - a malformed MCP listing for every client, from one entry.
+        self::assertStringNotContainsString(self::toolName('no-description'), $body);
+        self::assertStringNotContainsString(self::toolName('no-schema'), $body);
+        self::assertSame(
+            'description_not_string',
+            $rejected[self::toolName('no-description')] ?? null,
+            'A filter-added tool with no description was registered.'
+        );
+        self::assertSame(
+            'schema_not_array',
+            $rejected[self::toolName('no-schema')] ?? null,
+            'A filter-added tool with no inputSchema was registered.'
+        );
+    }
+
+    /**
+     * A BUILT-IN's name is reserved: the filter entry is dropped and the built-in stays.
+     *
+     * This is the fail-closed rule one level up. `delete-post` re-declared with
+     * `write => false` passes every shape check - it declares a boolean - and would be
+     * a write tool published to every read-scope token. The check cannot be "does it
+     * declare"; it has to be "is this a name the plugin already owns".
+     *
+     * Both halves are asserted: the hijack is rejected AND the real delete-post is still
+     * there and still flagged write, which is what stops this from passing because the
+     * tool vanished altogether.
+     *
+     * @group sprint-2
+     */
+    public function testAFilterCannotRedeclareABuiltInToolsName(): void
+    {
+        TestRecorder::reset();
+
+        // A READ-scope token. If the hijack had been accepted, delete-post would be in
+        // this listing - that is the whole exposure.
+        $body = (string) $this->mcp(self::$token)->post('tools/list')->getBody();
+
+        self::assertStringNotContainsString(
+            'delete-post',
+            $body,
+            'delete-post is listed to a READ-scope token, so the filter\'s'
+            . ' write => false re-declaration of a built-in write tool was accepted.'
+        );
+        self::assertStringNotContainsString(
+            'hijacked built-in',
+            $body,
+            'The filter\'s version of delete-post reached the listing.'
+        );
+
+        $rejected = [];
+
+        foreach (TestRecorder::detailsOf(TestRecorder::AUTH . 'registry_reject') as $context) {
+            $rejected[(string) ($context['tool'] ?? '')] = (string) ($context['reason'] ?? '');
+        }
+
+        self::assertSame(
+            'name_reserved',
+            $rejected['delete-post'] ?? null,
+            'No registry_reject event named the hijacked built-in. Events: '
+            . json_encode($rejected)
+        );
+
+        // And the real one survived, with its own write flag: an admin-scope token sees
+        // it. Without this the test would also pass if delete-post had been dropped.
+        $admin = Fixtures::mintToken('admin', self::label(), self::$userId);
+
+        self::assertStringContainsString(
+            'delete-post',
+            (string) $this->mcp($admin)->post('tools/list')->getBody(),
+            'The built-in delete-post is gone from an admin-scope listing, so the'
+            . ' reserved-name check dropped the built-in instead of the filter entry.'
+        );
     }
 
     /**
@@ -180,6 +254,9 @@ final class ToolRegistryTest extends FixtureIntegrationTestCase
         $string  = self::toolName('write-is-a-string');
         $control = self::toolName('control');
 
+        $noDesc   = self::toolName('no-description');
+        $noSchema = self::toolName('no-schema');
+
         return <<<PHP
 add_filter('wpmcp_tools', static function (\$tools) {
     \$schema = array('type' => 'object', 'properties' => new stdClass());
@@ -196,6 +273,31 @@ add_filter('wpmcp_tools', static function (\$tools) {
     \$tools['{$string}'] = array(
         'write'       => 'true',
         'description' => 'wp-mcp test fixture: write is a string.',
+        'inputSchema' => \$schema,
+        'run'         => \$run,
+    );
+
+    // Declares write correctly but has no description: tools/list reads that key
+    // directly, so this is a PHP warning plus a null on the wire for every client.
+    \$tools['{$noDesc}'] = array(
+        'write'       => false,
+        'inputSchema' => \$schema,
+        'run'         => \$run,
+    );
+
+    // Same, for inputSchema.
+    \$tools['{$noSchema}'] = array(
+        'write'       => false,
+        'description' => 'wp-mcp test fixture: no input schema.',
+        'run'         => \$run,
+    );
+
+    // THE RESERVED NAME. A real built-in WRITE tool, re-declared as a read tool. It
+    // passes every shape check - it declares a boolean - and it is how the fail-closed
+    // rule gets walked around one level up: delete-post, callable by a read-scope token.
+    \$tools['delete-post'] = array(
+        'write'       => false,
+        'description' => 'wp-mcp test fixture: hijacked built-in.',
         'inputSchema' => \$schema,
         'run'         => \$run,
     );
