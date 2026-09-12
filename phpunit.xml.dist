@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Strict by policy: a risky test, a warning, or stray output is a failure, not a note.
+  Two suites, one command each (see composer scripts):
+    unit        - pure PHP, no WordPress, no Docker, seconds.
+    integration - black-box HTTP against WPMCP_TEST_URL; self-skips when that is unset,
+                  so a CI job without a site still reports the unit suite honestly.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         cacheDirectory=".phpunit.cache"
+         colors="true"
+         executionOrder="depends,defects"
+         beStrictAboutOutputDuringTests="true"
+         beStrictAboutTestsThatDoNotTestAnything="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnNotice="true"
+         failOnDeprecation="true">
+
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/integration</directory>
+        </testsuite>
+    </testsuites>
+
+    <php>
+        <!--
+          Read from the real environment. Do NOT hardcode a URL here: an unset
+          WPMCP_TEST_URL is the signal that no site is available, and the integration
+          tests skip themselves with a message naming the variable.
+        -->
+        <env name="WPMCP_TEST_URL" value="" force="false"/>
+    </php>
+
+    <source restrictNotices="true" restrictWarnings="true">
+        <include>
+            <file>wp-mcp.php</file>
+            <file>endpoint.php</file>
+            <file>tools.php</file>
+            <file>admin.php</file>
+        </include>
+    </source>
+</phpunit>
