@@ -46,10 +46,15 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private const LABEL          = Fixtures::PREFIX . 'caps';
     private const PRIVATE_TITLE  = Fixtures::PREFIX . 'private';
     private const DRAFT_TITLE    = Fixtures::PREFIX . 'draft';
+    private const PUBLIC_TITLE   = Fixtures::PREFIX . 'public';
     private const OWN_DRAFT_TITLE = Fixtures::PREFIX . 'own-draft';
     private const SECRET         = 'wpmcp-test-secret-body';
     private const APPROVED_TEXT  = Fixtures::PREFIX . 'approved-comment';
     private const HELD_TEXT      = Fixtures::PREFIX . 'held-comment';
+    private const PRIVATE_COMMENT_TEXT = Fixtures::PREFIX . 'comment-on-private';
+
+    /** On the approved comment. Never returned by any tool; used to probe `search`. */
+    private const COMMENT_EMAIL = Fixtures::PREFIX . 'commenter@example.invalid';
 
     /** An id far past anything the site could hold, for the "really missing" case. */
     private const MISSING_ID = 999999999;
@@ -59,6 +64,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private static int $privateId = 0;
     private static int $draftId   = 0;
     private static int $ownDraftId = 0;
+    private static int $publicId  = 0;
     private static string $authorToken = '';
     private static string $adminToken  = '';
 
@@ -103,10 +109,26 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'wpmcp-test-own-draft-body'
         );
 
-        // One approved and one held-for-moderation comment, so "approved only" is a
-        // real filter rather than an empty result that would pass either way.
-        Fixtures::createComment(self::$draftId, self::APPROVED_TEXT, true);
-        Fixtures::createComment(self::$draftId, self::HELD_TEXT, false);
+        // The comment fixtures are split across two posts so each assertion isolates
+        // exactly one mechanism.
+        //
+        // On a PUBLISHED post, which the Author may read: one approved and one held
+        // comment. Only the status default can separate those two, so "approved only"
+        // is tested there and cannot pass because of the read_post filter instead.
+        self::$publicId = Fixtures::createPost(
+            self::PUBLIC_TITLE,
+            'publish',
+            self::$editorId,
+            'wpmcp-test-public-body'
+        );
+        Fixtures::createComment(self::$publicId, self::APPROVED_TEXT, true, self::COMMENT_EMAIL);
+        Fixtures::createComment(self::$publicId, self::HELD_TEXT, false);
+
+        // On the Editor's PRIVATE post: an APPROVED comment. Approved, so the status
+        // default cannot hide it - only a read_post check on comment_post_ID can.
+        // Without that check this hands an Author the private post's id plus the
+        // comment's author, text and date.
+        Fixtures::createComment(self::$privateId, self::PRIVATE_COMMENT_TEXT, true);
 
         self::$authorToken = Fixtures::mintToken('read', self::LABEL, self::$authorId);
         // User 1 is the site's original administrator: the "unchanged behaviour" case.
@@ -127,6 +149,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         Fixtures::deletePost(self::$privateId);
         Fixtures::deletePost(self::$draftId);
         Fixtures::deletePost(self::$ownDraftId);
+        Fixtures::deletePost(self::$publicId);
         Fixtures::deleteUser(self::$editorId);
         Fixtures::deleteUser(self::$authorId);
         Fixtures::deleteTokensLabelled(self::LABEL);
@@ -327,12 +350,132 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'The held-for-moderation comment was returned by a default list-comments.'
         );
 
-        // Narrowed to the post that holds both comments: the approved one is still
-        // returned, so the filter is a filter and not a blanket empty result.
-        $onDraft = $author->callTool('list-comments', ['post' => self::$draftId]);
-        self::assertFalse($onDraft->isError, 'list-comments failed: ' . $onDraft->text);
-        self::assertStringContainsString(self::APPROVED_TEXT, $onDraft->text);
-        self::assertStringNotContainsString(self::HELD_TEXT, $onDraft->text);
+        // Narrowed to the PUBLISHED post that holds both comments - one the Author may
+        // read, so the only thing separating them is the status default. The approved
+        // one is still returned, so this is a filter and not a blanket empty result.
+        $onPublic = $author->callTool('list-comments', ['post' => self::$publicId]);
+        self::assertFalse($onPublic->isError, 'list-comments failed: ' . $onPublic->text);
+        self::assertStringContainsString(self::APPROVED_TEXT, $onPublic->text);
+        self::assertStringNotContainsString(self::HELD_TEXT, $onPublic->text);
+    }
+
+    /**
+     * A comment on a post the caller cannot read is a read of that post. The comment
+     * here is APPROVED, so the status default does nothing: only the read_post check
+     * on comment_post_ID keeps the Editor's private post out of an Author's reach.
+     *
+     * @group sprint-1
+     */
+    public function testListCommentsHidesCommentsOnPostsTheUserCannotRead(): void
+    {
+        $author = $this->mcp(self::$authorToken);
+
+        $all = $author->callTool('list-comments', ['per_page' => 100]);
+        self::assertFalse($all->isError, 'list-comments failed: ' . $all->text);
+        self::assertStringNotContainsString(
+            self::PRIVATE_COMMENT_TEXT,
+            $all->text,
+            'An Author was given a comment on another user\'s private post.'
+        );
+        self::assertNotContains(
+            self::$privateId,
+            $all->column('post'),
+            'list-comments leaked the id of a post the Author cannot read.'
+        );
+
+        // Asking for that post directly must not help either.
+        $targeted = $author->callTool('list-comments', ['post' => self::$privateId]);
+        self::assertFalse($targeted->isError, 'list-comments failed: ' . $targeted->text);
+        self::assertSame(
+            [],
+            $targeted->items(),
+            'Naming the private post returned its comments anyway.'
+        );
+
+        // The admin token still sees it, so the filter is a filter.
+        $admin = $this->mcp(self::$adminToken)
+            ->callTool('list-comments', ['post' => self::$privateId]);
+        self::assertFalse($admin->isError, 'list-comments failed: ' . $admin->text);
+        self::assertStringContainsString(self::PRIVATE_COMMENT_TEXT, $admin->text);
+    }
+
+    /**
+     * `status: "hold"` is one argument away from every token. wp-admin needs
+     * moderate_comments to see held or spam comments, and an Author does not have it;
+     * before this the new "approved by default" was true and meaningless.
+     *
+     * Silently narrowed to `approve`, not refused: an error would confirm that held
+     * comments exist and are being withheld.
+     *
+     * @group sprint-1
+     */
+    public function testAskingForHeldCommentsWithoutModerateCommentsReturnsApprovedOnly(): void
+    {
+        $result = $this->mcp(self::$authorToken)
+            ->callTool('list-comments', ['status' => 'hold', 'per_page' => 100]);
+
+        self::assertFalse(
+            $result->isError,
+            'status:"hold" was refused rather than narrowed: ' . $result->text
+        );
+        self::assertStringNotContainsString(
+            self::HELD_TEXT,
+            $result->text,
+            'An Author read a held-for-moderation comment by asking for status:"hold".'
+        );
+
+        $statuses = array_values(array_unique($result->column('status')));
+        self::assertNotContains('unapproved', $statuses, 'Statuses seen: ' . implode(', ', array_map('strval', $statuses)));
+
+        // The admin token, which does hold moderate_comments, still gets it.
+        $admin = $this->mcp(self::$adminToken)
+            ->callTool('list-comments', ['status' => 'hold', 'post' => self::$publicId]);
+        self::assertFalse($admin->isError, 'list-comments failed: ' . $admin->text);
+        self::assertStringContainsString(
+            self::HELD_TEXT,
+            $admin->text,
+            'status:"hold" stopped working for a user who may moderate.'
+        );
+    }
+
+    /**
+     * `search` matches comment text and author name, and nothing else.
+     *
+     * WP_Comment_Query hard-codes its search columns to include
+     * comment_author_email and comment_author_IP, with no filter to narrow them. A
+     * tool that advertises "emails omitted" while letting a caller confirm an address
+     * one prefix at a time does not omit them, so list-comments builds its own
+     * clause. The email here is on the comment the Author CAN read, so nothing but
+     * the column list can be what hides it.
+     *
+     * @group sprint-1
+     */
+    public function testSearchDoesNotMatchCommentAuthorEmails(): void
+    {
+        $author = $this->mcp(self::$authorToken);
+
+        $byContent = $author->callTool('list-comments', [
+            'search'   => 'wpmcp-test-approved',
+            'per_page' => 100,
+        ]);
+        self::assertFalse($byContent->isError, 'list-comments failed: ' . $byContent->text);
+        self::assertStringContainsString(
+            self::APPROVED_TEXT,
+            $byContent->text,
+            'Searching comment text stopped working.'
+        );
+
+        $byEmail = $author->callTool('list-comments', [
+            'search'   => 'wpmcp-test-commenter@',
+            'per_page' => 100,
+        ]);
+        self::assertFalse($byEmail->isError, 'list-comments failed: ' . $byEmail->text);
+        self::assertSame(
+            [],
+            $byEmail->items(),
+            'A search on an author email matched, so emails can be probed one prefix'
+            . ' at a time despite the tool saying they are omitted.'
+        );
     }
 
     /**

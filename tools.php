@@ -660,30 +660,78 @@ function wpmcp_comment_tools() {
 
     'list-comments' => array(
         'write' => false,
-        'description' => 'List comments (emails omitted). Args: post (id), status (default "approve"; also hold|spam|trash|all), search, page, per_page.',
+        'description' => 'List comments the caller is allowed to read (emails and IPs never returned). Args: post (id), status (default "approve"; hold|spam|trash|all need moderate_comments and are otherwise treated as "approve"), search (matches comment text and author name), page, per_page.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'post' => array('type' => 'integer'), 'status' => array('type' => 'string'),
             'search' => array('type' => 'string'), 'page' => array('type' => 'integer'),
             'per_page' => array('type' => 'integer'),
         )),
         'run' => function ($a) {
+            // WP_Comment_Query performs no capability checks of any kind (zero
+            // current_user_can calls in the class), so every restriction here is this
+            // tool's own. wp-admin gates unapproved comments on moderate_comments and
+            // core's REST controller checks read_post per comment; match both.
+            $status = isset($a['status']) ? sanitize_key($a['status']) : 'approve';
+            if ($status !== 'approve' && !current_user_can('moderate_comments')) {
+                // Fall back rather than refuse: an error would confirm that held or
+                // spam comments exist and are being withheld. Same stance as
+                // list-posts on an unpermitted status, and get-post on read_post.
+                $status = 'approve';
+            }
+
             $args = array(
                 // Approved only unless asked otherwise. The old default of 'all' handed
                 // spam and held-for-moderation text - unreviewed, attacker-supplied
                 // content - to every read token without anyone asking for it.
-                'status' => isset($a['status']) ? sanitize_key($a['status']) : 'approve',
-                'search' => isset($a['search']) ? (string) $a['search'] : '',
+                'status' => $status,
                 'number' => isset($a['per_page']) ? min(100, max(1, (int) $a['per_page'])) : 20,
                 'paged'  => isset($a['page']) ? max(1, (int) $a['page']) : 1,
             );
             if (isset($a['post'])) { $args['post_id'] = (int) $a['post']; }
-            $cs = get_comments($args);
+
+            // `search` is NOT passed to WP_Comment_Query: it hard-codes the columns
+            // comment_author, comment_author_email, comment_author_url,
+            // comment_author_IP and comment_content, with no filter to narrow them
+            // (verified in class-wp-comment-query.php). A tool that says "emails
+            // omitted" while letting a caller prefix-probe them by search does not
+            // omit them. The clause is built here over the two safe columns instead,
+            // which keeps the filtering - and therefore the pagination - in SQL.
+            $search = isset($a['search']) ? trim((string) $a['search']) : '';
+            $filter = null;
+            if ($search !== '') {
+                $filter = function ($clauses) use ($search) {
+                    global $wpdb;
+                    $like = '%' . $wpdb->esc_like($search) . '%';
+                    $clauses['where'] .= $wpdb->prepare(
+                        " AND ({$wpdb->comments}.comment_content LIKE %s"
+                        . " OR {$wpdb->comments}.comment_author LIKE %s)",
+                        $like,
+                        $like
+                    );
+                    return $clauses;
+                };
+                add_filter('comments_clauses', $filter);
+            }
+
+            try {
+                $cs = get_comments($args);
+            } finally {
+                if ($filter) { remove_filter('comments_clauses', $filter); }
+            }
+
             $out = array();
             foreach ($cs as $c) {
+                // A comment on a post the caller cannot read is a read of that post:
+                // it leaks the post's existence plus author names, text and dates.
+                // This is the same leak get-post closes, one indirection away.
+                if (!current_user_can('read_post', (int) $c->comment_post_ID)) { continue; }
+
                 $out[] = array('id' => (int) $c->comment_ID, 'post' => (int) $c->comment_post_ID,
                     'author_name' => $c->comment_author, 'content' => $c->comment_content,
                     'status' => wp_get_comment_status((int) $c->comment_ID), 'date' => $c->comment_date_gmt);
             }
+            // count is what the caller may see, so it is smaller than per_page when
+            // the page held comments on unreadable posts. Paging is still by per_page.
             return array('count' => count($out), 'items' => $out);
         },
     ),

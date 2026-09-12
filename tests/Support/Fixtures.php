@@ -69,18 +69,30 @@ final class Fixtures
         return $id;
     }
 
-    /** @return int the new comment's ID */
-    public static function createComment(int $postId, string $content, bool $approved): int
+    /**
+     * @param string $email author email, or '' to leave it empty. Set it only when a
+     *                      test needs to prove the email is NOT reachable - it is
+     *                      never returned by any tool.
+     * @return int the new comment's ID
+     */
+    public static function createComment(int $postId, string $content, bool $approved, string $email = ''): int
     {
         self::assertPrefixed($content);
 
-        $id = (int) WpCli::run([
+        $args = [
             'comment', 'create',
             '--comment_post_ID=' . $postId,
             '--comment_content=' . $content,
             '--comment_approved=' . ($approved ? '1' : '0'),
             '--porcelain',
-        ]);
+        ];
+
+        if ($email !== '') {
+            self::assertPrefixed($email);
+            $args[] = '--comment_author_email=' . $email;
+        }
+
+        $id = (int) WpCli::run($args);
 
         if ($id <= 0) {
             throw new RuntimeException("Could not create the fixture comment on post {$postId}.");
