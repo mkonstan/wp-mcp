@@ -25,7 +25,7 @@ final class WordPressRuntime
     {
         require_once __DIR__ . '/wp-runtime-stubs.php';
 
-        $GLOBALS['wpmcp_test_wp'] = ['current_user_id' => 0, 'users' => []];
+        $GLOBALS['wpmcp_test_wp'] = ['current_user_id' => 0, 'users' => [], 'caps' => []];
 
         $wpdb = new FakeWpdb();
         $GLOBALS['wpdb'] = $wpdb;
@@ -43,6 +43,16 @@ final class WordPressRuntime
     public static function setCurrentUserId(int $id): void
     {
         $GLOBALS['wpmcp_test_wp']['current_user_id'] = $id;
+    }
+
+    /**
+     * Grant a capability to the current user. Nothing is granted by default.
+     *
+     * @param string $capability e.g. 'edit_user', or 'edit_user:9' for one object id
+     */
+    public static function allowCap(string $capability): void
+    {
+        $GLOBALS['wpmcp_test_wp']['caps'][] = $capability;
     }
 
     /** Register $id as an existing user and make it the current one. */

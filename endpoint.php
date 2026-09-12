@@ -68,19 +68,13 @@ function wpmcp_authorize(WP_REST_Request $req) {
     // Identity: run as the user the token was minted for, so every capability check
     // inside the tools is that user's. scope still gates write tools on top.
     //
-    // A user deleted after minting leaves a token pointing at nobody. Running it
-    // anyway would mean running unauthenticated, where current_user_can() is false
-    // for everything - quiet, wrong, and exactly the shape of bug that looks like an
-    // empty result rather than a refusal. Fail closed instead, and reuse the
-    // not_found error so the wire body is the one a bogus token already gets: whether
-    // a token exists is not something an unauthenticated caller gets to learn.
-    $user = get_userdata((int) $row->user_id);
-    if (!$user) {
-        return new WP_Error('wpmcp_not_found', 'Token not found.', array('status' => 401));
-    }
-
+    // wpmcp_validate() has already refused a token whose user was deleted - and it
+    // does so before it writes anything, so a dead token cannot pin an IP or bump
+    // use_count. The refusal arrives here as the ordinary not_found above, which is
+    // the point: the wire body is the one a bogus token gets. This lookup is the
+    // cached second read of a user already known to exist.
     $GLOBALS['wpmcp_session'] = $row;
-    wp_set_current_user($user->ID);
+    wp_set_current_user((int) $row->user_id);
     return true;
 }
 

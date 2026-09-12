@@ -67,7 +67,9 @@ function wpmcp_maybe_upgrade() {
 
 /**
  * Create or upgrade the tokens table, run the data migrations, record the revision.
- * Idempotent, so activation and upgrade can both call it.
+ * Idempotent, so activation and upgrade can both call it. Returns true when the
+ * revision was recorded, false when it deliberately was not - see the comment at the
+ * bottom of the function.
  *
  * user_id is the identity a token runs as. created_by is who minted it and is kept
  * for audit only: the two are equal for a token minted for oneself and differ when an
@@ -99,9 +101,30 @@ function wpmcp_install() {
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
 
-    wpmcp_migrate_token_user_ids();
+    // Record the revision ONLY once the schema and the data are both actually there.
+    //
+    // dbDelta never throws and returns a report, not a status; the migration's own
+    // documented failure return is a bare false. Stamping the version regardless
+    // bricked the plugin in a way nothing could recover from: if the ALTER TABLE
+    // failed (permissions, a hosting proxy, a concurrent request), every row would
+    // lack user_id, (int) null would make get_userdata(0) false, every token would
+    // 401 - and wpmcp_maybe_upgrade() would never run again to fix it. Fail closed
+    // and RETRYABLE: leave the option behind so the next request tries once more.
+    if (!wpmcp_token_column_exists('user_id')) { return false; }
+    if (wpmcp_migrate_token_user_ids() === false) { return false; }
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
+    return true;
+}
+
+/** Does the tokens table really have this column? The upgrade gate, not decoration. */
+function wpmcp_token_column_exists($column) {
+    global $wpdb;
+    $found = $wpdb->get_col($wpdb->prepare(
+        'SHOW COLUMNS FROM ' . wpmcp_table() . ' LIKE %s',
+        $column
+    ));
+    return is_array($found) && $found !== array();
 }
 
 /**
@@ -166,6 +189,18 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
     if (!get_userdata($user_id)) {
         return new WP_Error('wpmcp_no_such_user', 'No WordPress user with ID ' . $user_id . '.');
     }
+    // Minting FOR SOMEBODY ELSE needs authority over that someone. On single-site an
+    // administrator holds edit_user over everyone, so this is lateral. On multisite it
+    // is not: get_userdata() resolves network-wide, so without this a site
+    // administrator could mint an admin-scope token carrying a super admin's ID and
+    // current_user_can() would then answer true for every capability on that site.
+    // edit_user maps to do_not_allow for a super admin target unless the actor is one.
+    if ($user_id !== (int) get_current_user_id() && !current_user_can('edit_user', $user_id)) {
+        return new WP_Error(
+            'wpmcp_not_allowed',
+            'You are not allowed to mint a token for user ' . $user_id . '.'
+        );
+    }
     $raw = bin2hex(random_bytes(32)); // 256-bit
     $now = current_time('mysql', true); // UTC
 
@@ -189,6 +224,8 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
  * Validate a raw token against the current request.
  * Returns the token row (object) on success, or WP_Error with a code:
  *   not_found | expired | ip_mismatch
+ * not_found covers both "no such token" and "the token's user no longer exists":
+ * identical on the wire on purpose.
  * Side effects on success: TOFU-binds IP on first IP-gated call, touches counters.
  * $enforce_ip=false lets discovery/handshake avoid creating the initial binding.
  * Once bound, every request must match the bound IP.
@@ -208,6 +245,15 @@ function wpmcp_validate($raw, $ip, $enforce_ip = true) {
     if (strtotime($row->expires_at . ' UTC') <= time()) {
         $wpdb->delete(wpmcp_table(), array('id' => $row->id), array('%d'));
         return new WP_Error('expired', 'Token expired - regenerate in Settings > WP MCP.');
+    }
+
+    // Identity, checked BEFORE any side effect below. A token whose user was deleted
+    // after minting is dead; letting it reach the TOFU bind and the use_count bump
+    // would pin a dead token to an IP and show it as recently used in the admin
+    // table, which is activity a refused request should not be able to record.
+    // Same error as an unknown token: whether a token exists is not disclosed.
+    if (!get_userdata((int) $row->user_id)) {
+        return new WP_Error('not_found', 'Token not found.');
     }
 
     // Discovery does not create the TOFU pin, but once a pin exists it is universal.

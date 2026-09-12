@@ -11,6 +11,13 @@
  * which is the only place a `UPDATE ... WHERE user_id = 0` can be shown to do what it
  * says. Both rows carry the fixture label and are deleted in teardown.
  *
+ * WHAT THIS DOES NOT COVER. The migration function is called DIRECTLY, so
+ * wpmcp_maybe_upgrade() and its option gate are not exercised as a sequence - only
+ * their outcome on the site under test is (see the second test). Driving the real
+ * upgrade would mean deleting wpmcp_db_ver and dropping the user_id column on
+ * somebody's live database, which is not a thing an integration test should do; the
+ * option gate is three lines and the SQL semantics are what can actually be wrong.
+ *
  * @group sprint-1
  */
 
@@ -85,6 +92,44 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
             $this->userIdOf($boundId),
             'The migration overwrote a row that already had an owner. Re-running it'
             . ' would then re-point every token at whoever minted it.'
+        );
+    }
+
+    /**
+     * The upgrade actually happened here, and the version was stamped for the right
+     * reason. wpmcp_install() now records the revision only after confirming the
+     * column exists and the UPDATE did not return false - stamping it regardless was
+     * unrecoverable: a failed ALTER TABLE would leave every row without user_id,
+     * every token refused, and wpmcp_maybe_upgrade() would never run again.
+     *
+     * Read-only: no install is triggered, because forcing one would mean dropping a
+     * column on a live database.
+     *
+     * @group sprint-1
+     */
+    public function testTheLiveSiteRecordedTheSchemaRevisionAndHasTheColumn(): void
+    {
+        self::assertSame(
+            '1',
+            WpCli::evaluate('echo wpmcp_token_column_exists("user_id") ? "1" : "0";'),
+            'The tokens table has no user_id column, so the upgrade never completed.'
+        );
+
+        self::assertSame(
+            (string) (int) WpCli::evaluate('echo (int) WPMCP_DB_VER;'),
+            WpCli::evaluate('echo (int) get_option("wpmcp_db_ver", 0);'),
+            'The recorded schema revision does not match the code\'s, so'
+            . ' wpmcp_maybe_upgrade() either never ran or refused to stamp.'
+        );
+
+        self::assertSame(
+            '0',
+            WpCli::evaluate(
+                'global $wpdb; echo (int) $wpdb->get_var("SELECT COUNT(*) FROM "'
+                . ' . wpmcp_table() . " WHERE user_id = 0");'
+            ),
+            'A token row still has user_id = 0 after the migration; every such token'
+            . ' authenticates as nobody and is refused.'
         );
     }
 

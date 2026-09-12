@@ -47,20 +47,37 @@ final class Fixtures
         return $id;
     }
 
-    /** @return int the new post's ID */
-    public static function createPost(string $title, string $status, int $author, string $content): int
-    {
+    /**
+     * @param string $type   post type; 'attachment' is allowed so the media tools and
+     *                       get-post's post-type refusal can be tested.
+     * @param int    $parent post_parent, which is what gives an attachment its
+     *                       effective status - an attachment of a private post is
+     *                       private, and that is the whole point of the media checks.
+     * @return int the new post's ID
+     */
+    public static function createPost(
+        string $title,
+        string $status,
+        int $author,
+        string $content,
+        string $type = 'post',
+        int $parent = 0
+    ): int {
         self::assertPrefixed($title);
 
-        $id = (int) WpCli::run([
+        $args = [
             'post', 'create',
-            '--post_type=post',
+            '--post_type=' . $type,
             '--post_title=' . $title,
             '--post_status=' . $status,
             '--post_author=' . $author,
             '--post_content=' . $content,
             '--porcelain',
-        ]);
+        ];
+
+        if ($parent > 0) { $args[] = '--post_parent=' . $parent; }
+
+        $id = (int) WpCli::run($args);
 
         if ($id <= 0) {
             throw new RuntimeException("Could not create the fixture post {$title}.");
@@ -151,17 +168,27 @@ final class Fixtures
      * SHA-256 is stored - so it has to be captured from the mint call itself. `wp
      * eval` echoes it on stdout; there is no other way to get one without
      * reimplementing the hash.
+     *
+     * AS USER 1. wpmcp_mint() requires edit_user over the target when minting for
+     * somebody else, and wp-cli has no current user at all - so an unattributed
+     * `wp eval` is refused, correctly. User 1 is the site's original administrator,
+     * which is who does the minting in the admin UI too, so this mirrors reality
+     * rather than working around the check: created_by lands on 1 exactly as it
+     * would from Settings > WP MCP.
      */
     public static function mintToken(string $scope, string $label, int $userId): string
     {
         self::assertPrefixed($label);
 
-        $raw = WpCli::evaluate(sprintf(
-            '$r = wpmcp_mint(%s, %s, 3600, %d); echo is_wp_error($r) ? "MINT-ERROR: " . $r->get_error_message() : $r["raw"];',
-            self::phpString($scope),
-            self::phpString($label),
-            $userId
-        ));
+        $raw = WpCli::evaluate(
+            sprintf(
+                '$r = wpmcp_mint(%s, %s, 3600, %d); echo is_wp_error($r) ? "MINT-ERROR: " . $r->get_error_message() : $r["raw"];',
+                self::phpString($scope),
+                self::phpString($label),
+                $userId
+            ),
+            1
+        );
 
         if (strlen($raw) !== 64 || !ctype_xdigit($raw)) {
             throw new RuntimeException("wpmcp_mint() did not return a token: {$raw}");

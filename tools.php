@@ -413,8 +413,14 @@ function wpmcp_core_tools() {
                 if (!current_user_can('read_post', $id)) {
                     return new WP_Error('not_found', 'No post with that ID.');
                 }
+                // Also not_found, not a third message. `bad_type` here named the type
+                // it had refused, so probing ids told a Subscriber "exists, and is a
+                // revision / attachment / wp_block / nav_menu_item" - read_post on
+                // those maps to the parent's or the published item's `read`, so the
+                // cap check above does not stop the probe. No content was returned
+                // either way; the shape was the leak.
                 if (!wpmcp_post_type_ok($p->post_type)) {
-                    return new WP_Error('bad_type', 'Not a readable post type: ' . $p->post_type);
+                    return new WP_Error('not_found', 'No post with that ID.');
                 }
                 return array(
                     'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
@@ -645,6 +651,13 @@ function wpmcp_media_tools() {
             ));
             $out = array();
             foreach ($q->posts as $p) {
+                // An attachment's read_post resolves through its parent post's status,
+                // so this is what keeps the media of a private or draft post - titles
+                // and, worse, direct file URLs - out of a token that cannot read the
+                // post it belongs to. WP_Query has no perm handling for
+                // post_status=inherit, so the filter has to be here.
+                if (!current_user_can('read_post', (int) $p->ID)) { continue; }
+
                 $out[] = array('id' => $p->ID, 'title' => get_the_title($p), 'mime' => $p->post_mime_type,
                     'url' => wp_get_attachment_url($p->ID), 'date' => $p->post_date_gmt);
             }
@@ -661,6 +674,11 @@ function wpmcp_media_tools() {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             $p = wpmcp_get_attachment($id);
             if (is_wp_error($p)) { return $p; }
+            // Same non-disclosing refusal get-post uses: identical to the message a
+            // missing id returns, so ids cannot be probed for existence.
+            if (!current_user_can('read_post', $id)) {
+                return new WP_Error('not_found', 'No attachment with that ID.');
+            }
             $meta = wp_get_attachment_metadata($id);
             $file = get_attached_file($id);
             return array(

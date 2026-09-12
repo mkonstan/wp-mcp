@@ -47,6 +47,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private const PRIVATE_TITLE  = Fixtures::PREFIX . 'private';
     private const DRAFT_TITLE    = Fixtures::PREFIX . 'draft';
     private const PUBLIC_TITLE   = Fixtures::PREFIX . 'public';
+    private const ATTACHMENT_TITLE = Fixtures::PREFIX . 'attachment';
     private const OWN_DRAFT_TITLE = Fixtures::PREFIX . 'own-draft';
     private const SECRET         = 'wpmcp-test-secret-body';
     private const APPROVED_TEXT  = Fixtures::PREFIX . 'approved-comment';
@@ -71,6 +72,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private static int $draftId   = 0;
     private static int $ownDraftId = 0;
     private static int $publicId  = 0;
+    private static int $attachmentId = 0;
     /** @var list<int> */
     private static array $bulkIds = [];
     private static string $authorToken = '';
@@ -128,6 +130,21 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // comment's author, text and date.
         Fixtures::createComment(self::$privateId, self::PRIVATE_COMMENT_TEXT, true);
 
+        // An attachment ON the private post. `inherit` means get_post_status() answers
+        // with the parent's status, so read_post on this resolves to
+        // read_private_posts - which is how the media tools can be wrong in the same
+        // way get-post was, and worse, because they return direct file URLs.
+        // It doubles as get-post's non-allow-listed-type case: attachments have their
+        // own tools, so wpmcp_post_type_ok() refuses them.
+        self::$attachmentId = Fixtures::createPost(
+            self::ATTACHMENT_TITLE,
+            'inherit',
+            self::$editorId,
+            'wpmcp-test-attachment-body',
+            'attachment',
+            self::$privateId
+        );
+
         // MORE PUBLISHED POSTS THAN list-posts' DEFAULT LIMIT. The own-draft case is
         // served by a second, author-scoped query whose results are merged with the
         // first and then sliced to `limit`; if the merge sorts on a column that is
@@ -176,6 +193,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         Fixtures::deletePost(self::$draftId);
         Fixtures::deletePost(self::$ownDraftId);
         Fixtures::deletePost(self::$publicId);
+        Fixtures::deletePost(self::$attachmentId);
         foreach (self::$bulkIds as $id) { Fixtures::deletePost($id); }
         Fixtures::deleteUser(self::$editorId);
         Fixtures::deleteUser(self::$authorId);
@@ -519,6 +537,75 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'A search on an author email matched, so emails can be probed one prefix'
             . ' at a time despite the tool saying they are omitted.'
         );
+    }
+
+    /**
+     * get-post has exactly TWO answers: the post, or "No post with that ID." A
+     * non-allow-listed type used to be a third, `bad_type`, which named the type it
+     * had refused - so probing ids told a caller "exists, and is an attachment /
+     * revision / wp_block". read_post does not stop that probe: on those types it
+     * maps to the parent's or the published item's `read`. No content was returned
+     * either way; the SHAPE was the leak.
+     *
+     * Asserted with the ADMIN token, which can read everything, so the only thing
+     * that can produce a refusal here is the post-type check.
+     *
+     * @group sprint-1
+     */
+    public function testGetPostRefusesANonAllowListedTypeWithoutNamingIt(): void
+    {
+        $admin = $this->mcp(self::$adminToken);
+
+        $attachment = $admin->callTool('get-post', ['id' => self::$attachmentId]);
+        $missing    = $admin->callTool('get-post', ['id' => self::MISSING_ID]);
+
+        self::assertTrue(
+            $attachment->isError,
+            'get-post returned an attachment: ' . $attachment->text
+        );
+        self::assertSame(
+            $missing->text,
+            $attachment->text,
+            'get-post answers differently for a wrong-type id than for a missing one,'
+            . ' so ids can be probed for what kind of thing they are.'
+        );
+        self::assertStringNotContainsString('attachment', $attachment->text);
+    }
+
+    /**
+     * The media tools resolve read_post the same way get-post does. An attachment's
+     * `inherit` status means get_post_status() answers with its parent's, so an
+     * attachment of a private post is private - and list-media hands out direct file
+     * URLs, which is worse than a title.
+     *
+     * @group sprint-1
+     */
+    public function testMediaToolsHideAttachmentsOfPostsTheUserCannotRead(): void
+    {
+        $author = $this->mcp(self::$authorToken);
+
+        $listed = $author->callTool('list-media', ['per_page' => 100]);
+        self::assertFalse($listed->isError, 'list-media failed: ' . $listed->text);
+        self::assertNotContains(
+            self::$attachmentId,
+            $listed->column('id'),
+            'An Author was shown an attachment of another user\'s private post.'
+        );
+        self::assertStringNotContainsString(self::ATTACHMENT_TITLE, $listed->text);
+
+        $fetched = $author->callTool('get-media', ['id' => self::$attachmentId]);
+        self::assertTrue($fetched->isError, 'get-media returned it: ' . $fetched->text);
+        $missing = $author->callTool('get-media', ['id' => self::MISSING_ID]);
+        self::assertSame(
+            $missing->text,
+            $fetched->text,
+            'get-media answers differently for a forbidden attachment than for a'
+            . ' missing one, so its ids can be probed for existence.'
+        );
+
+        // Still visible to a user who may read the parent, so this is a filter.
+        $admin = $this->mcp(self::$adminToken)->callTool('get-media', ['id' => self::$attachmentId]);
+        self::assertFalse($admin->isError, 'The admin token was refused: ' . $admin->text);
     }
 
     /**

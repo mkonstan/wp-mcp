@@ -69,6 +69,7 @@ final class MintIdentityTest extends TestCase
     {
         WordPressRuntime::logInAs(1, 'wpmcp-unit-admin');
         WordPressRuntime::addUser(9, 'wpmcp-unit-editor');
+        WordPressRuntime::allowCap('edit_user:9');
 
         $minted = \wpmcp_mint('read', 'for the editor', 3600, 9);
 
@@ -98,6 +99,52 @@ final class MintIdentityTest extends TestCase
             $this->wpdb->inserts,
             'A refused mint must not leave a token row behind.'
         );
+    }
+
+    /**
+     * Minting for somebody else requires authority over that someone, not merely
+     * that they exist.
+     *
+     * On single-site an administrator holds edit_user over everyone, so this is
+     * lateral. On multisite it is not: get_userdata() resolves network-wide, so
+     * without the check a site administrator could mint an admin-scope token
+     * carrying a super admin's ID, and current_user_can() would then answer true for
+     * every capability on that site.
+     *
+     * @group sprint-1
+     */
+    public function testMintingForAUserYouHaveNoAuthorityOverIsRefused(): void
+    {
+        WordPressRuntime::logInAs(1, 'wpmcp-unit-admin');
+        WordPressRuntime::addUser(9, 'wpmcp-unit-superadmin');
+        // No edit_user granted.
+
+        $result = \wpmcp_mint('read', 'escalation attempt', 3600, 9);
+
+        self::assertTrue(\is_wp_error($result), 'Minting for user 9 should be a WP_Error.');
+        self::assertSame('wpmcp_not_allowed', $result->get_error_code());
+        self::assertSame(
+            [],
+            $this->wpdb->inserts,
+            'A refused mint must not leave a token row behind.'
+        );
+    }
+
+    /**
+     * Minting for YOURSELF needs no edit_user - the common case, and the one the
+     * form defaults to. An administrator does hold edit_user over themselves, but
+     * relying on that would break the moment a role did not.
+     *
+     * @group sprint-1
+     */
+    public function testMintingForYourselfNeedsNoAuthorityOverAnybody(): void
+    {
+        WordPressRuntime::logInAs(7, 'wpmcp-unit-author');
+        // No caps at all.
+
+        $explicit = \wpmcp_mint('read', 'own, by id', 3600, 7);
+        self::assertIsArray($explicit, 'Minting for oneself by id was refused.');
+        self::assertSame(7, $this->wpdb->lastInsertData()['user_id']);
     }
 
     /**

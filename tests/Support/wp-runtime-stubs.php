@@ -27,7 +27,7 @@
  */
 
 if (!isset($GLOBALS['wpmcp_test_wp'])) {
-    $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array());
+    $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array(), 'caps' => array());
 }
 
 if (!class_exists('WP_Error')) {
@@ -99,6 +99,34 @@ if (!function_exists('get_userdata')) {
         }
 
         return (object) array('ID' => $id, 'user_login' => (string) $users[$id]);
+    }
+}
+
+if (!function_exists('current_user_can')) {
+    /**
+     * Deny by default. Everything Sprint 1 added is a refusal that has to happen when
+     * a capability is ABSENT, so a stub that returned true would make every one of
+     * those tests pass without the code under test doing anything.
+     *
+     * Granted capabilities are listed as 'cap' or, for a meta cap with an object id,
+     * 'cap:id' - e.g. 'edit_user:9'. Real map_meta_cap resolves far more than this;
+     * the stub only has to distinguish "allowed for this object" from "not".
+     */
+    function current_user_can($capability, ...$args)
+    {
+        $caps = $GLOBALS['wpmcp_test_wp']['caps'];
+
+        if (in_array((string) $capability, $caps, true)) {
+            return true;
+        }
+
+        foreach ($args as $arg) {
+            if (is_scalar($arg) && in_array($capability . ':' . $arg, $caps, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 

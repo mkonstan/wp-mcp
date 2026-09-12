@@ -90,7 +90,8 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
             'The fixture user was not actually deleted.'
         );
 
-        $after = $mcp->post('tools/call', ['name' => 'site-info', 'arguments' => []]);
+        $call  = ['name' => 'site-info', 'arguments' => []];
+        $after = $mcp->post('tools/call', $call);
 
         self::assertSame(
             401,
@@ -99,13 +100,23 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
             . (string) $after->getBody()
         );
 
-        $body = json_decode((string) $after->getBody(), true);
-        self::assertIsArray($body);
+        // The claim is not "some 401" but "the SAME 401 a token that never existed
+        // gets". Anything else - a distinct code, a different message, a different
+        // status - tells an unauthenticated caller that this token is real and its
+        // user is gone. So fetch the real comparison instead of asserting on a
+        // remembered string: 64 hex digits that were never minted.
+        $bogus = $this->mcp(str_repeat('ab', 32))->post('tools/call', $call);
+
         self::assertSame(
-            'wpmcp_not_found',
-            $body['code'] ?? null,
-            'The refusal used a distinct error code, which tells a caller that the'
-            . ' token exists but its user is gone. Body: ' . (string) $after->getBody()
+            $bogus->getStatusCode(),
+            $after->getStatusCode(),
+            'Deleted-user and unknown-token refusals have different HTTP statuses.'
+        );
+        self::assertSame(
+            (string) $bogus->getBody(),
+            (string) $after->getBody(),
+            'The deleted-user refusal body differs from an unknown token\'s, so a'
+            . ' caller can tell the two apart.'
         );
     }
 }

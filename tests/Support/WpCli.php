@@ -116,10 +116,22 @@ final class WpCli
         return self::clean($out);
     }
 
-    /** `wp eval <php>`. Returns whatever the snippet echoed. */
-    public static function evaluate(string $php): string
+    /**
+     * `wp eval <php>`. Returns whatever the snippet echoed.
+     *
+     * $asUser runs the snippet as that WordPress user. wp-cli has NO current user by
+     * default - get_current_user_id() is 0 and current_user_can() is false for
+     * everything - so anything that checks a capability has to say who it is acting
+     * as. Minting is the case that matters: wpmcp_mint() requires edit_user over the
+     * target, which nobody satisfies.
+     */
+    public static function evaluate(string $php, int $asUser = 0): string
     {
-        return self::run(['eval', $php]);
+        $args = ['eval', $php];
+
+        if ($asUser > 0) { $args[] = '--user=' . $asUser; }
+
+        return self::run($args);
     }
 
     /** `wp eval <php>`, failure swallowed. */
