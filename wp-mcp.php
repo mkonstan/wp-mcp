@@ -61,6 +61,12 @@ function wpmcp_activate() {
     if (!wp_next_scheduled('wpmcp_flush_expired')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
     }
+
+    // The trace log's directory, and the one question worth asking about it: can the web
+    // read it? See trace.php - .htaccess is Apache's, and most hosts are not Apache.
+    wpmcp_trace_ensure_dir();
+    delete_transient(WPMCP_TRACE_CHECK_TRANSIENT);
+    wpmcp_trace_selfcheck();
 }
 
 /**
@@ -195,6 +201,7 @@ function wpmcp_client_ip() {
  *   origin_deny       the Origin header was not ours   (origin)
  *   insecure_deny     the request was not over HTTPS   (-)
  *   content_type_deny the POST was not application/json (content_type)
+ *   body_too_large    CONTENT_LENGTH over the cap      (length)
  *   registry_reject   a filter-added tool was refused  (tool, reason)
  *
  * Every context also carries `ip`. `reason` on validate_fail is the INTERNAL reason -
@@ -558,6 +565,8 @@ function wpmcp_flush_expired_cb() {
 }
 
 function wpmcp_bootstrap() {
+    // trace.php first: the activation hook above and endpoint.php both call into it.
+    require_once plugin_dir_path(__FILE__) . 'trace.php';
     require_once plugin_dir_path(__FILE__) . 'tools.php';
     require_once plugin_dir_path(__FILE__) . 'admin.php';
     require_once plugin_dir_path(__FILE__) . 'endpoint.php';
