@@ -1,6 +1,8 @@
 name: CI
 
-# Continuous safety net: lint every push and PR so broken PHP never reaches main.
+# Continuous safety net: lint every push and PR so broken PHP never reaches main,
+# then run the two test tiers. release.yml gates on the two test jobs by name
+# (`lint`, `phpunit-unit`, `integration`) - renaming a job here breaks the gate.
 on:
   push:
     branches: [main]
@@ -35,3 +37,84 @@ jobs:
           count=$(grep -c "wpmcp_bak_ok" tools.php)
           echo "wpmcp_bak_ok occurrences: $count (expected 3)"
           test "$count" -eq 3
+
+  phpunit-unit:
+    # Pure PHP, no WordPress, no Docker. The matrix is the declared support floor
+    # (Requires PHP: 8.1) through the current release, so a syntax or behaviour
+    # difference across versions shows up here rather than on a user's host.
+    name: PHPUnit unit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dev dependencies
+        # Dev-only manifest; the plugin itself has no runtime dependencies.
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Unit suite
+        # WPMCP_TEST_URL is deliberately absent: this job must pass with no site.
+        run: composer test:unit
+
+  integration:
+    # Black-box HTTP against a real WordPress. rest_do_request() would skip TLS,
+    # Origin, Content-Type and the path-URL route, which is precisely where the
+    # transport work lives - so this tier uses a real container over real HTTP.
+    name: PHPUnit integration (wp-env)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Set up Node (for @wordpress/env)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Start WordPress (Docker, plugin mapped in and activated)
+        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it.
+        # ubuntu-latest runners ship Docker, so nothing else is needed.
+        run: npx --yes @wordpress/env start --debug
+
+      - name: Enable pretty permalinks
+        # /wp-json/ is a rewrite rule. With WordPress's default "plain" permalinks
+        # the REST index is only reachable as /?rest_route=/, and the integration
+        # tests (like every real MCP client) request /wp-json/.
+        run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
+
+      - name: Confirm the plugin is active
+        run: npx --yes @wordpress/env run cli wp plugin list --status=active
+
+      - name: Integration suite
+        env:
+          # @wordpress/env publishes the development instance on port 8888 by
+          # default; it is plain HTTP, so TLS verification stays off.
+          WPMCP_TEST_URL: http://localhost:8888
+        run: composer test:integration
+
+      - name: WordPress logs (on failure)
+        if: failure()
+        run: npx --yes @wordpress/env logs all || true
+
+      - name: Stop WordPress
+        if: always()
+        run: npx --yes @wordpress/env stop || true
