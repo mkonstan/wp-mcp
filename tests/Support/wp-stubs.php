@@ -37,6 +37,14 @@ if (!function_exists('add_action')) {
     }
 }
 
+if (!function_exists('add_filter')) {
+    // endpoint.php registers the verb gate on rest_pre_dispatch at file scope (sprint 3).
+    function add_filter($hook, $callback, $priority = 10, $accepted_args = 1)
+    {
+        return true;
+    }
+}
+
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path($file)
     {
