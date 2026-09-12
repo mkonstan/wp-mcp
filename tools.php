@@ -176,10 +176,16 @@ function wpmcp_bak_ok($bak) {
  * Syntax-check PHP source. Returns true, or a short description of where it broke.
  *
  * THE PARSER'S OWN MESSAGE IS NOT RETURNED, and that is the disclosure boundary rather
- * than taste: the ParseError's own message carries an absolute filesystem path,
- * and this string is put on the wire by code-write. The LINE is the part the caller can
- * act on - it is a line of source the caller just sent - and it leaks nothing. A unit
- * test greps this file for that call; trace.php is the only place it is allowed.
+ * than taste: the ParseError's message carries the absolute filesystem path of the file it
+ * was given, and this string is put on the wire by code-write. The LINE is the part the
+ * caller can act on - it is a line of source the caller itself just sent - and it leaks
+ * nothing about this server.
+ *
+ * EVEN THE LINE IS ASKED FOR RATHER THAN REACHED FOR: wpmcp_throwable_line() lives in
+ * trace.php, which is the one file allowed to introspect a throwable, and a unit test greps
+ * this one to keep it that way. A file permitted to read one safe property off a throwable
+ * is a file permitted to read the unsafe ones by the next person's judgement; one
+ * reviewable place for all of it is the rule.
  */
 function wpmcp_php_parse_ok($code) {
     if (!defined('TOKEN_PARSE')) { return true; } // can't check on this runtime
@@ -188,7 +194,7 @@ function wpmcp_php_parse_ok($code) {
         token_get_all($code, TOKEN_PARSE); // @phpstan-ignore-line
         return true;
     } catch (ParseError $e) {
-        return 'syntax error on line ' . (int) $e->getLine();
+        return 'syntax error on line ' . wpmcp_throwable_line($e);
     } catch (Throwable $e) {
         return 'the source could not be parsed';
     }

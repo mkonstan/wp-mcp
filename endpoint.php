@@ -75,15 +75,22 @@ function wpmcp_is_our_route($route) {
  * a browser address bar, a link prefetcher or a crawler produces, and a 404 invites a
  * retry; 405 names the one verb that works.
  *
- * PHP_INT_MAX, AND THAT IS NOT PARANOIA - IT IS MEASURED. The first version of this ran at
- * priority 9, before core's OPTIONS handler, and the 405 never reached the client: the
- * site under test has ACF Pro, whose `ACF_Rest_Api::initialize()` is hooked on
- * rest_pre_dispatch at priority 10 and RETURNS NOTHING. A filter callback that does not
- * return its input replaces the accumulated value with null, so every earlier callback on
- * that hook is silently discarded - our 405 among them, and the request fell through to
- * core's 404 rest_no_route. Any plugin can do this to any rest_pre_dispatch short-circuit
- * and nothing warns about it. Running last is the only position that cannot be erased,
- * and it is also the position that lets this replace core's OPTIONS response.
+ * PHP_INT_MAX, AND THAT IS NOT PARANOIA - IT IS MEASURED, TWICE. The first version of this
+ * ran at priority 9, before core's OPTIONS handler, and the 405 never reached the client:
+ * the site under test has ACF Pro, whose `ACF_Rest_Api::initialize()` is hooked on
+ * rest_pre_dispatch at priority 10 and RETURNS NOTHING, and Gravity Forms does the same at
+ * priority 99 (`class-gf-rest-authentication.php`). A filter callback that does not return
+ * its input replaces the accumulated value with null, so every earlier callback on that
+ * hook is silently discarded - our 405 among them, and the request fell through to core's
+ * 404 rest_no_route. Two ordinary plugins on one ordinary site, neither of them doing
+ * anything exotic.
+ *
+ * PHP_INT_MAX is THE LAST POSITION ANY PLUGIN GETS, and a theme can still take it: a
+ * `functions.php` loads after every plugin and can register at PHP_INT_MAX too, after this.
+ * Nothing dangerous comes back if one does - GET falls through to core's 404 and OPTIONS to
+ * a 404 as well, since no handler matches the method, so the `help` schema does not
+ * reappear - but the gate is best-effort against site code by construction, not absolute.
+ * It is also the position that lets this replace core's OPTIONS response.
  *
  * The incoming $result is still honoured for POST: a plugin that legitimately hijacks an
  * MCP request keeps its answer. It is only overridden for a verb this endpoint refuses.
@@ -676,25 +683,68 @@ function wpmcp_dispatch($raw, $body, $id, $method) {
 }
 
 /**
+ * Core WP_Error codes whose MESSAGE may be relayed to the caller as a tool error.
+ *
+ * A SHORT, CLOSED LIST, and every entry earns its place the same way: the failure is the
+ * CALLER'S OWN MISTAKE, core's sentence says what the mistake was, and the caller can act
+ * on it. "Internal error" for any of these is actively worse than useless - an agent
+ * cannot self-correct on it, so it retries the same call, and each attempt writes a stack
+ * trace to the log for something that is not a bug.
+ *
+ *   term_exists        create-term on a term that is already there. The agent should use
+ *                      it, not create it, and core's message names the existing term.
+ *   comment_duplicate  the same comment body, twice. Stop, do not resend.
+ *   comment_flood      too fast. Wait, then resend - the one case where retrying IS right,
+ *                      and the agent cannot know that from "Internal error".
+ *   empty_content      an empty comment. Fix the arguments.
+ *   http_request_failed  upload-media could not fetch `source_url`. Overwhelmingly a URL
+ *                      the agent typed wrong, and the message says what went wrong with it.
+ *
+ * This does not reopen the "no named error cases" rule - it applies it. The rule is "do
+ * not add a named error case unless the client must act differently on it", and the client
+ * acts differently on all five. Everything else core produces stays generic.
+ *
+ * These are relayed and NOT logged: a non-bug does not belong in a log of bugs.
+ */
+function wpmcp_relayable_core_error_codes() {
+    return array(
+        'term_exists',
+        'comment_duplicate',
+        'comment_flood',
+        'empty_content',
+        'http_request_failed',
+    );
+}
+
+/**
  * A WP_Error that came back from a tool: whose is it?
  *
- * TWO KINDS, AND ONLY THE PREFIX TELLS THEM APART. Every WP_Error this plugin constructs
- * carries a code beginning `wpmcp_`. That is a sentence the tool's author wrote for the
- * caller - "No post with that ID", "That file is on the denylist" - and it belongs on the
- * wire as an MCP tool error: `isError: true` with the message as text, which is what an
- * agent needs in order to do something else instead of retrying.
+ * THREE ANSWERS, DECIDED BY THE CODE AND NOTHING ELSE.
  *
- * Anything WITHOUT that prefix came out of WordPress: wpdb's last_error with the SQL in
- * it, wp_insert_post's, wp_handle_upload's, an HTTP API failure naming an internal host.
- * Nobody here wrote those for a client to read, and they are exactly as unpredictable as
- * a throwable - so they are treated as one: generic -32603, trace id on the wire, the
- * whole thing in the private log.
+ * Every WP_Error this plugin constructs carries a code beginning `wpmcp_`. That is a
+ * sentence the tool's author wrote for the caller - "No post with that ID", "That file is
+ * on the denylist" - and it belongs on the wire as an MCP tool error: `isError: true` with
+ * the message as text, which is what an agent needs in order to do something else instead
+ * of retrying.
  *
- * The allow-list is the prefix, which means a tool added through the `wpmcp_tools` filter
- * gets the safe treatment by default and has to opt in to speaking to the client.
+ * A code on wpmcp_relayable_core_error_codes() is core's, but it describes the caller's own
+ * mistake in words the caller can act on, so its message is relayed the same way. See that
+ * function for why each one is there.
+ *
+ * ANYTHING ELSE came out of WordPress and was not written for a client: wpdb's last_error
+ * with the SQL in the error DATA, wp_insert_post's, wp_handle_upload's, an HTTP API failure
+ * naming an internal host. Those are exactly as unpredictable as a throwable, so they are
+ * treated as one: generic -32603, trace id on the wire, the whole thing - data included -
+ * in the private log.
+ *
+ * The default is the safe one, which means a tool added through the `wpmcp_tools` filter has
+ * to opt in to speaking to the client rather than opt out of leaking.
  */
 function wpmcp_tool_error_response($id, $error, $method, $tool) {
-    if (strpos((string) $error->get_error_code(), 'wpmcp_') === 0) {
+    $code = (string) $error->get_error_code();
+
+    if (strpos($code, 'wpmcp_') === 0
+        || in_array($code, wpmcp_relayable_core_error_codes(), true)) {
         return wpmcp_rpc_ok($id, wpmcp_tool_result('Error: ' . $error->get_error_message(), true));
     }
 

@@ -117,20 +117,10 @@ function wpmcp_render_admin() {
       <?php endif; ?>
 
       <?php
-      // The trace log carries stack traces, file paths and SQL. trace.php asks this host
-      // over HTTP whether it serves that file; this is what a "yes" looks like. Not
-      // dismissible, because dismissing it would not fix it.
-      if (function_exists('wpmcp_trace_log_is_exposed') && wpmcp_trace_log_is_exposed()): ?>
-        <div class="notice notice-error">
-          <p><strong>The trace log is readable from the web &mdash; nginx ignores
-             <code>.htaccess</code>.</strong></p>
-          <p>This plugin fetched <code><?php echo esc_html(wpmcp_trace_url()); ?></code>
-             over HTTP and got <code>200</code>. That file holds stack traces, absolute
-             file paths and, when a database call fails, SQL. Deny
-             <code>/wp-content/wpmcp/</code> in your server config. In nginx:</p>
-          <p><code>location ^~ /wp-content/wpmcp/ { deny all; }</code></p>
-        </div>
-      <?php endif; ?>
+      // The two trace-log warnings are NOT rendered here. They are on `admin_notices`
+      // site-wide (trace.php): an operator who never opens this page is exactly the
+      // operator who needs to be told the log is public.
+      ?>
 
       <?php if ($notice): ?><div class="notice notice-info is-dismissible"><p><?php echo esc_html($notice); ?></p></div><?php endif; ?>
 
