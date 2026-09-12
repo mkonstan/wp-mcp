@@ -10,6 +10,7 @@
  * Speaks minimal MCP JSON-RPC 2.0: initialize, notifications/initialized,
  * tools/list, tools/call, ping. Single JSON response per request (no SSE).
  * Auth: the token is validated per request (expiry + TOFU IP).
+ * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
  */
 if (!defined('ABSPATH')) { exit; }
@@ -64,9 +65,22 @@ function wpmcp_authorize(WP_REST_Request $req) {
         $status = ($code === 'ip_mismatch') ? 403 : 401;
         return new WP_Error('wpmcp_' . $code, $row->get_error_message(), array('status' => $status));
     }
+    // Identity: run as the user the token was minted for, so every capability check
+    // inside the tools is that user's. scope still gates write tools on top.
+    //
+    // A user deleted after minting leaves a token pointing at nobody. Running it
+    // anyway would mean running unauthenticated, where current_user_can() is false
+    // for everything - quiet, wrong, and exactly the shape of bug that looks like an
+    // empty result rather than a refusal. Fail closed instead, and reuse the
+    // not_found error so the wire body is the one a bogus token already gets: whether
+    // a token exists is not something an unauthenticated caller gets to learn.
+    $user = get_userdata((int) $row->user_id);
+    if (!$user) {
+        return new WP_Error('wpmcp_not_found', 'Token not found.', array('status' => 401));
+    }
+
     $GLOBALS['wpmcp_session'] = $row;
-    // Run as the minting admin so tool capability checks behave; scope still gates.
-    if ($row->created_by) { wp_set_current_user((int) $row->created_by); }
+    wp_set_current_user($user->ID);
     return true;
 }
 

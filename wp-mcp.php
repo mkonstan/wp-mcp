@@ -19,6 +19,9 @@
  *  - Hard expiry, capped at 12h. Enforced on every request (not by cron).
  *  - TOFU IP pinning: token locks on the first tool call, then all requests enforce it.
  *  - Scope: 'read' (default) or 'admin'. Read tokens are refused write tools.
+ *  - Identity: every token is bound to a real WordPress user chosen at mint time.
+ *    Requests run as that user, so WordPress capabilities bound reach and scope
+ *    narrows on top. Delete the user and the token stops working.
  *  - The endpoint is dormant when no live token exists.
  *  - Token travels in the URL path or an Authorization: Bearer header.
  */
@@ -29,11 +32,48 @@ define('WPMCP_VER', '0.3.5');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS); // 43200s hard cap
 
+// Token-table schema revision. Bump it whenever the CREATE TABLE below changes:
+// wpmcp_maybe_upgrade() compares it against the wpmcp_db_ver option on every load and
+// re-runs dbDelta plus the data migrations. The activation hook alone is not enough -
+// it fires on activate, which never happens to a plugin that is updated in place.
+//   1 = 0.3.5 and earlier: no user_id column, requests ran as the minting admin
+//   2 = user-bound tokens: user_id column, backfilled from created_by
+define('WPMCP_DB_VER', 2);
+define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
+
 /* ============================================================
- * Activation: create the tokens table
+ * Activation / upgrade: create the tokens table, migrate data
  * ========================================================== */
 register_activation_hook(__FILE__, 'wpmcp_activate');
 function wpmcp_activate() {
+    wpmcp_install();
+
+    if (!wp_next_scheduled('wpmcp_flush_expired')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
+    }
+}
+
+/**
+ * Run the installer whenever the recorded schema revision is behind the code's.
+ * Hooked on plugins_loaded rather than admin_init because an MCP call is a REST
+ * request: it can easily be the first thing that touches the site after an update,
+ * and it must not run against a table that is missing user_id.
+ */
+add_action('plugins_loaded', 'wpmcp_maybe_upgrade');
+function wpmcp_maybe_upgrade() {
+    if ((int) get_option(WPMCP_DB_VER_OPTION, 1) >= WPMCP_DB_VER) { return; }
+    wpmcp_install();
+}
+
+/**
+ * Create or upgrade the tokens table, run the data migrations, record the revision.
+ * Idempotent, so activation and upgrade can both call it.
+ *
+ * user_id is the identity a token runs as. created_by is who minted it and is kept
+ * for audit only: the two are equal for a token minted for oneself and differ when an
+ * admin mints one for somebody else.
+ */
+function wpmcp_install() {
     global $wpdb;
     $table   = $wpdb->prefix . WPMCP_TABLE;
     $charset = $wpdb->get_charset_collate();
@@ -50,6 +90,7 @@ function wpmcp_activate() {
   last_used_at datetime DEFAULT NULL,
   use_count bigint(20) unsigned NOT NULL DEFAULT 0,
   created_by bigint(20) unsigned NOT NULL DEFAULT 0,
+  user_id bigint(20) unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY  (id),
   UNIQUE KEY token_hash (token_hash),
   KEY expires_at (expires_at)
@@ -58,9 +99,24 @@ function wpmcp_activate() {
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
 
-    if (!wp_next_scheduled('wpmcp_flush_expired')) {
-        wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
-    }
+    wpmcp_migrate_token_user_ids();
+
+    update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
+}
+
+/**
+ * One-time backfill for tokens minted before identity existed. Those ran as the
+ * minting admin, so created_by *is* their effective identity - copying it forward is
+ * what keeps an already-issued token working exactly as it did before the upgrade.
+ * Rows that already carry a user_id are untouched, which is what makes re-running
+ * this safe (dbDelta and this migration run together, more than once in a site's life).
+ *
+ * Returns the number of rows changed, or false if the query failed.
+ */
+function wpmcp_migrate_token_user_ids() {
+    global $wpdb;
+    $table = wpmcp_table();
+    return $wpdb->query("UPDATE $table SET user_id = created_by WHERE user_id = 0");
 }
 
 register_deactivation_hook(__FILE__, function () {
@@ -94,13 +150,24 @@ function wpmcp_client_ip() {
 /**
  * Mint a token. Returns array('raw'=>..., 'id'=>...) or WP_Error.
  * $ttl is clamped to [60s, 12h].
+ *
+ * $user_id is the WordPress user the token authenticates as. 0 means the current
+ * user, which is both the historical behaviour and the right default for an admin
+ * minting for themselves. The user must exist: a token bound to nobody would run as
+ * nobody, every capability check inside the tools would fail, and the failure would
+ * surface as a confusing empty result instead of a refusal. Refuse at mint instead.
  */
-function wpmcp_mint($scope, $label, $ttl) {
+function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
     global $wpdb;
-    $scope = ($scope === 'admin') ? 'admin' : 'read';
-    $ttl   = max(60, min(WPMCP_MAX_TTL, (int) $ttl));
-    $raw   = bin2hex(random_bytes(32)); // 256-bit
-    $now   = current_time('mysql', true); // UTC
+    $scope   = ($scope === 'admin') ? 'admin' : 'read';
+    $ttl     = max(60, min(WPMCP_MAX_TTL, (int) $ttl));
+    $user_id = (int) $user_id;
+    if ($user_id === 0) { $user_id = (int) get_current_user_id(); }
+    if (!get_userdata($user_id)) {
+        return new WP_Error('wpmcp_no_such_user', 'No WordPress user with ID ' . $user_id . '.');
+    }
+    $raw = bin2hex(random_bytes(32)); // 256-bit
+    $now = current_time('mysql', true); // UTC
 
     $ok = $wpdb->insert(wpmcp_table(), array(
         'token_hash' => wpmcp_hash($raw),
@@ -110,8 +177,9 @@ function wpmcp_mint($scope, $label, $ttl) {
         'expires_at' => gmdate('Y-m-d H:i:s', time() + $ttl),
         'bound_ip'   => null,
         'use_count'  => 0,
-        'created_by' => get_current_user_id(),
-    ), array('%s','%s','%s','%s','%s','%s','%d','%d'));
+        'created_by' => (int) get_current_user_id(),
+        'user_id'    => $user_id,
+    ), array('%s','%s','%s','%s','%s','%s','%d','%d','%d'));
 
     if (!$ok) { return new WP_Error('wpmcp_insert_failed', 'Could not store token.'); }
     return array('raw' => $raw, 'id' => (int) $wpdb->insert_id);

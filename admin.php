@@ -23,16 +23,20 @@ function wpmcp_render_admin() {
         $label = isset($_POST['label']) ? wp_unslash($_POST['label']) : '';
         $hours = isset($_POST['hours']) ? (float) $_POST['hours'] : 12;
         $ttl   = (int) round(min(12, max(0.0167, $hours)) * HOUR_IN_SECONDS); // up to 12h
-        $res   = wpmcp_mint($scope, $label, $ttl);
+        // 0 -> the minting admin. wpmcp_mint() rejects an ID with no user behind it.
+        $owner = isset($_POST['wpmcp_user_id']) ? (int) $_POST['wpmcp_user_id'] : 0;
+        $res   = wpmcp_mint($scope, $label, $ttl, $owner);
         if (is_wp_error($res)) {
             $notice = 'Error: ' . esc_html($res->get_error_message());
         } else {
+            $owner_user = get_userdata($owner ? $owner : get_current_user_id());
             $minted = array(
                 'url'     => rest_url('wpmcp/mcp/' . $res['raw']),
                 'base'    => rest_url('wpmcp/mcp'),
                 'raw'     => $res['raw'],
                 'scope'   => $scope,
                 'hours'   => $hours,
+                'owner'   => $owner_user ? $owner_user->user_login : '',
             );
         }
     }
@@ -80,6 +84,19 @@ function wpmcp_render_admin() {
             </td>
           </tr>
           <tr>
+            <th scope="row"><label for="wpmcp-user-id">Runs as</label></th>
+            <td>
+              <?php wp_dropdown_users(array(
+                  'name'     => 'wpmcp_user_id',
+                  'id'       => 'wpmcp-user-id',
+                  'selected' => get_current_user_id(),
+              )); ?>
+              <p class="description">The token authenticates as this WordPress user. Its
+                 capabilities are the ceiling on what the token can see or do - scope only
+                 narrows further. Defaults to you.</p>
+            </td>
+          </tr>
+          <tr>
             <th scope="row"><label for="wpmcp-label">Label</label></th>
             <td><input name="label" id="wpmcp-label" type="text" class="regular-text" placeholder="e.g. claude code"></td>
           </tr>
@@ -99,7 +116,8 @@ function wpmcp_render_admin() {
             <input type="text" id="wpmcp-newtok" readonly style="flex:1;font-family:monospace" value="<?php echo esc_attr($minted['url']); ?>" onclick="this.select()">
             <button type="button" class="button button-primary" onclick="var i=document.getElementById('wpmcp-newtok');i.focus();i.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}if(navigator.clipboard){navigator.clipboard.writeText(i.value).catch(function(){});}var b=this,t=b.textContent;b.textContent=ok?'Copied':'Select + Ctrl C';setTimeout(function(){b.textContent=t;},1500);">Copy</button>
           </p>
-          <p>Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
+          <p>Runs as: <strong><?php echo esc_html($minted['owner']); ?></strong> &middot;
+             Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
              Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong> &middot;
              It binds to the IP of the first tool call; once bound, every request must match.</p>
           <p style="margin-top:10px"><strong>Header style</strong> (recommended; keeps the token out of server logs):</p>
@@ -111,16 +129,22 @@ function wpmcp_render_admin() {
       <h2>Active &amp; recent tokens</h2>
       <table class="widefat striped">
         <thead><tr>
-          <th>Label</th><th>Scope</th><th>Created (UTC)</th><th>Expires (UTC)</th>
+          <th>Label</th><th>Owner</th><th>Scope</th><th>Created (UTC)</th><th>Expires (UTC)</th>
           <th>Bound IP</th><th>Last used</th><th>Uses</th><th></th>
         </tr></thead>
         <tbody>
         <?php if (!$rows): ?>
-          <tr><td colspan="8"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
+          <tr><td colspan="9"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
         <?php else: foreach ($rows as $r):
-            $expired = strtotime($r->expires_at . ' UTC') <= time(); ?>
+            $expired = strtotime($r->expires_at . ' UTC') <= time();
+            // A deleted user leaves the id behind; say so rather than printing a bare
+            // number, because such a token is dead and the admin needs to know why.
+            $owner = get_userdata((int) $r->user_id); ?>
           <tr<?php echo $expired ? ' style="opacity:.5"' : ''; ?>>
             <td><?php echo esc_html($r->label); ?></td>
+            <td><?php echo $owner
+                ? esc_html($owner->user_login)
+                : '<em>' . esc_html('deleted user #' . (int) $r->user_id) . '</em>'; ?></td>
             <td><?php echo esc_html($r->scope); ?></td>
             <td><?php echo esc_html($r->created_at); ?></td>
             <td><?php echo esc_html($r->expires_at) . ($expired ? ' (expired)' : ''); ?></td>
