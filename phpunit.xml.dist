@@ -63,6 +63,8 @@
             <file>endpoint.php</file>
             <file>tools.php</file>
             <file>admin.php</file>
+            <!-- The src/ tree the four flat files are being split into, sprint by sprint. -->
+            <directory suffix=".php">src</directory>
         </include>
     </source>
 </phpunit>

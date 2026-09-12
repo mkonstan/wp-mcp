@@ -9,6 +9,10 @@
  *   POST /wp-json/wpmcp/mcp           (token in Authorization: Bearer header)
  * Speaks minimal MCP JSON-RPC 2.0: initialize, notifications/initialized,
  * tools/list, tools/call, ping. Single JSON response per request (no SSE).
+ * Handshake: `initialize` echoes a supported protocolVersion and otherwise answers with
+ *   the newest one - never an error. Capabilities are `tools` and nothing else, because
+ *   tools are all this server serves. STATELESS: no Mcp-Session-Id is ever issued, and
+ *   one sent by a client is ignored. See wpmcp_protocol_version_gate().
  * Transport: HTTPS required, Origin checked against the site's own, POST must be
  *   application/json. All three before the token is read - see wpmcp_authorize(),
  *   whose docblock states the full order of the gates.
@@ -22,6 +26,8 @@
  *   is one generic -32603 carrying a trace id; the throwable goes to trace.php's log.
  */
 if (!defined('ABSPATH')) { exit; }
+
+use WpMcp\ProtocolVersion;
 
 /* Holds the validated token row between permission_callback and the handler. */
 $GLOBALS['wpmcp_session'] = null;
@@ -285,6 +291,7 @@ function wpmcp_unauthorized() {
  *   8. IP pin           bound_ip set and different                 -> 401
  *      ... then the pin is CREATED here, for a tools/call on an unbound token
  *   9. scope            enforced at dispatch, in wpmcp_handle()
+ *  10. protocol version enforced at dispatch, in wpmcp_dispatch()
  *
  * WHY THIS ORDER. 1-3 are properties of the envelope and cost nothing, so they run
  * before the credential is even read: a request refused for being plaintext must not
@@ -317,11 +324,20 @@ function wpmcp_unauthorized() {
  * this is a tools/call, so wpmcp_request_method() used to json_decode() the body at the
  * TOP of the callback, on every request, valid token or not. It now runs after gate 8.
  *
- * 9 IS THE ONE GATE NOT IN THIS FUNCTION, and deliberately. The scope decision needs
- * the tool name, which only exists once the body is parsed, and its refusal is an MCP
- * tool error (200 with isError) rather than an HTTP status, because a read token
- * calling a write tool is a correctly authenticated request asking for something it
- * may not have. It fires the scope_deny event from wpmcp_handle().
+ * 9 AND 10 ARE THE GATES NOT IN THIS FUNCTION, and deliberately - both need the parsed
+ * body, so neither can run here without reading it, which is the thing this ordering was
+ * rearranged to avoid.
+ *
+ * 9, scope: the decision needs the tool name, which only exists once the body is parsed,
+ * and its refusal is an MCP tool error (200 with isError) rather than an HTTP status,
+ * because a read token calling a write tool is a correctly authenticated request asking
+ * for something it may not have. It fires the scope_deny event from wpmcp_handle().
+ *
+ * 10, MCP-Protocol-Version: the gate needs to know whether the method is `initialize`,
+ * which is exempt, and its refusal is a JSON-RPC -32600 body on HTTP 400 - a shape this
+ * function cannot produce at all, since a permission_callback's WP_Error becomes WP's own
+ * `{"code","message","data"}` REST error and never a JSON-RPC envelope. That is what
+ * decided the placement rather than taste. See wpmcp_protocol_version_gate().
  *
  * Returns true, or a WP_Error - which also makes the endpoint effectively dormant when
  * no valid token exists.
@@ -535,6 +551,103 @@ function wpmcp_tools() {
     return $kept;
 }
 
+/* ---------------- the handshake ---------------- */
+
+/** Every revision this server speaks, newest first. The wire form, for a message. */
+function wpmcp_supported_protocol_versions() {
+    return array_map(
+        static function (ProtocolVersion $v) { return $v->value; },
+        ProtocolVersion::cases()
+    );
+}
+
+/**
+ * What `initialize` answers with, given the client's `params.protocolVersion`.
+ *
+ * A VERSION WE DO NOT KNOW IS NOT AN ERROR. The client asked for `2099-01-01`; the
+ * correct answer is "I speak 2025-11-25", sent as a SUCCESS, and the client then decides
+ * whether it can work with that - MCP's basic lifecycle says so, and it is also the only
+ * behaviour that does not break the day a newer client appears. An error here would turn
+ * every future client into a hard failure against every installed copy of this plugin.
+ *
+ * An ABSENT protocolVersion is the same case: nothing to echo, so we state ours.
+ */
+function wpmcp_negotiated_protocol_version($params) {
+    $asked = isset($params['protocolVersion']) && is_scalar($params['protocolVersion'])
+        ? (string) $params['protocolVersion']
+        : null;
+
+    $matched = ProtocolVersion::tryFromString($asked);
+
+    return ($matched ?? ProtocolVersion::latest())->value;
+}
+
+/**
+ * What this server tells a client it is, once, at the handshake.
+ *
+ * THREE FACTS, AND THEY ARE THE THREE THAT CHANGE WHAT AN AGENT DOES. Not a feature
+ * list: an agent that knows its reach is one WordPress user's stops treating a refusal as
+ * a bug to retry, and an agent that knows write tools need a different token stops
+ * looking for the write tool it cannot see. Everything else it can learn from tools/list.
+ */
+function wpmcp_server_instructions() {
+    return 'This is a WordPress site exposed as MCP tools: posts, pages, taxonomies,'
+        . ' media and comments, plus (when the operator enables it) files in the active'
+        . " theme.\n"
+        . 'Every tool runs as the WordPress user this token was minted for, so that'
+        . " user's own capabilities are the ceiling on what you can see or change. A"
+        . " refusal is usually that ceiling, not a malformed call.\n"
+        . 'Tools that write - create, update, delete, upload - need an admin-scope token.'
+        . ' With a read-scope token they are not listed at all, so the tool list you get'
+        . ' is already what this token may do.';
+}
+
+/**
+ * The `MCP-Protocol-Version` REQUEST header, checked on everything but `initialize`.
+ *
+ * Returns null when the request may proceed, or the 400 to send instead.
+ *
+ * ABSENT IS ACCEPTED, and specifically means `2025-03-26`: that revision predates the
+ * header, so a request without one is by definition from a client that old - the MCP
+ * transport spec states exactly this fallback. Since all three supported revisions behave
+ * identically across everything this server serves, the assumption costs nothing and it
+ * is what keeps an older client working. It is NOT treated as "unspecified, refuse".
+ *
+ * PRESENT AND UNKNOWN IS HTTP 400, and the body names every version we speak so the
+ * client's next attempt can be right rather than another guess. -32600 Invalid Request,
+ * because the envelope is wrong rather than the method or the params - no sixth code.
+ *
+ * THIS IS THE ONE ERROR ON A NON-200 STATUS, and that is deliberate: a protocol-version
+ * mismatch is a transport-layer fact about the whole request, which the MCP spec puts at
+ * the HTTP layer, and a client that cannot parse our JSON-RPC - plausible, since it is
+ * speaking a revision we do not know - must still be able to see the refusal.
+ *
+ * `initialize` IS EXEMPT BY THE SPEC, and has to be: the header cannot carry a negotiated
+ * version before negotiation has happened. The version in that request's *params* is the
+ * one that matters, and wpmcp_negotiated_protocol_version() never refuses it.
+ */
+function wpmcp_protocol_version_gate(WP_REST_Request $req, $id, $method) {
+    if ($method === 'initialize') { return null; }
+
+    $header = (string) $req->get_header('mcp-protocol-version');
+
+    if ($header === '' || ProtocolVersion::isSupported($header)) { return null; }
+
+    // The rejected value is echoed so a client can see WHICH of its headers was wrong,
+    // and truncated because it is an attacker-controlled request header: without this, a
+    // 100 KB MCP-Protocol-Version would come straight back out as a 100 KB error message.
+    $seen = strlen($header) > 32 ? substr($header, 0, 32) . '...' : $header;
+
+    return wpmcp_rpc_err(
+        $id,
+        -32600,
+        'Unsupported MCP-Protocol-Version: ' . $seen . '. This server speaks '
+            . implode(', ', wpmcp_supported_protocol_versions()) . '.',
+        null,
+        400
+    );
+}
+
 /* ---------------- JSON-RPC dispatch ---------------- */
 
 /**
@@ -546,8 +659,11 @@ function wpmcp_tools() {
  *   -32700  Parse error      the body is valid JSON but not a JSON object, so it cannot
  *                            be a request and cannot carry an id. (Genuinely broken JSON
  *                            never reaches us: core answers it 400 rest_invalid_json.)
- *   -32600  Invalid Request  a JSON array body - a batch, which this endpoint does not
- *                            support. id: null.
+ *   -32600  Invalid Request  the envelope is wrong. Two cases, and only two: a JSON array
+ *                            body - a batch, which this endpoint does not support, id null
+ *                            - and an `MCP-Protocol-Version` header naming a revision this
+ *                            server does not speak, which is the one error sent on HTTP
+ *                            400 rather than 200 (see wpmcp_protocol_version_gate()).
  *   -32601  Method not found an unknown JSON-RPC method, `notifications/anything`
  *                            included once it carries an id.
  *   -32602  Invalid params   an unknown tool name on tools/call.
@@ -580,7 +696,7 @@ function wpmcp_handle(WP_REST_Request $req) {
     }
 
     try {
-        return wpmcp_dispatch($raw, $body, $id, $method);
+        return wpmcp_dispatch($req, $raw, $body, $id, $method);
     } catch (\Throwable $e) {
         // Nothing from $e reaches the wire. The trace id is the only thing that crosses.
         return wpmcp_rpc_err($id, -32603, 'Internal error', array(
@@ -605,12 +721,18 @@ function wpmcp_handle(WP_REST_Request $req) {
  * empty body - whatever else is wrong with the body, because there is no id to answer to.
  * JSON-RPC 2.0 section 4.1: a server MUST NOT reply to a notification.
  *
+ * THE PROTOCOL-VERSION HEADER IS CHECKED AFTER THE NOTIFICATION TEST, not before, so a
+ * notification carrying a bad header is still answered with silence. The two rules would
+ * otherwise contradict each other, and "MUST NOT reply" is the stronger one: a client that
+ * sent no id cannot read a 400 anyway.
+ *
+ * @param WP_REST_Request $req    the request, for the MCP-Protocol-Version header.
  * @param string     $raw    the request body as sent.
  * @param mixed      $body   json_decode($raw, true).
  * @param mixed      $id     the request id, or null when there is none.
  * @param string     $method the JSON-RPC method, or ''.
  */
-function wpmcp_dispatch($raw, $body, $id, $method) {
+function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
     // A JSON array body: a batch. One refusal, named, so a client stops guessing.
     if (substr(ltrim($raw), 0, 1) === '[') {
         return wpmcp_rpc_err(null, -32600, 'Batch requests are not supported');
@@ -627,15 +749,28 @@ function wpmcp_dispatch($raw, $body, $id, $method) {
         return new WP_REST_Response(null, 202);
     }
 
+    // Gate 10: the negotiated revision, on everything but the negotiation itself.
+    $refusal = wpmcp_protocol_version_gate($req, $id, $method);
+    if ($refusal !== null) { return $refusal; }
+
     $params = isset($body['params']) && is_array($body['params']) ? $body['params'] : array();
 
     switch ($method) {
         case 'initialize':
-            $pv = isset($params['protocolVersion']) ? (string) $params['protocolVersion'] : '2025-06-18';
+            // CAPABILITIES ARE DERIVED FROM WHAT IS SERVED, not copied from the spec's
+            // example. `tools` and nothing else: no `prompts`, no `resources`, no
+            // `logging`, and no `listChanged` inside `tools` - this server has no way to
+            // tell a client the tool list changed, so claiming the capability would be a
+            // lie a client could wait on.
+            //
+            // new stdClass() AND NOT array(): wp_json_encode() turns an empty PHP array
+            // into `[]`, and `"tools": []` is not an object - a strict client rejects the
+            // whole initialize result. An empty object has to be asked for explicitly.
             return wpmcp_rpc_ok($id, array(
-                'protocolVersion' => $pv,
+                'protocolVersion' => wpmcp_negotiated_protocol_version($params),
                 'capabilities'    => array('tools' => new stdClass()),
-                'serverInfo'      => array('name' => 'WP MCP', 'version' => WPMCP_VER),
+                'serverInfo'      => array('name' => 'wp-mcp', 'version' => WPMCP_VER),
+                'instructions'    => wpmcp_server_instructions(),
             ));
 
         case 'ping':
@@ -765,11 +900,17 @@ function wpmcp_rpc_ok($id, $result) {
  *
  * $data is the optional `error.data` member - used for exactly one thing, the trace id on
  * a -32603, and nothing else ever goes in it.
+ *
+ * $status IS 200 FOR EVERY JSON-RPC ERROR BUT ONE. A JSON-RPC error is a successful HTTP
+ * exchange carrying an application-level failure, and a client that reads the status
+ * instead of the body must not be told the transport broke. The exception is the
+ * MCP-Protocol-Version refusal, which is a fact about the HTTP request rather than about
+ * the JSON-RPC inside it - see wpmcp_protocol_version_gate().
  */
-function wpmcp_rpc_err($id, $code, $message, $data = null) {
+function wpmcp_rpc_err($id, $code, $message, $data = null, $status = 200) {
     $error = array('code' => $code, 'message' => $message);
 
     if ($data !== null) { $error['data'] = $data; }
 
-    return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'error' => $error), 200);
+    return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'error' => $error), (int) $status);
 }

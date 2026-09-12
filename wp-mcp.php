@@ -564,6 +564,36 @@ function wpmcp_flush_expired_cb() {
     $wpdb->query('DELETE FROM ' . wpmcp_table() . ' WHERE expires_at <= UTC_TIMESTAMP()');
 }
 
+/**
+ * The class loader for `src/`. Namespace `WpMcp\` -> `src/`, one class per file.
+ *
+ * HAND-ROLLED, BECAUSE THERE IS NO COMPOSER AT RUNTIME. This plugin ships as plain PHP
+ * with no vendor directory (composer.json is dev-only), so the four flat files are
+ * gaining a `src/` tree one sprint at a time and this is what finds it. Nine lines is
+ * the whole cost.
+ *
+ * IT RETURNS SILENTLY WHEN THE FILE IS NOT THERE, which is not laziness - it is the
+ * contract spl_autoload_register imposes. Several autoloaders are registered in any
+ * WordPress process, and the test harness registers Composer's `WpMcp\Tests\` loader
+ * too; a loader that fataled on a class it does not own would break every one of them.
+ * A missing class surfaces as PHP's own "Class not found", naming the class.
+ *
+ * THE NAME IS CHECKED BEFORE IT BECOMES A PATH. $class arrives from whoever wrote the
+ * `new`, which on a site with other plugins is not necessarily us, and it reaches a
+ * require(). The character allow-list means no `..`, no separator but the namespace one,
+ * nothing that could climb out of src/.
+ */
+spl_autoload_register(function ($class) {
+    $prefix = 'WpMcp\\';
+    if (strpos($class, $prefix) !== 0) { return; }
+
+    $relative = substr($class, strlen($prefix));
+    if ($relative === '' || !preg_match('#^[A-Za-z0-9_]+(\\\\[A-Za-z0-9_]+)*$#', $relative)) { return; }
+
+    $path = plugin_dir_path(__FILE__) . 'src/' . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($path)) { require $path; }
+});
+
 function wpmcp_bootstrap() {
     // trace.php first: the activation hook above and endpoint.php both call into it.
     require_once plugin_dir_path(__FILE__) . 'trace.php';
