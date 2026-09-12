@@ -214,10 +214,19 @@ function wpmcp_unauthorized() {
  * "is it this token, still alive, from the right place", cheapest first and each one a
  * precondition of the next. 6 precedes 7 so a dead token's row is not even touched.
  *
- * NOTHING READS THE REQUEST BODY BEFORE 8. The TOFU pin needs to know whether this is
- * a tools/call, which means parsing JSON an unauthenticated caller supplied - so the
- * parse moved BELOW the credential check. Before this it happened first, on every
- * request, valid token or not.
+ * THIS PLUGIN READS NO PART OF THE REQUEST BODY BEFORE 8 - but WordPress does, and the
+ * earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
+ * `$request->has_valid_params()`, which calls `parse_json_params()` for any
+ * application/json body, and only then does `respond_to_request()` reach the
+ * permission_callback. So a malformed body is answered by core with 400
+ * `rest_invalid_json` before gate 1 runs at all: no auth event fires for it, and the
+ * JSON is decoded before the caller is authenticated (its size is Sprint 3's business).
+ * That refusal leaks nothing about the token - core never looks at one - but it is not
+ * this function's refusal and it is not in this order.
+ *
+ * What this function changed is the plugin's own read: the TOFU pin needs to know whether
+ * this is a tools/call, so wpmcp_request_method() used to json_decode() the body at the
+ * TOP of the callback, on every request, valid token or not. It now runs after gate 8.
  *
  * 9 IS THE ONE GATE NOT IN THIS FUNCTION, and deliberately. The scope decision needs
  * the tool name, which only exists once the body is parsed, and its refusal is an MCP
@@ -239,17 +248,27 @@ function wpmcp_unauthorized() {
  * Without the memo that second call would re-run wpmcp_validate(), which means the
  * use_count of every token would advance by two per request and last_used_at would be
  * written twice - a pre-existing inaccuracy in the admin table, not something this
- * sprint introduced - and every auth event would be a duplicate. Keyed on the request
- * object, so the memo cannot leak between two logically different authorizations.
+ * sprint introduced - and every auth event would be a duplicate.
+ *
+ * A WeakMap KEYED ON THE REQUEST OBJECT, not spl_object_id(). PHP reuses object ids as
+ * soon as an object is freed - `$a = new stdClass; unset($a); $b = new stdClass;` gives
+ * $b the id $a had - so an id-keyed memo is only safe while exactly one request object
+ * is alive, which is true under PHP-FPM and not true under a worker SAPI (FrankenPHP
+ * worker mode, Swoole, RoadRunner all run WordPress) or an in-process sequence of
+ * rest_do_request() calls. There a freed request's id could be reissued to a new
+ * request, which would then inherit the previous decision - including `true`, with
+ * $GLOBALS['wpmcp_session'] still holding the previous token's row. A WeakMap holds the
+ * object itself, drops the entry when the object is collected, and cannot confuse two
+ * requests. PHP 8.0+; this plugin requires 8.1.
  */
 function wpmcp_authorize(WP_REST_Request $req) {
-    static $decided = array();
+    static $decided = null;
 
-    $memo = spl_object_id($req);
-    if (array_key_exists($memo, $decided)) { return $decided[$memo]; }
+    if ($decided === null) { $decided = new WeakMap(); }
+    if (isset($decided[$req])) { return $decided[$req]; }
 
-    $decision        = wpmcp_authorize_now($req);
-    $decided[$memo]  = $decision;
+    $decision      = wpmcp_authorize_now($req);
+    $decided[$req] = $decision;
 
     return $decision;
 }
@@ -330,14 +349,29 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  * dropped and why. The author of that tool finds out from the log rather than from an
  * incident.
  *
- * `run` is checked for the same reason in a smaller key: call_user_func on a
- * non-callable is a TypeError, which is a 500 carrying a stack trace, and Sprint 3's
- * disclosure boundary is not here yet.
+ * Three more shapes are refused for smaller but concrete reasons:
+ *
+ *   run_not_callable      call_user_func on a non-callable is a TypeError, which is a
+ *                         500 carrying filesystem paths, and Sprint 3's disclosure
+ *                         boundary does not exist yet.
+ *   description_not_string / schema_not_array
+ *                         tools/list reads $t['description'] and $t['inputSchema']
+ *                         directly, so a missing one is a PHP warning plus a null on
+ *                         the wire - a malformed MCP listing for every client, caused
+ *                         by one third-party entry.
+ *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
+ *                         wins and the filter entry is dropped. A same-name entry is
+ *                         how the fail-closed rule gets walked around one level up:
+ *                         `delete-post` re-declared with `write => false` is a write
+ *                         tool published to every read-scope token, and it passes every
+ *                         check above because it declares a boolean. Site code may well
+ *                         mean to extend a tool, but it cannot do it by overwriting the
+ *                         entry whose `write` flag is the gate.
  *
  * The built-in tools all carry `'write' => true|false` explicitly - 20 of them, one
- * per entry - so this check applies uniformly rather than trusting "ours" over
- * "theirs". If a future built-in forgets the key it disappears from the listing and
- * the log says so, which is the loud failure.
+ * per entry - so the checks apply uniformly rather than trusting "ours" over "theirs".
+ * If a future built-in forgets the key it disappears from the listing and the log says
+ * so, which is the loud failure.
  */
 function wpmcp_tools() {
     $tools = array();
@@ -349,11 +383,26 @@ function wpmcp_tools() {
         $tools = array_merge($tools, wpmcp_code_tools());
     }
 
+    // What the plugin itself registered, to compare the filter's output against.
+    $builtin = $tools;
+
     $tools = apply_filters('wpmcp_tools', $tools);
     $kept  = array();
 
     foreach ((array) $tools as $name => $tool) {
         $reason = '';
+
+        // An entry the filter left ALONE is identical to the built-in - same array,
+        // same closure instances - so identity is what tells "untouched" from
+        // "replaced". Anything else under a built-in's name is the filter's, and loses.
+        if (array_key_exists($name, $builtin) && $tool !== $builtin[$name]) {
+            wpmcp_auth_event('registry_reject', array(
+                'tool'   => (string) $name,
+                'reason' => 'name_reserved',
+            ));
+            $kept[$name] = $builtin[$name];
+            continue;
+        }
 
         if (!is_array($tool)) {
             $reason = 'not_an_array';
@@ -363,6 +412,10 @@ function wpmcp_tools() {
             $reason = 'write_not_boolean';
         } elseif (!isset($tool['run']) || !is_callable($tool['run'])) {
             $reason = 'run_not_callable';
+        } elseif (!isset($tool['description']) || !is_string($tool['description'])) {
+            $reason = 'description_not_string';
+        } elseif (!isset($tool['inputSchema']) || !is_array($tool['inputSchema'])) {
+            $reason = 'schema_not_array';
         }
 
         if ($reason !== '') {
