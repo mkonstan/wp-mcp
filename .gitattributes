@@ -1,1 +1,4 @@
 * text=auto
+
+# Shell scripts must keep LF, or bash chokes on the CR (Git Bash locally, CI on Linux).
+*.sh text eol=lf
