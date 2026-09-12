@@ -204,6 +204,95 @@ final class AuthEventTest extends TestCase
     }
 
     /**
+     * Redaction goes all the way down, not just the top level.
+     *
+     * The plugin's own contexts are flat, so nothing leaked. But a site that adds its
+     * own listener and passes a nested array - `['request' => ['authorization' => …]]` -
+     * had it written out verbatim, because the formatter json_encoded a nested value
+     * without looking inside it.
+     *
+     * @group sprint-2
+     */
+    public function testRedactionRecursesIntoNestedArrays(): void
+    {
+        $line = \wpmcp_format_auth_event('validate_fail', [
+            'request' => [
+                'headers' => ['authorization' => 'Bearer THE-SECRET-VALUE'],
+                'method'  => 'tools/call',
+            ],
+        ]);
+
+        self::assertStringNotContainsString(
+            'THE-SECRET-VALUE',
+            $line,
+            'A redacted key nested two levels down reached the log with its value.'
+        );
+        self::assertStringContainsString('[redacted]', $line);
+        self::assertStringContainsString(
+            'tools',
+            $line,
+            'Recursion ate the keys that are not on the list.'
+        );
+    }
+
+    /**
+     * Every logged value is bounded.
+     *
+     * `origin`, `content_type` and `tool` are attacker-controlled - two request headers
+     * and params.name - so without a cap a 100 KB Origin header is a 100 KB log line,
+     * once per request, for free.
+     *
+     * @group sprint-2
+     */
+    public function testLongValuesAreTruncated(): void
+    {
+        $line = \wpmcp_format_auth_event('origin_deny', [
+            'origin' => 'https://' . str_repeat('a', 100000) . '.example',
+        ]);
+
+        self::assertLessThan(
+            400,
+            strlen($line),
+            'A 100 KB Origin header became a 100 KB log line.'
+        );
+        self::assertStringEndsWith('...', $line, 'The truncation is not marked.');
+    }
+
+    /**
+     * A nested structure is bounded too, after redaction rather than before.
+     *
+     * @group sprint-2
+     */
+    public function testALongNestedValueIsTruncated(): void
+    {
+        $line = \wpmcp_format_auth_event('origin_deny', [
+            'detail' => ['note' => str_repeat('b', 100000)],
+        ]);
+
+        self::assertLessThan(600, strlen($line));
+    }
+
+    /**
+     * An empty value is written as "" rather than as nothing.
+     *
+     * `content_type= ip=127.0.0.1` reads, to any key=value parser, as content_type
+     * holding the string "ip=127.0.0.1" - and an absent Content-Type header is the
+     * common case of that event.
+     *
+     * @group sprint-2
+     */
+    public function testAnEmptyValueIsNotAmbiguous(): void
+    {
+        self::assertSame(
+            'wp-mcp auth content_type_deny content_type="" ip=127.0.0.1',
+            \wpmcp_format_auth_event('content_type_deny', [
+                'content_type' => '',
+                'ip'           => '127.0.0.1',
+            ])
+        );
+    }
+
+    /**
      * Case does not get a value past the list, and a key that is NOT on it stays put
      * even when its value is 64 hex digits.
      *

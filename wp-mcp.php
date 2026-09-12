@@ -239,16 +239,59 @@ function wpmcp_auth_event_redacted_keys() {
     return array_values(array_unique(array_merge($fixed, $extra)));
 }
 
+/** Longest a single logged value may be. Past this it is cut and marked with an ellipsis. */
+define('WPMCP_LOG_VALUE_MAX', 200);
+
+/**
+ * Redact by key at EVERY depth, and bound every string.
+ *
+ * Depth matters because a third-party listener's context is not flat. The plugin's own
+ * contexts are - row id, user id, scope, ttl, reason, ip, bound_ip, origin,
+ * content_type, tool - but a site that adds its own listener and passes
+ * `['request' => ['authorization' => ...]]` would have had that written out verbatim,
+ * because the old formatter json_encoded a nested array without looking inside it.
+ *
+ * Bounding matters because three of those keys are ATTACKER-CONTROLLED: `origin` and
+ * `content_type` are request headers, and `tool` in a scope_deny is params.name. A
+ * 100 KB Origin header became a 100 KB log line, once per request, for free.
+ */
+function wpmcp_redact_for_log($value, $depth = 0) {
+    if (is_array($value)) {
+        if ($depth >= 6) { return '[too deep]'; }
+
+        $redact = wpmcp_auth_event_redacted_keys();
+        $out    = array();
+
+        foreach ($value as $key => $inner) {
+            $out[$key] = in_array(strtolower((string) $key), $redact, true)
+                ? '[redacted]'
+                : wpmcp_redact_for_log($inner, $depth + 1);
+        }
+
+        return $out;
+    }
+
+    if (is_string($value) && strlen($value) > WPMCP_LOG_VALUE_MAX) {
+        return substr($value, 0, WPMCP_LOG_VALUE_MAX) . '...';
+    }
+
+    if (is_object($value)) { return '[' . get_class($value) . ']'; }
+
+    return $value;
+}
+
 /**
  * One event as one log line, in a shape a grep or a log shipper can rely on:
  *
  *   wp-mcp auth <type> key=value key=value ...
  *
  * Keys are sorted, so two occurrences of the same event produce the same field order.
- * Newlines are flattened, so one event is always one line.
+ * Newlines are flattened, so one event is always one line. An empty value is written as
+ * "" rather than nothing, because `content_type= ip=127.0.0.1` reads to a key=value
+ * parser as content_type holding "ip=127.0.0.1".
  */
 function wpmcp_format_auth_event($type, $context) {
-    $redact = wpmcp_auth_event_redacted_keys();
+    $redact  = wpmcp_auth_event_redacted_keys();
     $context = (array) $context;
     ksort($context);
     $parts = array();
@@ -261,15 +304,22 @@ function wpmcp_format_auth_event($type, $context) {
             continue;
         }
 
+        $value = wpmcp_redact_for_log($value);
+
         if (is_bool($value)) {
             $value = $value ? 'true' : 'false';
         } elseif ($value === null) {
             $value = 'null';
         } elseif (!is_scalar($value)) {
-            $value = wp_json_encode($value);
+            $value = (string) wp_json_encode($value);
+            if (strlen($value) > WPMCP_LOG_VALUE_MAX) {
+                $value = substr($value, 0, WPMCP_LOG_VALUE_MAX) . '...';
+            }
         }
 
-        $parts[] = $key . '=' . str_replace(array("\r", "\n"), ' ', (string) $value);
+        $value = str_replace(array("\r", "\n"), ' ', (string) $value);
+
+        $parts[] = $key . '=' . ($value === '' ? '""' : $value);
     }
 
     return 'wp-mcp auth ' . (string) $type . ($parts ? ' ' . implode(' ', $parts) : '');

@@ -161,6 +161,18 @@ if (!function_exists('do_action')) {
     }
 }
 
+if (!function_exists('wp_json_encode')) {
+    /**
+     * Core's wrapper adds depth checking and invalid-UTF-8 handling; for the one place
+     * the plugin calls it on a unit path - formatting a non-scalar auth-event value -
+     * json_encode is the same answer.
+     */
+    function wp_json_encode($data, $options = 0, $depth = 512)
+    {
+        return json_encode($data, $options, $depth);
+    }
+}
+
 if (!function_exists('current_time')) {
     function current_time($type, $gmt = false)
     {
