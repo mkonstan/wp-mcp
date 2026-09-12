@@ -217,6 +217,30 @@ function wpmcp_own_listable_statuses($post_type) {
     ));
 }
 
+/**
+ * The refusal every write tool returns when the token's user lacks a capability.
+ *
+ * WHY EVERY WRITE TOOL NEEDS ONE. The low-level WordPress functions these tools call -
+ * wp_insert_post, wp_update_post, wp_delete_post, wp_insert_term, wp_delete_term,
+ * media_handle_sideload, wp_delete_attachment, wp_set_comment_status,
+ * wp_insert_comment - perform NO capability checks. They are the storage layer;
+ * wp-admin and the REST controllers do the checking before calling them. So before
+ * this, an admin-scope token minted with "Runs as: some-subscriber" could publish,
+ * rewrite and delete any post on the site, while the mint form told the operator that
+ * the user's capabilities were the ceiling. They now are.
+ *
+ * Unlike the read tools, a write refusal is explicit rather than disguised as
+ * not-found: the caller already named the thing it wants to change, so there is
+ * nothing left to disclose, and an agent needs to know the difference between "gone"
+ * and "not allowed" to stop retrying.
+ */
+function wpmcp_cannot($what) {
+    return new WP_Error(
+        'forbidden',
+        "This token's user is not allowed to " . $what . '.'
+    );
+}
+
 /** Apply {taxonomy:[id|name,...]} to a post, creating missing terms by name. */
 function wpmcp_apply_terms($post_id, $terms) {
     foreach ((array) $terms as $tax => $vals) {
@@ -415,6 +439,17 @@ function wpmcp_content_tools() {
             if (!wpmcp_post_type_ok($postarr['post_type'])) {
                 return new WP_Error('bad_type', 'Unsupported post_type (use a public content type; attachments use the media tools).');
             }
+            // wp_insert_post checks nothing. create_posts is the cap wp-admin gates
+            // the "Add New" screen on; publishing is a second, separate capability,
+            // which is the whole difference between a Contributor and an Author.
+            $pto = get_post_type_object($postarr['post_type']);
+            if (!current_user_can($pto->cap->create_posts)) {
+                return wpmcp_cannot('create ' . $postarr['post_type'] . ' content');
+            }
+            if (in_array($postarr['post_status'], array('publish', 'future'), true)
+                && !current_user_can($pto->cap->publish_posts)) {
+                return wpmcp_cannot('publish ' . $postarr['post_type'] . ' content');
+            }
             if (isset($a['excerpt'])) { $postarr['post_excerpt'] = (string) $a['excerpt']; }
             if (isset($a['slug']))    { $postarr['post_name'] = sanitize_title((string) $a['slug']); }
             $id = wp_insert_post($postarr, true);
@@ -438,10 +473,26 @@ function wpmcp_content_tools() {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             $p0 = wpmcp_get_editable_post($id, 'That item is not an editable content type.');
             if (is_wp_error($p0)) { return $p0; }
+            // wp_update_post checks nothing. edit_post is the meta cap, so it resolves
+            // per post: own vs others', published vs not, via map_meta_cap.
+            if (!current_user_can('edit_post', $id)) {
+                return wpmcp_cannot('edit post ' . $id);
+            }
             $upd = array('ID' => $id); $changed = array();
             if (isset($a['title']))   { $upd['post_title'] = wp_strip_all_tags((string) $a['title']); $changed[] = 'title'; }
             if (isset($a['content'])) { $upd['post_content'] = (string) $a['content']; $changed[] = 'content'; }
-            if (isset($a['status']))  { $upd['post_status'] = sanitize_key($a['status']); $changed[] = 'status'; }
+            if (isset($a['status'])) {
+                $upd['post_status'] = sanitize_key($a['status']);
+                $changed[] = 'status';
+                // Publishing somebody else's draft is a capability of its own, and
+                // edit_post does not imply it (a Contributor may edit, never publish).
+                if (in_array($upd['post_status'], array('publish', 'future'), true)) {
+                    $pto = get_post_type_object($p0->post_type);
+                    if (!current_user_can($pto->cap->publish_posts)) {
+                        return wpmcp_cannot('publish ' . $p0->post_type . ' content');
+                    }
+                }
+            }
             if (isset($a['excerpt'])) { $upd['post_excerpt'] = (string) $a['excerpt']; $changed[] = 'excerpt'; }
             if (isset($a['slug']))    { $upd['post_name'] = sanitize_title((string) $a['slug']); $changed[] = 'slug'; }
             $r = wp_update_post($upd, true);
@@ -462,6 +513,11 @@ function wpmcp_content_tools() {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             $p0 = wpmcp_get_editable_post($id, 'That item is not a deletable content type (attachments use delete-media).');
             if (is_wp_error($p0)) { return $p0; }
+            // wp_delete_post checks nothing. delete_post is a meta cap, so it resolves
+            // per post - own vs others', published vs not.
+            if (!current_user_can('delete_post', $id)) {
+                return wpmcp_cannot('delete post ' . $id);
+            }
             $force = !empty($a['force']);
             $r = wp_delete_post($id, $force);
             if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
@@ -513,6 +569,13 @@ function wpmcp_taxonomy_tools() {
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : '';
             if (!taxonomy_exists($tax)) { return new WP_Error('bad_taxonomy', 'Unknown taxonomy.'); }
+            // wp_insert_term checks nothing. edit_terms is the cap WordPress maps for
+            // creating and editing a term (manage_terms gates the admin LIST screen);
+            // for the core taxonomies all three resolve to manage_categories anyway.
+            $tax_obj = get_taxonomy($tax);
+            if (!current_user_can($tax_obj->cap->edit_terms)) {
+                return wpmcp_cannot('create terms in ' . $tax);
+            }
             $args = array();
             if (isset($a['slug']))        { $args['slug'] = sanitize_title((string) $a['slug']); }
             if (isset($a['parent']))      { $args['parent'] = (int) $a['parent']; }
@@ -533,6 +596,11 @@ function wpmcp_taxonomy_tools() {
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : '';
             if (!taxonomy_exists($tax)) { return new WP_Error('bad_taxonomy', 'Unknown taxonomy.'); }
+            // wp_delete_term checks nothing.
+            $tax_obj = get_taxonomy($tax);
+            if (!current_user_can($tax_obj->cap->delete_terms)) {
+                return wpmcp_cannot('delete terms in ' . $tax);
+            }
             $r = wp_delete_term((int) $a['id'], $tax);
             if (is_wp_error($r)) { return $r; }
             if (!$r) { return new WP_Error('not_found', 'Term not found.'); }
@@ -605,6 +673,12 @@ function wpmcp_media_tools() {
             'post' => array('type' => 'integer'),
         ), 'required' => array('source_url')),
         'run' => function ($a) {
+            // media_handle_sideload gates file TYPES, never the user. Checked before
+            // the download, so a refused caller cannot use this tool to make the site
+            // fetch arbitrary URLs.
+            if (!current_user_can('upload_files')) {
+                return wpmcp_cannot('upload files');
+            }
             $url = isset($a['source_url']) ? esc_url_raw((string) $a['source_url']) : '';
             $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
             if (!in_array($scheme, array('http', 'https'), true)) {
@@ -643,6 +717,11 @@ function wpmcp_media_tools() {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             $p = wpmcp_get_attachment($id);
             if (is_wp_error($p)) { return $p; }
+            // wp_delete_attachment checks nothing. delete_post on an attachment maps
+            // through its own post type's caps (delete_posts / delete_others_posts).
+            if (!current_user_can('delete_post', $id)) {
+                return wpmcp_cannot('delete attachment ' . $id);
+            }
             $r = wp_delete_attachment($id, !empty($a['force']));
             if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => true);
@@ -745,6 +824,12 @@ function wpmcp_comment_tools() {
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             if (!$id || !get_comment($id)) { return new WP_Error('not_found', 'No comment with that ID.'); }
+            // wp_set_comment_status and friends check nothing. moderate_comments is
+            // the cap wp-admin requires for the whole moderation queue, and
+            // edit_comment maps to it on the post's editors.
+            if (!current_user_can('moderate_comments') && !current_user_can('edit_comment', $id)) {
+                return wpmcp_cannot('moderate comment ' . $id);
+            }
             $action = isset($a['action']) ? sanitize_key($a['action']) : '';
             $valid = array('approve', 'unapprove', 'spam', 'trash', 'untrash');
             if (!in_array($action, $valid, true)) { return new WP_Error('bad_action', 'Unknown action.'); }
@@ -768,6 +853,13 @@ function wpmcp_comment_tools() {
             $parent = isset($a['id']) ? (int) $a['id'] : 0;
             $pc = $parent ? get_comment($parent) : null;
             if (!$pc) { return new WP_Error('not_found', 'No parent comment.'); }
+            // wp_insert_comment checks nothing, and this tool inserts pre-approved.
+            // Replying to a comment on a post you cannot read is writing into a place
+            // you cannot see; the refusal reuses not_found so it does not confirm that
+            // the parent comment exists, matching get-post and list-comments.
+            if (!current_user_can('read_post', (int) $pc->comment_post_ID)) {
+                return new WP_Error('not_found', 'No parent comment.');
+            }
             $u = wp_get_current_user();
             $cid = wp_insert_comment(array(
                 'comment_post_ID' => (int) $pc->comment_post_ID,
