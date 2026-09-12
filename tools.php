@@ -237,11 +237,20 @@ function wpmcp_core_tools() {
                 'limit'     => array('type' => 'integer'),
             )),
             'run' => function ($args) {
+                $type = isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post';
+                // Same allow-list the write tools use: no revisions, no nav_menu_item,
+                // no wp_template, no attachments (media has its own tools).
+                if (!wpmcp_post_type_ok($type)) {
+                    return new WP_Error('bad_type', 'Not a listable post type: ' . $type);
+                }
                 $q = new WP_Query(array(
-                    'post_type'      => isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post',
+                    'post_type'      => $type,
                     'post_status'    => isset($args['status']) ? sanitize_key($args['status']) : 'any',
                     'posts_per_page' => isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20,
                     'no_found_rows'  => true,
+                    // Non-public statuses are filtered by what the token's user may read:
+                    // without read_private_posts, only their own private posts come back.
+                    'perm'           => 'readable',
                 ));
                 $items = array();
                 foreach ($q->posts as $p) {
@@ -263,6 +272,15 @@ function wpmcp_core_tools() {
                 $id = isset($args['id']) ? (int) $args['id'] : 0;
                 $p = $id ? get_post($id) : null;
                 if (!$p) { return new WP_Error('not_found', 'No post with that ID.'); }
+                // Deliberately the SAME error as a missing post, not a distinct
+                // "forbidden": a caller who cannot read the post must not be able to
+                // learn that it exists by probing IDs.
+                if (!current_user_can('read_post', $id)) {
+                    return new WP_Error('not_found', 'No post with that ID.');
+                }
+                if (!wpmcp_post_type_ok($p->post_type)) {
+                    return new WP_Error('bad_type', 'Not a readable post type: ' . $p->post_type);
+                }
                 return array(
                     'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
                     'status' => $p->post_status, 'slug' => $p->post_name, 'content' => $p->post_content,
@@ -542,7 +560,7 @@ function wpmcp_comment_tools() {
 
     'list-comments' => array(
         'write' => false,
-        'description' => 'List comments (emails omitted). Args: post (id), status (default all: approve|hold|spam|trash), search, page, per_page.',
+        'description' => 'List comments (emails omitted). Args: post (id), status (default "approve"; also hold|spam|trash|all), search, page, per_page.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'post' => array('type' => 'integer'), 'status' => array('type' => 'string'),
             'search' => array('type' => 'string'), 'page' => array('type' => 'integer'),
@@ -550,7 +568,10 @@ function wpmcp_comment_tools() {
         )),
         'run' => function ($a) {
             $args = array(
-                'status' => isset($a['status']) ? sanitize_key($a['status']) : 'all',
+                // Approved only unless asked otherwise. The old default of 'all' handed
+                // spam and held-for-moderation text - unreviewed, attacker-supplied
+                // content - to every read token without anyone asking for it.
+                'status' => isset($a['status']) ? sanitize_key($a['status']) : 'approve',
                 'search' => isset($a['search']) ? (string) $a['search'] : '',
                 'number' => isset($a['per_page']) ? min(100, max(1, (int) $a['per_page'])) : 20,
                 'paged'  => isset($a['page']) ? max(1, (int) $a['page']) : 1,
