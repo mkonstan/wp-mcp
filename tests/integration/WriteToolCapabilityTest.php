@@ -105,11 +105,7 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
             'content' => self::OVERWRITE,
         ]);
 
-        self::assertTrue(
-            $result->isError,
-            'An admin-scope token bound to a Subscriber rewrote an Editor\'s published'
-            . ' post. Response: ' . $result->text
-        );
+        self::assertRefused($result, 'update-post');
 
         self::assertSame(
             self::ORIGINAL,
@@ -128,7 +124,7 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
         $mcp = $this->mcp(self::$subscriberToken);
 
         $deleted = $mcp->callTool('delete-post', ['id' => self::$postId]);
-        self::assertTrue($deleted->isError, 'A Subscriber deleted a post: ' . $deleted->text);
+        self::assertRefused($deleted, 'delete-post');
         self::assertSame(
             'publish',
             self::postStatus(self::$postId),
@@ -139,23 +135,39 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
             'title'  => Fixtures::PREFIX . 'subscriber-should-not-create',
             'status' => 'publish',
         ]);
-        self::assertTrue($created->isError, 'A Subscriber published a post: ' . $created->text);
+        self::assertRefused($created, 'create-post');
 
         $term = $mcp->callTool('create-term', [
             'taxonomy' => 'category',
             'name'     => Fixtures::PREFIX . 'subscriber-should-not-create',
         ]);
-        self::assertTrue($term->isError, 'A Subscriber created a category: ' . $term->text);
+        self::assertRefused($term, 'create-term');
 
+        // The URL is unresolvable on purpose: if upload-media ever checks the
+        // capability AFTER download_url, this call fails on DNS instead and the
+        // refusal message is the only thing that can tell the two apart. Asserting
+        // isError alone passed with the capability check deleted - verified.
         $upload = $mcp->callTool('upload-media', [
-            'source_url' => 'https://example.invalid/wpmcp-test.png',
+            'source_url' => 'https://wpmcp-test.invalid/wpmcp-test.png',
         ]);
-        self::assertTrue($upload->isError, 'A Subscriber was allowed to upload: ' . $upload->text);
-        self::assertStringNotContainsString(
-            'source_url must be',
-            $upload->text,
-            'upload-media validated the URL before checking upload_files, so a refused'
-            . ' caller can still make the site fetch arbitrary URLs.'
+        self::assertRefused($upload, 'upload-media');
+    }
+
+    /**
+     * A write refusal, and specifically a CAPABILITY refusal.
+     *
+     * isError on its own is not enough: every one of these tools has other ways to
+     * fail - a bad id, an unresolvable host, a validation error - and a test that
+     * accepts any of them passes with the capability check removed.
+     */
+    private static function assertRefused(\WpMcp\Tests\Support\ToolResult $result, string $tool): void
+    {
+        self::assertTrue($result->isError, "{$tool} succeeded for a Subscriber: " . $result->text);
+        self::assertStringContainsString(
+            'is not allowed to',
+            $result->text,
+            "{$tool} failed, but not because of a capability check - so this test"
+            . ' would pass with the check removed. Message: ' . $result->text
         );
     }
 
