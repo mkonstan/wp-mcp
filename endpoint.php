@@ -16,6 +16,7 @@
  *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
+ * Registry: a tool without an explicit boolean `write` is not registered.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -290,6 +291,33 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
 }
 
 /* ---------------- tool registry ---------------- */
+
+/**
+ * The tool registry, assembled and then CHECKED.
+ *
+ * `wpmcp_tools` is a public filter, so a third-party plugin can add a tool. Everything
+ * downstream of here asks one question about every entry - `empty($t['write'])` - to
+ * decide whether a read-scope token may call it. An entry with no `write` key answers
+ * that question "no, this is a read tool", which means a filter that forgets the key,
+ * or misspells it, or sets it to the string "true" (truthy, but not a boolean, and
+ * therefore an author who did not think about it), silently publishes a write tool to
+ * every read-scope token on the site. Absence of a declaration is not a declaration of
+ * safety.
+ *
+ * So an entry without an explicit boolean `write` is NOT REGISTERED: it does not appear
+ * in tools/list, it cannot be called, and a registry_reject event says which name was
+ * dropped and why. The author of that tool finds out from the log rather than from an
+ * incident.
+ *
+ * `run` is checked for the same reason in a smaller key: call_user_func on a
+ * non-callable is a TypeError, which is a 500 carrying a stack trace, and Sprint 3's
+ * disclosure boundary is not here yet.
+ *
+ * The built-in tools all carry `'write' => true|false` explicitly - 20 of them, one
+ * per entry - so this check applies uniformly rather than trusting "ours" over
+ * "theirs". If a future built-in forgets the key it disappears from the listing and
+ * the log says so, which is the loud failure.
+ */
 function wpmcp_tools() {
     $tools = array();
     foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
@@ -299,7 +327,35 @@ function wpmcp_tools() {
     if (function_exists('wpmcp_code_tools') && function_exists('wpmcp_code_enabled') && wpmcp_code_enabled()) {
         $tools = array_merge($tools, wpmcp_code_tools());
     }
-    return apply_filters('wpmcp_tools', $tools);
+
+    $tools = apply_filters('wpmcp_tools', $tools);
+    $kept  = array();
+
+    foreach ((array) $tools as $name => $tool) {
+        $reason = '';
+
+        if (!is_array($tool)) {
+            $reason = 'not_an_array';
+        } elseif (!array_key_exists('write', $tool)) {
+            $reason = 'no_write_key';
+        } elseif (!is_bool($tool['write'])) {
+            $reason = 'write_not_boolean';
+        } elseif (!isset($tool['run']) || !is_callable($tool['run'])) {
+            $reason = 'run_not_callable';
+        }
+
+        if ($reason !== '') {
+            wpmcp_auth_event('registry_reject', array(
+                'tool'   => (string) $name,
+                'reason' => $reason,
+            ));
+            continue;
+        }
+
+        $kept[$name] = $tool;
+    }
+
+    return $kept;
 }
 
 /* ---------------- JSON-RPC dispatch ---------------- */
