@@ -43,19 +43,28 @@ use WpMcp\Tests\Support\FixtureIntegrationTestCase;
 
 final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
 {
-    private const LABEL          = Fixtures::PREFIX . 'caps';
-    private const PRIVATE_TITLE  = Fixtures::PREFIX . 'private';
-    private const DRAFT_TITLE    = Fixtures::PREFIX . 'draft';
-    private const PUBLIC_TITLE   = Fixtures::PREFIX . 'public';
-    private const ATTACHMENT_TITLE = Fixtures::PREFIX . 'attachment';
-    private const OWN_DRAFT_TITLE = Fixtures::PREFIX . 'own-draft';
-    private const SECRET         = 'wpmcp-test-secret-body';
-    private const APPROVED_TEXT  = Fixtures::PREFIX . 'approved-comment';
-    private const HELD_TEXT      = Fixtures::PREFIX . 'held-comment';
-    private const PRIVATE_COMMENT_TEXT = Fixtures::PREFIX . 'comment-on-private';
+    /**
+     * Fixture names, not constants: every one carries this run's id (see Fixtures),
+     * and a per-run value cannot be a compile-time constant expression. They are
+     * methods rather than properties initialised in build() so that teardown and the
+     * debris assertions can name a fixture even when the build never ran.
+     */
+    private static function label(): string { return Fixtures::name('caps'); }
+    private static function privateTitle(): string { return Fixtures::name('private'); }
+    private static function draftTitle(): string { return Fixtures::name('draft'); }
+    private static function publicTitle(): string { return Fixtures::name('public'); }
+    private static function attachmentTitle(): string { return Fixtures::name('attachment'); }
+    private static function ownDraftTitle(): string { return Fixtures::name('own-draft'); }
+    private static function secret(): string { return Fixtures::name('secret-body'); }
+    private static function approvedText(): string { return Fixtures::name('approved-comment'); }
+    private static function heldText(): string { return Fixtures::name('held-comment'); }
+    private static function privateCommentText(): string { return Fixtures::name('comment-on-private'); }
 
     /** On the approved comment. Never returned by any tool; used to probe `search`. */
-    private const COMMENT_EMAIL = Fixtures::PREFIX . 'commenter@example.invalid';
+    private static function commentEmail(): string
+    {
+        return Fixtures::name('commenter') . '@example.invalid';
+    }
 
     /** An id far past anything the site could hold, for the "really missing" case. */
     private const MISSING_ID = 999999999;
@@ -93,17 +102,17 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // A previous run killed halfway would leave these names taken.
         Fixtures::purge();
 
-        self::$editorId = Fixtures::createUser(Fixtures::PREFIX . 'editor', 'editor');
-        self::$authorId = Fixtures::createUser(Fixtures::PREFIX . 'author', 'author');
+        self::$editorId = Fixtures::createUser(Fixtures::name('editor'), 'editor');
+        self::$authorId = Fixtures::createUser(Fixtures::name('author'), 'author');
 
         self::$privateId = Fixtures::createPost(
-            self::PRIVATE_TITLE,
+            self::privateTitle(),
             'private',
             self::$editorId,
-            self::SECRET
+            self::secret()
         );
         self::$draftId = Fixtures::createPost(
-            self::DRAFT_TITLE,
+            self::draftTitle(),
             'draft',
             self::$editorId,
             'wpmcp-test-draft-body'
@@ -116,19 +125,19 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // comment. Only the status default can separate those two, so "approved only"
         // is tested there and cannot pass because of the read_post filter instead.
         self::$publicId = Fixtures::createPost(
-            self::PUBLIC_TITLE,
+            self::publicTitle(),
             'publish',
             self::$editorId,
             'wpmcp-test-public-body'
         );
-        Fixtures::createComment(self::$publicId, self::APPROVED_TEXT, true, self::COMMENT_EMAIL);
-        Fixtures::createComment(self::$publicId, self::HELD_TEXT, false);
+        Fixtures::createComment(self::$publicId, self::approvedText(), true, self::commentEmail());
+        Fixtures::createComment(self::$publicId, self::heldText(), false);
 
         // On the Editor's PRIVATE post: an APPROVED comment. Approved, so the status
         // default cannot hide it - only a read_post check on comment_post_ID can.
         // Without that check this hands an Author the private post's id plus the
         // comment's author, text and date.
-        Fixtures::createComment(self::$privateId, self::PRIVATE_COMMENT_TEXT, true);
+        Fixtures::createComment(self::$privateId, self::privateCommentText(), true);
 
         // An attachment ON the private post. `inherit` means get_post_status() answers
         // with the parent's status, so read_post on this resolves to
@@ -137,7 +146,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // It doubles as get-post's non-allow-listed-type case: attachments have their
         // own tools, so wpmcp_post_type_ok() refuses them.
         self::$attachmentId = Fixtures::createPost(
-            self::ATTACHMENT_TITLE,
+            self::attachmentTitle(),
             'inherit',
             self::$editorId,
             'wpmcp-test-attachment-body',
@@ -153,7 +162,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // post) never does. 25 > the default 20, so it does.
         self::$bulkIds = Fixtures::createPosts(
             self::BULK_COUNT,
-            Fixtures::PREFIX . 'pub-',
+            Fixtures::name('pub-'),
             'publish',
             self::$editorId
         );
@@ -167,15 +176,15 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // reason: a listing that hides everyone's drafts, their own included, is a
         // regression, not a fix.
         self::$ownDraftId = Fixtures::createPost(
-            self::OWN_DRAFT_TITLE,
+            self::ownDraftTitle(),
             'draft',
             self::$authorId,
             'wpmcp-test-own-draft-body'
         );
 
-        self::$authorToken = Fixtures::mintToken('read', self::LABEL, self::$authorId);
+        self::$authorToken = Fixtures::mintToken('read', self::label(), self::$authorId);
         // User 1 is the site's original administrator: the "unchanged behaviour" case.
-        self::$adminToken = Fixtures::mintToken('read', self::LABEL, 1);
+        self::$adminToken = Fixtures::mintToken('read', self::label(), 1);
     }
 
     public static function tearDownAfterClass(): void
@@ -197,7 +206,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         foreach (self::$bulkIds as $id) { Fixtures::deletePost($id); }
         Fixtures::deleteUser(self::$editorId);
         Fixtures::deleteUser(self::$authorId);
-        Fixtures::deleteTokensLabelled(self::LABEL);
+        Fixtures::deleteTokensLabelled(self::label());
         Fixtures::purge();
     }
 
@@ -222,7 +231,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         );
         self::assertStringContainsString('No post with that ID.', $refused->text);
         self::assertStringNotContainsString(
-            self::SECRET,
+            self::secret(),
             $refused->text,
             'The refusal leaked the post content.'
         );
@@ -278,8 +287,8 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             $ids,
             'The default list-posts still shows another author\'s draft.'
         );
-        self::assertStringNotContainsString(self::PRIVATE_TITLE, $result->text);
-        self::assertStringNotContainsString(self::DRAFT_TITLE, $result->text);
+        self::assertStringNotContainsString(self::privateTitle(), $result->text);
+        self::assertStringNotContainsString(self::draftTitle(), $result->text);
     }
 
     /**
@@ -372,7 +381,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
 
         $post = $admin->callTool('get-post', ['id' => self::$privateId]);
         self::assertFalse($post->isError, 'The admin token was refused: ' . $post->text);
-        self::assertSame(self::SECRET, $post->data()['content']);
+        self::assertSame(self::secret(), $post->data()['content']);
         self::assertSame('private', $post->data()['status']);
 
         $listed = $admin->callTool('list-posts', ['status' => 'private', 'limit' => 100]);
@@ -406,7 +415,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             . implode(', ', array_map('strval', $statuses))
         );
         self::assertStringNotContainsString(
-            self::HELD_TEXT,
+            self::heldText(),
             $all->text,
             'The held-for-moderation comment was returned by a default list-comments.'
         );
@@ -416,8 +425,8 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // one is still returned, so this is a filter and not a blanket empty result.
         $onPublic = $author->callTool('list-comments', ['post' => self::$publicId]);
         self::assertFalse($onPublic->isError, 'list-comments failed: ' . $onPublic->text);
-        self::assertStringContainsString(self::APPROVED_TEXT, $onPublic->text);
-        self::assertStringNotContainsString(self::HELD_TEXT, $onPublic->text);
+        self::assertStringContainsString(self::approvedText(), $onPublic->text);
+        self::assertStringNotContainsString(self::heldText(), $onPublic->text);
     }
 
     /**
@@ -434,7 +443,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         $all = $author->callTool('list-comments', ['per_page' => 100]);
         self::assertFalse($all->isError, 'list-comments failed: ' . $all->text);
         self::assertStringNotContainsString(
-            self::PRIVATE_COMMENT_TEXT,
+            self::privateCommentText(),
             $all->text,
             'An Author was given a comment on another user\'s private post.'
         );
@@ -457,7 +466,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         $admin = $this->mcp(self::$adminToken)
             ->callTool('list-comments', ['post' => self::$privateId]);
         self::assertFalse($admin->isError, 'list-comments failed: ' . $admin->text);
-        self::assertStringContainsString(self::PRIVATE_COMMENT_TEXT, $admin->text);
+        self::assertStringContainsString(self::privateCommentText(), $admin->text);
     }
 
     /**
@@ -480,7 +489,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'status:"hold" was refused rather than narrowed: ' . $result->text
         );
         self::assertStringNotContainsString(
-            self::HELD_TEXT,
+            self::heldText(),
             $result->text,
             'An Author read a held-for-moderation comment by asking for status:"hold".'
         );
@@ -493,7 +502,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             ->callTool('list-comments', ['status' => 'hold', 'post' => self::$publicId]);
         self::assertFalse($admin->isError, 'list-comments failed: ' . $admin->text);
         self::assertStringContainsString(
-            self::HELD_TEXT,
+            self::heldText(),
             $admin->text,
             'status:"hold" stopped working for a user who may moderate.'
         );
@@ -516,18 +525,18 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         $author = $this->mcp(self::$authorToken);
 
         $byContent = $author->callTool('list-comments', [
-            'search'   => 'wpmcp-test-approved',
+            'search'   => Fixtures::name('approved'),
             'per_page' => 100,
         ]);
         self::assertFalse($byContent->isError, 'list-comments failed: ' . $byContent->text);
         self::assertStringContainsString(
-            self::APPROVED_TEXT,
+            self::approvedText(),
             $byContent->text,
             'Searching comment text stopped working.'
         );
 
         $byEmail = $author->callTool('list-comments', [
-            'search'   => 'wpmcp-test-commenter@',
+            'search'   => Fixtures::name('commenter') . '@',
             'per_page' => 100,
         ]);
         self::assertFalse($byEmail->isError, 'list-comments failed: ' . $byEmail->text);
@@ -591,7 +600,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             $listed->column('id'),
             'An Author was shown an attachment of another user\'s private post.'
         );
-        self::assertStringNotContainsString(self::ATTACHMENT_TITLE, $listed->text);
+        self::assertStringNotContainsString(self::attachmentTitle(), $listed->text);
 
         $fetched = $author->callTool('get-media', ['id' => self::$attachmentId]);
         self::assertTrue($fetched->isError, 'get-media returned it: ' . $fetched->text);

@@ -44,29 +44,53 @@ final class McpClient
      * proxy, a stale keep-alive and a slow site each leave a different signature
      * there. One more occurrence with these numbers settles it.
      */
-    public function post(string $method, array $params = []): ResponseInterface
+    public function post(string $method, array $params = [], array $extraHeaders = []): ResponseInterface
+    {
+        return $this->send(
+            (string) json_encode([
+                'jsonrpc' => '2.0',
+                'id'      => self::$nextId++,
+                'method'  => $method,
+                'params'  => $params,
+            ]),
+            $extraHeaders,
+            $method
+        );
+    }
+
+    /**
+     * A POST whose body and Content-Type the test chooses.
+     *
+     * Sprint 2's transport gates are about the envelope, not the JSON-RPC inside it: a
+     * `text/plain` body has to be refused before anything parses it, so the test has
+     * to be able to send one.
+     */
+    public function postRaw(string $body, array $extraHeaders = []): ResponseInterface
+    {
+        return $this->send($body, $extraHeaders, 'raw');
+    }
+
+    /**
+     * @param array<string, string> $extraHeaders overrides the defaults, key by key
+     */
+    private function send(string $body, array $extraHeaders, string $what): ResponseInterface
     {
         $stats = null;
 
         try {
             return $this->http->post('wp-json/wpmcp/mcp', [
-                'headers' => [
+                'headers' => array_merge([
                     'Authorization' => 'Bearer ' . $this->token,
                     'Content-Type'  => 'application/json',
-                ],
-                'body' => (string) json_encode([
-                    'jsonrpc' => '2.0',
-                    'id'      => self::$nextId++,
-                    'method'  => $method,
-                    'params'  => $params,
-                ]),
+                ], $extraHeaders),
+                'body'     => $body,
                 'on_stats' => static function (TransferStats $s) use (&$stats): void {
                     $stats = $s;
                 },
             ]);
         } catch (GuzzleException $e) {
             throw new RuntimeException(
-                "MCP {$method} could not complete a request to this site: "
+                "MCP {$what} could not complete a request to this site: "
                 . $e->getMessage() . ' | ' . self::describe($stats),
                 0,
                 $e

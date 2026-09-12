@@ -43,16 +43,44 @@ abstract class IntegrationTestCase extends TestCase
         $this->baseUrl = rtrim($url, '/');
     }
 
-    protected function client(): Client
+    /**
+     * The header every request of this run carries, so a mu-plugin recorder can tell
+     * THIS runner's requests from a concurrent runner's. Without it, two suites
+     * against one site each count the other's hook firings and "fired exactly once"
+     * becomes "fired twice".
+     */
+    public const RUN_HEADER = 'X-Wpmcp-Test-Run';
+
+    /**
+     * @param string|null $baseUrl a different origin for this client - the same site
+     *                    over plain HTTP, for the one test that must be refused.
+     */
+    protected function client(?string $baseUrl = null): Client
     {
         return new Client([
-            'base_uri'        => $this->baseUrl . '/',
+            'base_uri'        => ($baseUrl ?? $this->baseUrl) . '/',
             'verify'          => self::envString('WPMCP_TEST_VERIFY_TLS') === '1',
             'http_errors'     => false,
             'timeout'         => 20,
             'connect_timeout' => 10,
-            'headers'         => ['Accept' => 'application/json'],
+            'headers'         => [
+                'Accept'          => 'application/json',
+                self::RUN_HEADER  => Fixtures::runId(),
+            ],
         ]);
+    }
+
+    /**
+     * The same site over plain HTTP, for the one test that must be refused.
+     *
+     * Returns '' when WPMCP_TEST_URL is not https in the first place - there is then
+     * no downgrade to attempt and the test says so rather than pretending.
+     */
+    protected function insecureBaseUrl(): string
+    {
+        return str_starts_with($this->baseUrl, 'https://')
+            ? 'http://' . substr($this->baseUrl, strlen('https://'))
+            : '';
     }
 
     /** getenv() and $_ENV disagree depending on how PHPUnit was launched; check both. */

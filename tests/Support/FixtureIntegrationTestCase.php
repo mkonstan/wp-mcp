@@ -82,8 +82,12 @@ abstract class FixtureIntegrationTestCase extends IntegrationTestCase
         }
     }
 
-    protected function mcp(string $token): McpClient
+    /**
+     * @param string|null $baseUrl a different origin for this one client; see
+     *                    insecureBaseUrl(). Defaults to WPMCP_TEST_URL.
+     */
+    protected function mcp(string $token, ?string $baseUrl = null): McpClient
     {
-        return new McpClient($this->client(), $token);
+        return new McpClient($this->client($baseUrl), $token);
     }
 }

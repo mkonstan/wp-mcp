@@ -26,8 +26,9 @@ use WpMcp\Tests\Support\FixtureIntegrationTestCase;
 
 final class DeletedTokenUserTest extends FixtureIntegrationTestCase
 {
-    private const LABEL = Fixtures::PREFIX . 'deleted-user';
-    private const LOGIN = Fixtures::PREFIX . 'doomed';
+    /** Per-run fixture names; see Fixtures. */
+    private static function label(): string { return Fixtures::name('deleted-user'); }
+    private static function login(): string { return Fixtures::name('doomed'); }
 
     private static int $userId  = 0;
     private static string $token = '';
@@ -47,8 +48,8 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
         // otherwise fail createUser() on a name that is already taken.
         Fixtures::purge();
 
-        self::$userId = Fixtures::createUser(self::LOGIN, 'author');
-        self::$token  = Fixtures::mintToken('read', self::LABEL, self::$userId);
+        self::$userId = Fixtures::createUser(self::login(), 'author');
+        self::$token  = Fixtures::mintToken('read', self::label(), self::$userId);
     }
 
     public static function tearDownAfterClass(): void
@@ -63,7 +64,7 @@ final class DeletedTokenUserTest extends FixtureIntegrationTestCase
         // Tolerant by design: the test deletes this user itself, so by the time
         // teardown runs the `wp user delete` is expected to fail.
         Fixtures::deleteUser(self::$userId);
-        Fixtures::deleteTokensLabelled(self::LABEL);
+        Fixtures::deleteTokensLabelled(self::label());
     }
 
     /**

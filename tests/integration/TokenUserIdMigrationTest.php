@@ -31,10 +31,18 @@ use WpMcp\Tests\Support\WpCli;
 
 final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
 {
-    private const LABEL = Fixtures::PREFIX . 'migration';
+    /** Per-run fixture label; see Fixtures. */
+    private static function label(): string { return Fixtures::name('migration'); }
 
     /** Not a real user. The migration is pure SQL; it must not clobber this. */
     private const ALREADY_BOUND_TO = 987654;
+
+    /**
+     * created_by of the legacy-shape row. Also not a real user, and deliberately NOT
+     * 1: the assertion is "user_id became created_by", and a created_by that no other
+     * row on the site shares is what makes that assertion say something.
+     */
+    private const LEGACY_CREATED_BY = 987653;
 
     public static function setUpBeforeClass(): void
     {
@@ -42,14 +50,14 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
         self::requireSite();
 
         self::buildFixtures(
-            static fn () => Fixtures::deleteTokensLabelled(self::LABEL),
-            static fn () => Fixtures::deleteTokensLabelled(self::LABEL)
+            static fn () => Fixtures::deleteTokensLabelled(self::label()),
+            static fn () => Fixtures::deleteTokensLabelled(self::label())
         );
     }
 
     public static function tearDownAfterClass(): void
     {
-        Fixtures::deleteTokensLabelled(self::LABEL);
+        Fixtures::deleteTokensLabelled(self::label());
 
         parent::tearDownAfterClass();
     }
@@ -64,10 +72,22 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
      */
     public function testTheMigrationBackfillsUserIdFromCreatedByWithoutTouchingBoundRows(): void
     {
-        $legacyId = $this->insertTokenRow(0, 1);
+        $legacyId = $this->insertTokenRow(0, self::LEGACY_CREATED_BY);
         $boundId  = $this->insertTokenRow(self::ALREADY_BOUND_TO, 1);
 
-        self::assertSame(0, $this->userIdOf($legacyId), 'The legacy fixture row was not written with user_id = 0.');
+        // NOT asserted: "the legacy row still has user_id = 0 at this instant". The
+        // migration is a site-wide `UPDATE ... WHERE user_id = 0`, so a second runner
+        // calling it between the insert above and this read would legitimately have
+        // backfilled our row already. What the sprint claims is the OUTCOME, and that
+        // is what is asserted - whoever ran the UPDATE.
+        $before = $this->userIdOf($legacyId);
+
+        self::assertContains(
+            $before,
+            [0, self::LEGACY_CREATED_BY],
+            'The legacy fixture row was written neither with user_id = 0 nor already'
+            . ' backfilled from created_by; the fixture insert is wrong.'
+        );
         self::assertSame(
             self::ALREADY_BOUND_TO,
             $this->userIdOf($boundId),
@@ -76,13 +96,16 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
 
         $changed = WpCli::evaluate('echo (int) wpmcp_migrate_token_user_ids();');
 
-        self::assertGreaterThanOrEqual(
-            1,
-            (int) $changed,
-            'The migration reported no rows changed, but there was one to change.'
-        );
+        if ($before === 0) {
+            self::assertGreaterThanOrEqual(
+                1,
+                (int) $changed,
+                'The migration reported no rows changed, but there was one to change.'
+            );
+        }
+
         self::assertSame(
-            1,
+            self::LEGACY_CREATED_BY,
             $this->userIdOf($legacyId),
             'The migration did not copy created_by into user_id, so tokens minted'
             . ' before this sprint would be refused after the upgrade.'
@@ -122,14 +145,20 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
             . ' wpmcp_maybe_upgrade() either never ran or refused to stamp.'
         );
 
+        // FIXTURE ROWS EXCLUDED. This class inserts legacy-shape rows on purpose, and
+        // so does a concurrent runner - a bare COUNT over the table would fail on the
+        // other run's fixture, which is not a fact about the site's real tokens. The
+        // claim is about rows nobody planted.
         self::assertSame(
             '0',
-            WpCli::evaluate(
-                'global $wpdb; echo (int) $wpdb->get_var("SELECT COUNT(*) FROM "'
-                . ' . wpmcp_table() . " WHERE user_id = 0");'
-            ),
-            'A token row still has user_id = 0 after the migration; every such token'
-            . ' authenticates as nobody and is refused.'
+            WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare('
+                . '"SELECT COUNT(*) FROM " . wpmcp_table()'
+                . ' . " WHERE user_id = 0 AND label NOT LIKE %%s", %s));',
+                "'" . addcslashes(Fixtures::PREFIX . '%', "'\\") . "'"
+            )),
+            'A real token row still has user_id = 0 after the migration; every such'
+            . ' token authenticates as nobody and is refused.'
         );
     }
 
@@ -152,7 +181,7 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
             . '"user_id" => %d'
             . '), array("%%s","%%s","%%s","%%s","%%s","%%s","%%d","%%d","%%d"));'
             . ' echo (int) $wpdb->insert_id;',
-            "'" . self::LABEL . "'",
+            "'" . self::label() . "'",
             $createdBy,
             $userId
         ));
