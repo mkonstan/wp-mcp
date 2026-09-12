@@ -44,7 +44,8 @@ if ($reason !== '') {
 $report = Fixtures::foreignDebris();
 
 if ($report === '') {
-    echo "debris-check: clean - no wpmcp-test-* users, posts, terms, tokens or mu-plugins.\n";
+    echo "debris-check: clean - no wpmcp-test-* users, posts, terms, tokens, mu-plugins"
+        . " or transients.\n";
     exit(0);
 }
 

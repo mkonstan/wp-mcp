@@ -94,15 +94,29 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
             'The already-bound fixture row was not written with its owner.'
         );
 
-        $changed = WpCli::evaluate('echo (int) wpmcp_migrate_token_user_ids();');
+        // THE RETURN IS CHECKED FOR `false`, NOT FOR A COUNT.
+        //
+        // The count was racy and failed once in the reviewer's two concurrent runs: this
+        // test reads $before as 0, the OTHER runner's site-wide
+        // `UPDATE ... WHERE user_id = 0` backfills our legacy row, and then our own call
+        // correctly reports 0 rows changed. The `if ($before === 0)` guard narrowed the
+        // window without closing it - it is a TOCTOU and no amount of re-reading fixes
+        // that, because the window is between the read and the UPDATE.
+        //
+        // What the sprint actually claims is the OUTCOME (asserted below) plus the thing
+        // the function documents: `false` means the query failed. That is worth pinning
+        // and is not racy, because it is a property of our own call.
+        $changed = WpCli::evaluate(
+            '$r = wpmcp_migrate_token_user_ids(); echo $r === false ? "FALSE" : (int) $r;'
+        );
 
-        if ($before === 0) {
-            self::assertGreaterThanOrEqual(
-                1,
-                (int) $changed,
-                'The migration reported no rows changed, but there was one to change.'
-            );
-        }
+        self::assertNotSame(
+            'FALSE',
+            $changed,
+            'wpmcp_migrate_token_user_ids() returned false, which is its documented'
+            . ' "the UPDATE failed" answer. wpmcp_install() treats that as a reason not'
+            . ' to stamp the schema version, so the plugin is now in its retry loop.'
+        );
 
         self::assertSame(
             self::LEGACY_CREATED_BY,

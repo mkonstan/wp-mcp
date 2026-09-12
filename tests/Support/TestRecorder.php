@@ -126,6 +126,13 @@ final class TestRecorder
         && \$_SERVER['{$header}'] === \$wpmcp_test_run;
 };
 
+/*
+ * CAPPED, both ways. This is a read-append-write on every event, so an unbounded log is
+ * O(n^2) in bytes within the TTL, and the events it records carry attacker-shaped values
+ * (an Origin header, a tool name). 200 entries is far more than any single test makes -
+ * the assertions count to 1 - so a run that hits the cap has a runaway, and keeping the
+ * NEWEST 200 is what leaves that visible.
+ */
 \$wpmcp_test_record = static function (\$event, \$detail) use (\$wpmcp_test_is_ours, \$wpmcp_test_transient) {
     if (!\$wpmcp_test_is_ours()) {
         return;
@@ -137,7 +144,22 @@ final class TestRecorder
         \$log = array();
     }
 
-    \$log[] = array('event' => (string) \$event, 'detail' => (array) \$detail);
+    \$trim = static function (\$value) use (&\$trim) {
+        if (is_array(\$value)) {
+            return array_map(\$trim, \$value);
+        }
+
+        return is_string(\$value) && strlen(\$value) > 512
+            ? substr(\$value, 0, 512) . '...'
+            : \$value;
+    };
+
+    \$log[] = array('event' => (string) \$event, 'detail' => \$trim((array) \$detail));
+
+    if (count(\$log) > 200) {
+        \$log = array_slice(\$log, -200);
+    }
+
     set_transient(\$wpmcp_test_transient, \$log, 600);
 };
 

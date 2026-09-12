@@ -422,7 +422,12 @@ final class Fixtures
             self::phpString(self::runPrefix() . '%')
         ));
 
+        // Disarms this run's mu-plugins as well as deleting them.
         MuPlugin::removeOurs();
+
+        foreach (self::ours(self::leftoverTransients()) as $name) {
+            WpCli::tryEvaluate(sprintf('echo (int) delete_transient(%s);', self::phpString($name)));
+        }
 
         self::warnAboutForeignDebris();
     }
@@ -462,6 +467,10 @@ final class Fixtures
             $lines[] = '  mu-plugin         ' . $file;
         }
 
+        foreach (self::foreign(self::leftoverTransients()) as $name) {
+            $lines[] = '  transient         ' . $name;
+        }
+
         if ($lines === []) {
             return '';
         }
@@ -472,7 +481,8 @@ final class Fixtures
             array_values(self::foreign(self::leftoverUsers())),
             array_values(self::foreign(self::leftoverPosts())),
             array_values(self::foreign(self::leftoverTokenLabels())),
-            array_values(self::foreign(MuPlugin::leftovers()))
+            array_values(self::foreign(MuPlugin::leftovers())),
+            array_values(self::foreign(self::leftoverTransients()))
         ) as $name) {
             $suffixes[self::runIdIn($name) ?: '(no run id)'] = true;
         }
@@ -603,6 +613,37 @@ final class Fixtures
             }
 
             $found[(int) $parts[0]] = $parts[1];
+        }
+
+        return $found;
+    }
+
+    /**
+     * Fixture-named transients still in the options table.
+     *
+     * The harness writes two - the mu-plugin arming flag and the recorder's log - and
+     * both expire on their own, but a debris check that reports "clean" while two
+     * `wpmcp-test-*` rows sit in wp_options is making a claim it has not checked.
+     *
+     * @return array<string, string> name => name (the name IS the identity here)
+     */
+    public static function leftoverTransients(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            'global $wpdb; $rows = $wpdb->get_col($wpdb->prepare('
+            . '"SELECT option_name FROM $wpdb->options WHERE option_name LIKE %%s", %s));'
+            . ' foreach ((array) $rows as $n) { echo $n, "\n"; }',
+            self::phpString('_transient_' . self::PREFIX . '%')
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $name = substr(trim($line, "\r\n "), strlen('_transient_'));
+
+            if (str_starts_with((string) $name, self::PREFIX)) {
+                $found[$name] = $name;
+            }
         }
 
         return $found;
