@@ -298,13 +298,14 @@ function wpmcp_cannot($what) {
  * silently dropped, because "I asked for three categories and got two" has to be
  * visible to whatever asked.
  *
- * @return array{assigned: array<string, list<int>>, refused: array<string, list<string>>}
+ * @return array{assigned: array<string, list<int>>, refused: array<string, list<string>>, failed: array<string, string>}
  *   refused lists, per taxonomy, the names that would have needed edit_terms, and the
  *   marker '*' for a taxonomy the caller cannot assign in at all.
  */
 function wpmcp_apply_terms($post_id, $terms) {
     $assigned = array();
     $refused  = array();
+    $failed   = array();
 
     foreach ((array) $terms as $tax => $vals) {
         $tax = sanitize_key($tax);
@@ -322,7 +323,17 @@ function wpmcp_apply_terms($post_id, $terms) {
         $ids = array();
         foreach ((array) $vals as $v) {
             if (is_numeric($v)) {
-                $ids[] = (int) $v;
+                // term_exists IN THIS TAXONOMY, because wp_set_object_terms does not
+                // complain about an id that is not: core's loop does `if ( ! $term_info
+                // ) { if ( is_int( $term ) ) continue; }`, so a numeric id belonging to
+                // another taxonomy - or to nothing - is silently skipped and the caller
+                // is told the assignment succeeded. Refuse it here instead, where it
+                // can be named.
+                if (term_exists((int) $v, $tax)) {
+                    $ids[] = (int) $v;
+                } else {
+                    $refused[$tax][] = (string) $v;
+                }
                 continue;
             }
             $t = get_term_by('name', (string) $v, $tax);
@@ -339,12 +350,22 @@ function wpmcp_apply_terms($post_id, $terms) {
         }
 
         if ($ids) {
-            wp_set_object_terms($post_id, $ids, $tax, false);
-            $assigned[$tax] = $ids;
+            // The return was ignored. wp_set_object_terms answers with a WP_Error on a
+            // failed insert or a broken taxonomy, and swallowing it reported terms as
+            // assigned that are not on the post. A failure is not a refusal - the
+            // caller was allowed to do this and it did not happen - so it gets its own
+            // key rather than being folded into `refused`.
+            $set = wp_set_object_terms($post_id, $ids, $tax, false);
+
+            if (is_wp_error($set)) {
+                $failed[$tax] = $set->get_error_message();
+            } else {
+                $assigned[$tax] = $ids;
+            }
         }
     }
 
-    return array('assigned' => $assigned, 'refused' => $refused);
+    return array('assigned' => $assigned, 'refused' => $refused, 'failed' => $failed);
 }
 
 /** Resolve an editable post by id, or a WP_Error. $badTypeMsg is the bad_type message. */
@@ -562,6 +583,7 @@ function wpmcp_content_tools() {
                 // Reported, not swallowed: a caller that asked for three categories
                 // and got two has to be able to see which one did not happen.
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
             $p = get_post($id);
             $out['status'] = $p ? $p->post_status : null;
@@ -618,6 +640,7 @@ function wpmcp_content_tools() {
                 $t = wpmcp_apply_terms($id, $a['terms']);
                 $changed[] = 'terms';
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
             $p = get_post($id);
             $out['status']  = $p->post_status;
@@ -1006,11 +1029,13 @@ function wpmcp_comment_tools() {
             $post_id  = (int) $pc->comment_post_ID;
             $moderator = current_user_can('moderate_comments');
 
-            // wp_insert_comment checks nothing at all: no capability, no comments_open.
-            // (The comments_open() guard in core is in wp_handle_comment_submission,
-            // the front-end path, which this never reaches.) read_post was too low a
-            // bar - this writes, it does not read. wp-admin's reply requires edit_post
-            // on the post being replied on; match that.
+            // Neither wp_insert_comment nor wp_new_comment checks a capability, and
+            // neither checks comments_open: core's comments_open() guard lives in
+            // wp_handle_comment_submission, the front-end path, which this never
+            // reaches. read_post was too low a bar - this writes, it does not read.
+            // wp-admin's reply requires edit_post on the post being replied on; match
+            // that. These three gates stay IN FRONT of core's pipeline below, because
+            // core's pipeline decides approval, not authorisation.
             //
             // not_found rather than a forbidden, and checked with read_post first, so a
             // caller who cannot even see the post does not learn the comment exists.
@@ -1029,10 +1054,11 @@ function wpmcp_comment_tools() {
 
             $u   = wp_get_current_user();
             $now = current_time('mysql');
-            // Every key wp_allow_comment() reads is supplied: it dereferences
-            // comment_author_IP, comment_agent, comment_author_url and
-            // comment_date_gmt directly, and on PHP 8 a missing one is a warning on
-            // the wire, not a silent null.
+            // Every key wp_new_comment() and wp_allow_comment() read is supplied,
+            // including the ones core would otherwise fill from $_SERVER:
+            // comment_author_IP goes through wpmcp_client_ip() so the proxy filter
+            // applies, and comment_agent names this plugin rather than whatever
+            // User-Agent the MCP client happened to send.
             $comment = array(
                 'comment_post_ID'      => $post_id,
                 'comment_parent'       => $parent,
@@ -1048,21 +1074,32 @@ function wpmcp_comment_tools() {
                 'comment_type'         => 'comment',
             );
 
-            // Auto-approval is a moderator's privilege. For everybody else the site's
-            // own rules decide, via the same wp_allow_comment() the front end uses -
-            // so the moderation queue, the blocklist and Akismet all still apply
-            // instead of being walked past by anything holding an admin-scope token.
-            if ($moderator) {
-                $comment['comment_approved'] = 1;
-            } else {
-                $allowed = wp_allow_comment($comment, true);
-                if (is_wp_error($allowed)) { return $allowed; }
-                // wp_allow_comment returns 1, 0, 'spam' or 'trash'.
-                $comment['comment_approved'] = $allowed;
-            }
+            // CORE'S PIPELINE, not a hand-rolled one.
+            //
+            // This used to call wp_allow_comment() and then wp_insert_comment()
+            // directly, and claimed in a commit message that "Akismet still applies".
+            // It did not. Akismet, and every other spam or moderation plugin, hooks
+            // `preprocess_comment` - applied in wp_new_comment()
+            // (wp-includes/comment.php, first thing it does) - and `comment_post`,
+            // which is where the moderator and post-author notification mails come
+            // from. Neither fires from wp_insert_comment(). wp_allow_comment() alone
+            // gives the blocklist, the moderation option, the duplicate check and the
+            // flood check, and nothing else.
+            //
+            // comment_approved is deliberately NOT set here. wp_new_comment() ->
+            // wp_allow_comment() -> wp_check_comment_data() already answers 1 for a
+            // user who holds moderate_comments or who owns the post, and runs
+            // everybody else past check_comment and the blocklist - so the two-branch
+            // version of this collapsed into core's own decision, which is the one the
+            // front end and the REST controller both use.
+            //
+            // $wp_error = true, so a duplicate (409) or a flood (429) comes back as a
+            // WP_Error with its message instead of wp_die()ing inside a REST request.
+            $cid = wp_new_comment($comment, true);
 
-            $cid = wp_insert_comment($comment);
+            if (is_wp_error($cid)) { return $cid; }
             if (!$cid) { return new WP_Error('failed', 'Could not create reply.'); }
+
             return array(
                 'id'     => (int) $cid,
                 'status' => wp_get_comment_status((int) $cid),
