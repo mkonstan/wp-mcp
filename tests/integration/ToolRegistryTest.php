@@ -302,9 +302,18 @@ add_filter('wpmcp_tools', static function (\$tools) {
         'run'         => \$run,
     );
 
-    // Declared properly; must survive.
+    // Declared properly; must survive. ANNOTATIONS INCLUDED since Sprint 5 made them a
+    // registration requirement - the control has to satisfy every check there is, or it
+    // stops being a control. The five rejected entries above are each refused for a
+    // reason checked BEFORE annotations, so their reasons are unchanged.
     \$tools['{$control}'] = array(
         'write'       => false,
+        'annotations' => array(
+            'readOnlyHint'    => true,
+            'destructiveHint' => false,
+            'idempotentHint'  => true,
+            'openWorldHint'   => false,
+        ),
         'description' => 'wp-mcp test fixture: correctly declared.',
         'inputSchema' => \$schema,
         'run'         => static function (\$args) { return array('ok' => true); },

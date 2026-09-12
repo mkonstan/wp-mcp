@@ -494,8 +494,19 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
 add_filter('wpmcp_tools', static function (\$tools) {
     \$schema = array('type' => 'object', 'properties' => new stdClass());
 
+    // Sprint 5 made the four annotations a registration requirement, so a fixture tool
+    // needs them too or the registry drops it and these tests lose their subject. Read
+    // tools that do nothing: read-only, harmless, repeatable, local.
+    \$ann = array(
+        'readOnlyHint'    => true,
+        'destructiveHint' => false,
+        'idempotentHint'  => true,
+        'openWorldHint'   => false,
+    );
+
     \$tools['{$name}'] = array(
         'write'       => false,
+        'annotations' => \$ann,
         'description' => 'wp-mcp test fixture: throws a TypeError.',
         'inputSchema' => \$schema,
         'run'         => static function (\$args) {
@@ -507,6 +518,7 @@ add_filter('wpmcp_tools', static function (\$tools) {
     // act on. term_exists is what create-term gets when the term is already there.
     \$tools['{$relay}'] = array(
         'write'       => false,
+        'annotations' => \$ann,
         'description' => 'wp-mcp test fixture: a relayable core WP_Error.',
         'inputSchema' => \$schema,
         'run'         => static function (\$args) {
@@ -518,6 +530,7 @@ add_filter('wpmcp_tools', static function (\$tools) {
     // exactly where wpdb puts it.
     \$tools['{$opaque}'] = array(
         'write'       => false,
+        'annotations' => \$ann,
         'description' => 'wp-mcp test fixture: an opaque core WP_Error.',
         'inputSchema' => \$schema,
         'run'         => static function (\$args) {

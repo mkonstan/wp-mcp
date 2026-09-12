@@ -138,7 +138,11 @@ jobs:
         # the log, and no WpMcp test class that contributed none.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2; do
+          # sprint-3 and sprint-4 are NOT in this list, and that is a gap rather than a
+          # decision: they were never added when those sprints closed. Adding them is a
+          # one-word change, but it has to be made while watching the result in CI, so it
+          # belongs to whoever does it rather than to Sprint 5.
+          for group in sprint-0 sprint-1 sprint-2 sprint-5; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"

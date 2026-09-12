@@ -380,6 +380,14 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
 add_filter('wpmcp_tools', static function (\$tools) {
     \$tools['{$name}'] = array(
         'write'       => false,
+        // Required at registration since Sprint 5; without them the registry drops the
+        // tool and the id-less-call assertion would pass because nothing ran at all.
+        'annotations' => array(
+            'readOnlyHint'    => true,
+            'destructiveHint' => false,
+            'idempotentHint'  => true,
+            'openWorldHint'   => false,
+        ),
         'description' => 'wp-mcp test fixture: records that it ran.',
         'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
         'run'         => static function (\$args) {
