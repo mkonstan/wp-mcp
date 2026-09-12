@@ -19,15 +19,21 @@
  *   current_user_id  int         what get_current_user_id() returns
  *   users            array<int,  string>  id => user_login; get_userdata() returns an
  *                                object for these ids and false for every other
+ *   caps             list<string> capabilities current_user_can() grants
+ *   actions          list<array>  every do_action() firing, [hook, ...args]
  *
  * ADDED FOR SPRINT 1 (user-bound tokens). wpmcp_mint() is the first plugin function a
  * unit test invokes, and it needs exactly: WP_Error/is_wp_error to report a bad user,
  * get_current_user_id + get_userdata to resolve and validate one, current_time and
  * sanitize_text_field for the row it writes. Nothing here is speculative.
+ *
+ * ADDED FOR SPRINT 2 (auth events). wpmcp_mint() now fires one, which reaches
+ * do_action through wpmcp_auth_event() and apply_filters through wpmcp_client_ip().
+ * do_action RECORDS rather than ignoring, because "the event fired" is the claim.
  */
 
 if (!isset($GLOBALS['wpmcp_test_wp'])) {
-    $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array(), 'caps' => array());
+    $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array(), 'caps' => array(), 'actions' => array());
 }
 
 if (!class_exists('WP_Error')) {
@@ -127,6 +133,31 @@ if (!function_exists('current_user_can')) {
         }
 
         return false;
+    }
+}
+
+if (!function_exists('apply_filters')) {
+    /**
+     * No filters are registered in the unit tier, so this returns the value unchanged
+     * - which is what real WordPress does with no callbacks attached. Reached from
+     * wpmcp_client_ip() (the wpmcp_client_ip filter) via wpmcp_auth_event().
+     */
+    function apply_filters($hook, $value, ...$args)
+    {
+        return $value;
+    }
+}
+
+if (!function_exists('do_action')) {
+    /**
+     * Records every fired action in $GLOBALS['wpmcp_test_wp']['actions'] as
+     * [hook, args...], so a unit test can assert that wpmcp_mint() fired exactly one
+     * mint event with the right context. A no-op stub would let "the event fires" pass
+     * without an event.
+     */
+    function do_action($hook, ...$args)
+    {
+        $GLOBALS['wpmcp_test_wp']['actions'][] = array_merge([(string) $hook], $args);
     }
 }
 

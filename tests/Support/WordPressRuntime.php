@@ -25,7 +25,7 @@ final class WordPressRuntime
     {
         require_once __DIR__ . '/wp-runtime-stubs.php';
 
-        $GLOBALS['wpmcp_test_wp'] = ['current_user_id' => 0, 'users' => [], 'caps' => []];
+        $GLOBALS['wpmcp_test_wp'] = ['current_user_id' => 0, 'users' => [], 'caps' => [], 'actions' => []];
 
         $wpdb = new FakeWpdb();
         $GLOBALS['wpdb'] = $wpdb;
@@ -53,6 +53,24 @@ final class WordPressRuntime
     public static function allowCap(string $capability): void
     {
         $GLOBALS['wpmcp_test_wp']['caps'][] = $capability;
+    }
+
+    /**
+     * The arguments of every do_action($hook, ...) fired since install().
+     *
+     * @return list<array<int, mixed>> one entry per firing, arguments in order
+     */
+    public static function firedActions(string $hook): array
+    {
+        $found = [];
+
+        foreach ($GLOBALS['wpmcp_test_wp']['actions'] as $fired) {
+            if (($fired[0] ?? null) === $hook) {
+                $found[] = array_slice($fired, 1);
+            }
+        }
+
+        return $found;
     }
 
     /** Register $id as an existing user and make it the current one. */

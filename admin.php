@@ -10,6 +10,29 @@ add_action('admin_menu', function () {
     add_options_page('WP MCP', 'WP MCP', 'manage_options', 'wp-mcp', 'wpmcp_render_admin');
 });
 
+/**
+ * Can this site serve the endpoint at all?
+ *
+ * wpmcp_authorize() refuses every request that is not over HTTPS, so a site that
+ * cannot do HTTPS has a dormant endpoint and the admin page must say so instead of
+ * handing out a URL that will always be refused.
+ *
+ * Two ways to be sure, and either is enough: the `home` option says https, or this
+ * very page arrived over TLS. The second matters because the option can lag behind
+ * reality - on the site this was developed against, `home` is http:// while the site is
+ * reachable, and is_ssl() true, over https (verified). A site that is only reachable
+ * over http answers false to both.
+ */
+function wpmcp_site_is_https() {
+    if (is_ssl()) { return true; }
+    return strtolower((string) wp_parse_url(home_url(), PHP_URL_SCHEME)) === 'https';
+}
+
+/** The endpoint URL, forced to https - the only scheme the endpoint answers on. */
+function wpmcp_endpoint_url($path = '') {
+    return set_url_scheme(rest_url('wpmcp/mcp' . $path), 'https');
+}
+
 function wpmcp_render_admin() {
     if (!current_user_can('manage_options')) { wp_die('Insufficient permissions.'); }
 
@@ -31,8 +54,8 @@ function wpmcp_render_admin() {
         } else {
             $owner_user = get_userdata($owner ? $owner : get_current_user_id());
             $minted = array(
-                'url'     => rest_url('wpmcp/mcp/' . $res['raw']),
-                'base'    => rest_url('wpmcp/mcp'),
+                'url'     => wpmcp_endpoint_url('/' . $res['raw']),
+                'base'    => wpmcp_endpoint_url(),
                 'raw'     => $res['raw'],
                 'scope'   => $scope,
                 'hours'   => $hours,
@@ -63,8 +86,24 @@ function wpmcp_render_admin() {
     ?>
     <div class="wrap">
       <h1>WP MCP</h1>
-      <p>Short-lived, IP-pinned tokens for the MCP endpoint. Read-only by default.
-         Endpoint base: <code><?php echo esc_html(rest_url('wpmcp/mcp/')); ?>{token}</code></p>
+      <p>Short-lived, IP-pinned tokens for the MCP endpoint. Read-only by default.</p>
+
+      <?php if (wpmcp_site_is_https()): ?>
+        <p>Endpoint base: <code><?php echo esc_html(wpmcp_endpoint_url('/')); ?>{token}</code></p>
+      <?php else: ?>
+        <?php // No URL at all: every request to it would be refused, and printing one
+              // that cannot work is worse than printing none. ?>
+        <div class="notice notice-error">
+          <p><strong>This site is not served over HTTPS, so the MCP endpoint is closed.</strong></p>
+          <p>Every request is refused with <code>403 HTTPS required</code> before the
+             token is even read - a token in a URL or an <code>Authorization</code>
+             header over plaintext is a token given away. Put the site on HTTPS and
+             the endpoint address appears here.</p>
+          <p>For a local development site with no certificate, and nowhere else, add
+             <code>define('WPMCP_ALLOW_INSECURE', true);</code> to
+             <code>wp-config.php</code>.</p>
+        </div>
+      <?php endif; ?>
 
       <?php if ($notice): ?><div class="notice notice-info is-dismissible"><p><?php echo esc_html($notice); ?></p></div><?php endif; ?>
 
@@ -113,15 +152,22 @@ function wpmcp_render_admin() {
         <div class="notice notice-success">
           <p><strong>Token created - copy it now, it won't be shown again:</strong></p>
           <p style="display:flex;gap:8px;align-items:center">
-            <input type="text" id="wpmcp-newtok" readonly style="flex:1;font-family:monospace" value="<?php echo esc_attr($minted['url']); ?>" onclick="this.select()">
+            <?php // The URL form on an https site; the bare token on one that has no
+                  // working endpoint, because a copyable http:// URL is a trap. ?>
+            <input type="text" id="wpmcp-newtok" readonly style="flex:1;font-family:monospace" value="<?php echo esc_attr(wpmcp_site_is_https() ? $minted['url'] : $minted['raw']); ?>" onclick="this.select()">
             <button type="button" class="button button-primary" onclick="var i=document.getElementById('wpmcp-newtok');i.focus();i.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}if(navigator.clipboard){navigator.clipboard.writeText(i.value).catch(function(){});}var b=this,t=b.textContent;b.textContent=ok?'Copied':'Select + Ctrl C';setTimeout(function(){b.textContent=t;},1500);">Copy</button>
           </p>
+          <?php if (!wpmcp_site_is_https()): ?>
+            <p><strong>That is the token itself, not a URL.</strong> This site is not on
+               HTTPS, so the endpoint refuses every request and there is no address
+               worth copying yet.</p>
+          <?php endif; ?>
           <p>Runs as: <strong><?php echo esc_html($minted['owner']); ?></strong> &middot;
              Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
              Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong> &middot;
              It binds to the IP of the first tool call; once bound, every request must match.</p>
           <p style="margin-top:10px"><strong>Header style</strong> (recommended; keeps the token out of server logs):</p>
-          <p>URL: <code><?php echo esc_html($minted['base']); ?></code><br>
+          <p><?php if (wpmcp_site_is_https()): ?>URL: <code><?php echo esc_html($minted['base']); ?></code><br><?php endif; ?>
              Header: <code>Authorization: Bearer <?php echo esc_html($minted['raw']); ?></code></p>
         </div>
       <?php endif; ?>

@@ -9,7 +9,11 @@
  *   POST /wp-json/wpmcp/mcp           (token in Authorization: Bearer header)
  * Speaks minimal MCP JSON-RPC 2.0: initialize, notifications/initialized,
  * tools/list, tools/call, ping. Single JSON response per request (no SSE).
- * Auth: the token is validated per request (expiry + TOFU IP).
+ * Transport: HTTPS required, Origin checked against the site's own, POST must be
+ *   application/json. All three before the token is read - see wpmcp_authorize(),
+ *   whose docblock states the full order of the gates.
+ * Auth: the token is validated per request (shape, lookup, user, expiry, TOFU IP).
+ *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
  */
@@ -50,29 +54,236 @@ function wpmcp_extract_token(WP_REST_Request $req) {
     return '';
 }
 
+/* ---------------- transport gates ---------------- */
+
+/**
+ * Is this request allowed to carry a credential at all?
+ *
+ * MEASURED, NOT ASSUMED, on the site under test (Local by Flywheel, nginx in front of
+ * PHP-FPM): `is_ssl()` answers true over https://jaygroup.local and false over
+ * http://jaygroup.local. Local terminates TLS in its router and forwards to the site's
+ * nginx on plain HTTP, but that nginx maps X-Forwarded-Proto into the `HTTPS` fastcgi
+ * parameter (`map $http_x_forwarded_proto $resolved_scheme` ->
+ * `fastcgi_param HTTPS $fastcgi_https`), so $_SERVER['HTTPS'] is 'on' and is_ssl() is
+ * already right. Probed with a temporary mu-plugin: is_ssl=true HTTPS=on
+ * XFP=https over https, is_ssl=false HTTPS='' XFP=http over http.
+ *
+ * THEREFORE THIS FUNCTION DOES NOT READ HTTP_X_FORWARDED_PROTO. Trusting a forwarded
+ * header here would let any client that can reach PHP claim the request was encrypted
+ * when it was not - which is the whole gate. A deployment where is_ssl() genuinely
+ * cannot see the truth must teach WordPress (the documented $_SERVER['HTTPS']
+ * assignment in wp-config.php, behind whatever proxy check that site trusts), the same
+ * place home_url() and every cookie already depend on.
+ *
+ * WPMCP_ALLOW_INSECURE === true, and only exactly true, is the escape hatch for a
+ * local development site with no certificate. It is a constant rather than an option
+ * so that turning it on requires filesystem access, not a compromised admin session.
+ */
+function wpmcp_request_is_secure() {
+    if (defined('WPMCP_ALLOW_INSECURE') && WPMCP_ALLOW_INSECURE === true) { return true; }
+    return is_ssl();
+}
+
+/**
+ * scheme://host[:port] of a URL, lower-cased, with the default port dropped - or ''
+ * when the input is not a usable absolute URL.
+ *
+ * '' is what makes `Origin: null` (a sandboxed iframe, a file:// document, some
+ * redirects) fail closed rather than match something.
+ */
+function wpmcp_origin_of($url) {
+    $p = wp_parse_url((string) $url);
+    if (!is_array($p) || empty($p['scheme']) || empty($p['host'])) { return ''; }
+
+    $scheme  = strtolower((string) $p['scheme']);
+    $host    = strtolower((string) $p['host']);
+    $port    = isset($p['port']) ? (int) $p['port'] : 0;
+    $default = ($scheme === 'https') ? 443 : (($scheme === 'http') ? 80 : 0);
+
+    return $scheme . '://' . $host . (($port && $port !== $default) ? ':' . $port : '');
+}
+
+/**
+ * Origins a browser may send from. The site's own, plus whatever a site adds.
+ *
+ * home_url(), site_url() and admin_url() rather than a hand-built string, because a
+ * site can serve wp-admin from a different host than the front end, and because
+ * WordPress already knows the answer.
+ *
+ * WORTH KNOWING: get_home_url() returns the option's URL with its scheme REPLACED by
+ * https whenever is_ssl() is true (wp-includes/link-template.php). On the site under
+ * test the `home` option is `http://jaygroup.local` and home_url() still answers
+ * `https://jaygroup.local` over TLS - verified. Since wpmcp_request_is_secure() runs
+ * before this, the allowlist is therefore built from https origins on any request that
+ * gets this far, which is exactly what a browser will have sent.
+ */
+function wpmcp_allowed_origins() {
+    $allowed = array();
+
+    foreach (array(home_url(), site_url(), admin_url()) as $url) {
+        $origin = wpmcp_origin_of($url);
+        if ($origin !== '') { $allowed[$origin] = true; }
+    }
+
+    /**
+     * Additional origins a browser may post to the MCP endpoint from.
+     *
+     * @param array $origins list of absolute URLs or scheme://host[:port] strings.
+     */
+    foreach ((array) apply_filters('wpmcp_allowed_origins', array()) as $extra) {
+        $origin = wpmcp_origin_of($extra);
+        if ($origin !== '') { $allowed[$origin] = true; }
+    }
+
+    return array_keys($allowed);
+}
+
+/** Exact scheme+host+port match against the allowlist. */
+function wpmcp_origin_allowed($origin) {
+    $origin = wpmcp_origin_of($origin);
+    if ($origin === '') { return false; }
+    return in_array($origin, wpmcp_allowed_origins(), true);
+}
+
+/**
+ * Is the body declared as JSON? Parameters are allowed, so
+ * `application/json; charset=utf-8` passes and `text/plain` does not.
+ *
+ * Strict on the type itself: no `+json` suffixes, no `application/json-rpc`. A client
+ * that cannot set one header correctly is not a client this endpoint should be
+ * guessing for.
+ */
+function wpmcp_content_type_is_json(WP_REST_Request $req) {
+    $header = (string) $req->get_header('content-type');
+    if ($header === '') { return false; }
+
+    $type = strtolower(trim(explode(';', $header)[0]));
+    return $type === 'application/json';
+}
+
+/**
+ * THE one refusal for every token failure: same status, same code, same message, same
+ * bytes. See wpmcp_validate() for why the reason lives only in the auth event.
+ */
+function wpmcp_unauthorized() {
+    return new WP_Error('wpmcp_unauthorized', 'Unauthorized.', array('status' => 401));
+}
+
 /**
  * Validate the token against this request. Stash the row on success.
- * Returns true, or a WP_Error (becomes 401/403) - which also makes the
- * endpoint effectively dormant when no valid token exists.
+ *
+ * THE ORDER OF THE GATES - this is the whole security contract of the endpoint:
+ *
+ *   1. HTTPS            is_ssl(), unless WPMCP_ALLOW_INSECURE === true -> 403
+ *   2. Origin           present and not ours -> 403; absent -> allowed (non-browser)
+ *   3. Content-Type     not application/json -> 415
+ *   4. token shape      64 lower-case hex, from the path or Bearer -> 401
+ *   5. token lookup     by SHA-256 hash                            -> 401
+ *   6. user exists      get_userdata(user_id)                      -> 401
+ *   7. expiry           expires_at <= now                          -> 401
+ *   8. IP pin           bound_ip set and different                 -> 401
+ *      ... then the pin is CREATED here, for a tools/call on an unbound token
+ *   9. scope            enforced at dispatch, in wpmcp_handle()
+ *
+ * WHY THIS ORDER. 1-3 are properties of the envelope and cost nothing, so they run
+ * before the credential is even read: a request refused for being plaintext must not
+ * first have its token looked up in the database, or the refusal becomes a token
+ * oracle with a timing side channel. 4-8 narrow from "is this string even a token" to
+ * "is it this token, still alive, from the right place", cheapest first and each one a
+ * precondition of the next. 6 precedes 7 so a dead token's row is not even touched.
+ *
+ * NOTHING READS THE REQUEST BODY BEFORE 8. The TOFU pin needs to know whether this is
+ * a tools/call, which means parsing JSON an unauthenticated caller supplied - so the
+ * parse moved BELOW the credential check. Before this it happened first, on every
+ * request, valid token or not.
+ *
+ * 9 IS THE ONE GATE NOT IN THIS FUNCTION, and deliberately. The scope decision needs
+ * the tool name, which only exists once the body is parsed, and its refusal is an MCP
+ * tool error (200 with isError) rather than an HTTP status, because a read token
+ * calling a write tool is a correctly authenticated request asking for something it
+ * may not have. It fires the scope_deny event from wpmcp_handle().
+ *
+ * Returns true, or a WP_Error - which also makes the endpoint effectively dormant when
+ * no valid token exists.
+ *
+ * DECIDED ONCE PER REQUEST, and it has to be, because WordPress calls a
+ * permission_callback TWICE. `rest_send_allow_header()`, hooked on `rest_post_dispatch`
+ * by rest_api_default_filters (wp-includes/rest-api.php:253, :883-900 on the site under
+ * test), calls every matched handler's permission_callback again purely to work out the
+ * `Allow` header - after the response has been produced. MEASURED, not assumed: the
+ * first version of the sprint-2 tests found every auth event firing exactly twice, and
+ * that is where the second one came from.
+ *
+ * Without the memo that second call would re-run wpmcp_validate(), which means the
+ * use_count of every token would advance by two per request and last_used_at would be
+ * written twice - a pre-existing inaccuracy in the admin table, not something this
+ * sprint introduced - and every auth event would be a duplicate. Keyed on the request
+ * object, so the memo cannot leak between two logically different authorizations.
  */
 function wpmcp_authorize(WP_REST_Request $req) {
-    $raw = wpmcp_extract_token($req);
-    // Only tool calls create the IP pin; once bound, validation enforces it for all methods.
-    $enforce_ip = (wpmcp_request_method($req) === 'tools/call');
-    $row = wpmcp_validate($raw, wpmcp_client_ip(), $enforce_ip);
-    if (is_wp_error($row)) {
-        $code = $row->get_error_code();
-        $status = ($code === 'ip_mismatch') ? 403 : 401;
-        return new WP_Error('wpmcp_' . $code, $row->get_error_message(), array('status' => $status));
+    static $decided = array();
+
+    $memo = spl_object_id($req);
+    if (array_key_exists($memo, $decided)) { return $decided[$memo]; }
+
+    $decision        = wpmcp_authorize_now($req);
+    $decided[$memo]  = $decision;
+
+    return $decision;
+}
+
+/** The gates themselves. Call wpmcp_authorize(); this is the uncached body. */
+function wpmcp_authorize_now(WP_REST_Request $req) {
+    $ip = wpmcp_client_ip();
+
+    // 1. HTTPS. Before the token is read, so nothing about it leaks - not even the
+    // time it takes to look one up.
+    if (!wpmcp_request_is_secure()) {
+        wpmcp_auth_event('insecure_deny', array('ip' => $ip));
+        return new WP_Error('wpmcp_https_required', 'HTTPS required.', array('status' => 403));
     }
+
+    // 2. Origin. Absent means a non-browser client - curl, an MCP server, a CLI - and
+    // is allowed: the header is a browser's honest statement about who opened the
+    // page, and its absence is not a claim at all. Present and foreign is a browser
+    // being driven by somebody else's page, which is the CSRF this closes.
+    $origin = (string) $req->get_header('origin');
+    if ($origin !== '' && !wpmcp_origin_allowed($origin)) {
+        wpmcp_auth_event('origin_deny', array('origin' => $origin, 'ip' => $ip));
+        return new WP_Error('wpmcp_forbidden_origin', 'Forbidden.', array('status' => 403));
+    }
+
+    // 3. Content-Type. A form-encoded or text/plain POST is what a cross-origin
+    // <form> can send without a preflight, so requiring JSON is what makes the
+    // browser ask permission first.
+    if (!wpmcp_content_type_is_json($req)) {
+        wpmcp_auth_event('content_type_deny', array(
+            'content_type' => (string) $req->get_header('content-type'),
+            'ip'           => $ip,
+        ));
+        return new WP_Error(
+            'wpmcp_unsupported_media_type',
+            'Content-Type must be application/json.',
+            array('status' => 415)
+        );
+    }
+
+    // 4-8.
+    $row = wpmcp_validate(wpmcp_extract_token($req), $ip);
+    if (is_wp_error($row)) {
+        // The reason is already in the validate_fail event. One answer on the wire.
+        return wpmcp_unauthorized();
+    }
+
+    // The TOFU pin, now that the token has passed: only a tool call creates it, so
+    // discovery and the handshake can happen from anywhere. This is the first thing
+    // on the request path that looks at the body.
+    if (wpmcp_request_method($req) === 'tools/call') {
+        wpmcp_bind_token_ip($row, $ip);
+    }
+
     // Identity: run as the user the token was minted for, so every capability check
     // inside the tools is that user's. scope still gates write tools on top.
-    //
-    // wpmcp_validate() has already refused a token whose user was deleted - and it
-    // does so before it writes anything, so a dead token cannot pin an IP or bump
-    // use_count. The refusal arrives here as the ordinary not_found above, which is
-    // the point: the wire body is the one a bogus token gets. This lookup is the
-    // cached second read of a user already known to exist.
     $GLOBALS['wpmcp_session'] = $row;
     wp_set_current_user((int) $row->user_id);
     return true;
@@ -136,9 +347,16 @@ function wpmcp_handle(WP_REST_Request $req) {
             if (!isset($tools[$name])) {
                 return wpmcp_rpc_err($id, -32602, 'Unknown tool: ' . $name);
             }
-            // Scope gate: read tokens cannot call write tools.
+            // Scope gate - gate 9 of wpmcp_authorize()'s sequence, enforced here
+            // because it is the first point at which the tool name exists.
             $session = $GLOBALS['wpmcp_session'];
             if (!empty($tools[$name]['write']) && (!$session || $session->scope !== 'admin')) {
+                wpmcp_auth_event('scope_deny', array(
+                    'token_id' => $session ? (int) $session->id : 0,
+                    'user_id'  => $session ? (int) $session->user_id : 0,
+                    'scope'    => $session ? (string) $session->scope : '',
+                    'tool'     => $name,
+                ));
                 return wpmcp_rpc_ok($id, wpmcp_tool_result('This tool requires an admin-scope token.', true));
             }
             $result = call_user_func($tools[$name]['run'], $args);
