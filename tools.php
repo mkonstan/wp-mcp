@@ -248,8 +248,20 @@ function wpmcp_core_tools() {
                     'post_status'    => isset($args['status']) ? sanitize_key($args['status']) : 'any',
                     'posts_per_page' => isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20,
                     'no_found_rows'  => true,
-                    // Non-public statuses are filtered by what the token's user may read:
-                    // without read_private_posts, only their own private posts come back.
+                    // Without read_private_posts, only the user's OWN private posts
+                    // come back.
+                    //
+                    // KNOWN LIMIT, read WP_Query before trusting this arg further.
+                    // 'perm' => 'readable' scopes exactly one bucket - the `private`
+                    // status - and only when post_status is an explicit list. The
+                    // 'any' keyword below takes a different branch entirely (it just
+                    // excludes exclude_from_search statuses), and `draft` lands in the
+                    // bucket only 'editable' scopes. So the default status:"any", and
+                    // status:"draft", still LIST other authors' private and draft
+                    // posts: id, title, status, slug, link. Not content - get-post
+                    // checks read_post per id and refuses. Closing that is a change to
+                    // this tool's default output and was left out of Sprint 1 on
+                    // purpose; see the sprint report.
                     'perm'           => 'readable',
                 ));
                 $items = array();
