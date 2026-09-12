@@ -20,14 +20,22 @@
  *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
- * Registry: a tool without an explicit boolean `write`, a string description and an
- *   array inputSchema is not registered; a built-in's name cannot be re-declared.
+ * Registry: a tool without an explicit boolean `write`, a string description, an array
+ *   inputSchema and four boolean annotations is not registered; a built-in's name
+ *   cannot be re-declared.
+ * Input: every tools/call is validated against the tool's inputSchema BEFORE the tool
+ *   runs - see WpMcp\SchemaValidator and wpmcp_dispatch(). Unknown argument keys are
+ *   refused: `additionalProperties: false` is the default.
+ * Serialization: every schema leaving this endpoint goes through
+ *   wpmcp_objectify_schema(), because an empty PHP array encodes as `[]` and JSON
+ *   Schema wants `{}` in those positions.
  * Errors: FIVE JSON-RPC codes and no others - see wpmcp_handle(). Anything unexpected
  *   is one generic -32603 carrying a trace id; the throwable goes to trace.php's log.
  */
 if (!defined('ABSPATH')) { exit; }
 
 use WpMcp\ProtocolVersion;
+use WpMcp\SchemaValidator;
 
 /* Holds the validated token row between permission_callback and the handler. */
 $GLOBALS['wpmcp_session'] = null;
@@ -478,6 +486,16 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         directly, so a missing one is a PHP warning plus a null on
  *                         the wire - a malformed MCP listing for every client, caused
  *                         by one third-party entry.
+ *   annotations_incomplete
+ *                         no `annotations`, or one of the four hints missing, or one of
+ *                         them not a boolean. The hints are what a client uses to
+ *                         decide whether to ask the human first: a destructive tool
+ *                         with no `destructiveHint` is presented as safe, and MCP's own
+ *                         default for an ABSENT annotations block is
+ *                         `readOnlyHint: false, destructiveHint: true` - which a client
+ *                         that reads only what is present will not apply. Same rule as
+ *                         `write`: absence of a declaration is not a declaration of
+ *                         safety. See wpmcp_annotation_hints().
  *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
  *                         wins and the filter entry is dropped. A same-name entry is
  *                         how the fail-closed rule gets walked around one level up:
@@ -535,6 +553,10 @@ function wpmcp_tools() {
             $reason = 'description_not_string';
         } elseif (!isset($tool['inputSchema']) || !is_array($tool['inputSchema'])) {
             $reason = 'schema_not_array';
+        } elseif (!wpmcp_annotations_complete($tool)) {
+            // LAST in the chain on purpose: every reason above is the one a pre-Sprint-5
+            // entry would have hit, so adding this check did not renumber any of them.
+            $reason = 'annotations_incomplete';
         }
 
         if ($reason !== '') {
@@ -549,6 +571,174 @@ function wpmcp_tools() {
     }
 
     return $kept;
+}
+
+/**
+ * The four MCP tool annotations, as a closed list.
+ *
+ * They are HINTS, and the specification says so - a client is free to ignore them - but
+ * what a client does with them is ask the human first, or not. So the value of each one
+ * is a claim this server makes about a tool, and the four are required rather than
+ * optional for the same reason `write` is: a missing `destructiveHint` reads, to
+ * anything that only looks at what is present, as "not destructive".
+ *
+ *   readOnlyHint     the tool changes nothing. Derived: !write. NOT authored per tool,
+ *                    because `write` is already the gate a read-scope token is refused
+ *                    on, and two independent declarations of the same fact drift.
+ *                    code-list and code-read therefore carry readOnlyHint: false even
+ *                    though they only read - they are admin-scope tools by the `write`
+ *                    flag, and the hint erring toward "ask first" is the safe direction.
+ *   destructiveHint  the tool can destroy or overwrite data that was there before.
+ *                    Authored per tool. DEFAULT true WHEN UNSTATED, matching MCP's own
+ *                    default, so a new tool whose author did not think about it is
+ *                    treated as dangerous.
+ *   idempotentHint   the same call twice has no additional effect.
+ *   openWorldHint    the tool reaches outside this site. True for upload-media alone,
+ *                    which fetches a URL the caller supplies.
+ */
+function wpmcp_annotation_hints() {
+    return array('readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint');
+}
+
+/** All four hints present and boolean? The registry's check. */
+function wpmcp_annotations_complete($tool) {
+    if (!isset($tool['annotations']) || !is_array($tool['annotations'])) { return false; }
+
+    foreach (wpmcp_annotation_hints() as $hint) {
+        if (!array_key_exists($hint, $tool['annotations'])
+            || !is_bool($tool['annotations'][$hint])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* ---------------- the `{}` / `[]` serialization guard ---------------- */
+
+/**
+ * Empty PHP arrays that sit where JSON Schema expects an OBJECT, turned into `{}`.
+ *
+ * THE BUG IT CLOSES, in one line: `wp_json_encode(array())` is `[]`, and
+ * `"properties": []` is not a JSON Schema - a client that validates the tool list
+ * rejects the whole listing, and the server looks broken rather than wrong in one
+ * character. PHP has one array type for both of JSON's, so the distinction cannot be
+ * carried by the value; it has to be restored from the POSITION, which is what this
+ * function is. Sprint 4 already had to solve it once by hand, for `capabilities`, with
+ * a `new stdClass()` written inline at the call site - the one-off that this replaces.
+ *
+ * THE OBJECT POSITIONS ARE ENUMERATED, NOT GUESSED, and a blanket "every empty array
+ * becomes an object" would be WRONG: `required` and `enum` are JSON ARRAYS, so an empty
+ * one of those must stay `[]`. The positions are:
+ *
+ *   properties            a map of name => schema. Empty means `{}`.
+ *   additionalProperties  a schema, when it is not the boolean false.
+ *   items                 a schema.
+ *   default               only when the sibling `type` is `object`; a `default` under
+ *                         `type: array` is an array and stays one.
+ *   _meta, annotations    objects by definition.
+ *   the node itself       a schema is an object, so an empty one is `{}`.
+ *
+ * AT ANY DEPTH: `properties` recurses through every sub-schema, so a nested object
+ * property with no members of its own is caught too.
+ *
+ * Values that are already objects pass through untouched - a schema written with
+ * `new stdClass()` is already correct and this must not undo it.
+ */
+function wpmcp_objectify_schema($node) {
+    if (!is_array($node)) { return $node; }
+    if ($node === array()) { return new stdClass(); }
+
+    $out = array();
+
+    foreach ($node as $key => $value) {
+        switch ($key) {
+            case 'properties':
+                $out[$key] = wpmcp_objectify_object_map($value);
+                break;
+
+            case 'additionalProperties':
+            case 'items':
+                $out[$key] = is_array($value) ? wpmcp_objectify_schema($value) : $value;
+                break;
+
+            case 'default':
+                $out[$key] = ($value === array() && isset($node['type']) && $node['type'] === 'object')
+                    ? new stdClass()
+                    : $value;
+                break;
+
+            case '_meta':
+            case 'annotations':
+                $out[$key] = ($value === array()) ? new stdClass() : $value;
+                break;
+
+            default:
+                $out[$key] = $value;
+        }
+    }
+
+    return $out;
+}
+
+/**
+ * A map whose VALUES are JSON objects - a schema's `properties`, and `initialize`'s
+ * `capabilities`.
+ *
+ * Cast to an object rather than left as an associative array, so that a map whose keys
+ * happen to look like integers cannot come out as a JSON array either. The values go
+ * through wpmcp_objectify_schema(), which is what makes an empty one `{}` - and is why
+ * `capabilities: array('tools' => array())` serializes as `{"tools":{}}`.
+ */
+function wpmcp_objectify_object_map($map) {
+    if (!is_array($map)) { return $map; }
+    if ($map === array()) { return new stdClass(); }
+
+    $out = array();
+
+    foreach ($map as $name => $value) {
+        $out[$name] = wpmcp_objectify_schema($value);
+    }
+
+    return (object) $out;
+}
+
+/* ---------------- tools/list pagination ---------------- */
+
+/**
+ * How many tools one `tools/list` page carries.
+ *
+ * LARGER THAN THE SURFACE, deliberately: 20 built-ins plus anything a filter adds, so
+ * there is no second page today and `nextCursor` is absent. The parameter still has to
+ * be accepted and validated, because a client is entitled to send one back and a server
+ * that ignores `cursor` silently re-serves page one forever.
+ */
+define('WPMCP_TOOLS_PAGE_SIZE', 50);
+
+/** An offset as the opaque cursor a client sees. */
+function wpmcp_cursor_encode($offset) {
+    return base64_encode((string) (int) $offset);
+}
+
+/**
+ * A cursor back to an offset, or null when it is not one of ours.
+ *
+ * STRICT, AND CANONICAL: base64 in strict mode, decimal digits only, and the value has
+ * to re-encode to the exact string that was sent. Without that last test `MA==`, `MA=`
+ * and `MA` would all decode to 0, so three different cursors would address one page and
+ * "opaque" would mean "guessable". An absent cursor is offset 0; anything else is
+ * -32602 at the call site.
+ */
+function wpmcp_cursor_decode($cursor) {
+    if ($cursor === null || $cursor === '') { return 0; }
+    if (!is_string($cursor)) { return null; }
+
+    $decoded = base64_decode($cursor, true);
+
+    if ($decoded === false || $decoded === '' || !ctype_digit($decoded)) { return null; }
+    if (wpmcp_cursor_encode((int) $decoded) !== $cursor) { return null; }
+
+    return (int) $decoded;
 }
 
 /* ---------------- the handshake ---------------- */
@@ -666,7 +856,14 @@ function wpmcp_protocol_version_gate(WP_REST_Request $req, $id, $method) {
  *                            400 rather than 200 (see wpmcp_protocol_version_gate()).
  *   -32601  Method not found an unknown JSON-RPC method, `notifications/anything`
  *                            included once it carries an id.
- *   -32602  Invalid params   an unknown tool name on tools/call.
+ *   -32602  Invalid params   THE REQUEST'S OWN SHAPE is wrong, and nothing else: an
+ *                            unknown tool name, a `params.name` that is not a string, a
+ *                            `params.arguments` that is not an object, a `tools/list`
+ *                            cursor this server did not issue. An argument that fails
+ *                            the tool's inputSchema is NOT this - it is a tool error
+ *                            (`isError: true`, the failures as text), because the
+ *                            envelope was fine and the agent's recovery is to fix the
+ *                            call. See the validation block in wpmcp_dispatch().
  *   -32603  Internal error   ANYTHING unexpected. One message, "Internal error", plus
  *                            data.trace_id. The detail is in trace.php's log.
  *
@@ -763,12 +960,15 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             // tell a client the tool list changed, so claiming the capability would be a
             // lie a client could wait on.
             //
-            // new stdClass() AND NOT array(): wp_json_encode() turns an empty PHP array
-            // into `[]`, and `"tools": []` is not an object - a strict client rejects the
-            // whole initialize result. An empty object has to be asked for explicitly.
+            // THE EMPTY OBJECT IS ASKED FOR BY POSITION, not by an inline
+            // new stdClass(). wp_json_encode() turns an empty PHP array into `[]`, and
+            // `"tools": []` is not an object - a strict client rejects the whole
+            // initialize result. Sprint 4 fixed that here with a literal stdClass;
+            // Sprint 5 replaced it with the guard, so the same rule now holds for every
+            // schema too and there is one implementation rather than two.
             return wpmcp_rpc_ok($id, array(
                 'protocolVersion' => wpmcp_negotiated_protocol_version($params),
-                'capabilities'    => array('tools' => new stdClass()),
+                'capabilities'    => wpmcp_objectify_object_map(array('tools' => array())),
                 'serverInfo'      => array('name' => 'wp-mcp', 'version' => WPMCP_VER),
                 'instructions'    => wpmcp_server_instructions(),
             ));
@@ -777,17 +977,57 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             return wpmcp_rpc_ok($id, new stdClass());
 
         case 'tools/list':
+            // PAGINATION, and it is ten lines rather than a framework: an opaque base64
+            // offset over the registry's own deterministic order. An unreadable cursor is
+            // -32602 - the client sent a parameter this server did not issue, which is a
+            // malformed request, not an empty page.
+            $offset = wpmcp_cursor_decode(
+                array_key_exists('cursor', $params) ? $params['cursor'] : null
+            );
+            if ($offset === null) {
+                return wpmcp_rpc_err($id, -32602, 'Invalid cursor');
+            }
+
             // Read tokens see only read tools; write/code tools appear for admin scope.
             $session  = $GLOBALS['wpmcp_session'];
             $is_admin = ($session && $session->scope === 'admin');
             $out = array();
             foreach (wpmcp_tools() as $name => $t) {
                 if (!empty($t['write']) && !$is_admin) { continue; }
-                $out[] = array('name' => $name, 'description' => $t['description'], 'inputSchema' => $t['inputSchema']);
+                $out[] = array(
+                    'name'        => $name,
+                    'description' => $t['description'],
+                    // The guard, on the way out. See wpmcp_objectify_schema().
+                    'inputSchema' => wpmcp_objectify_schema($t['inputSchema']),
+                    'annotations' => $t['annotations'],
+                );
             }
-            return wpmcp_rpc_ok($id, array('tools' => $out));
+
+            $page   = array_slice($out, $offset, WPMCP_TOOLS_PAGE_SIZE);
+            $result = array('tools' => $page);
+
+            // ABSENT rather than null when there is no next page: MCP reads the presence
+            // of the key, and a `"nextCursor": null` is a key.
+            if ($offset + WPMCP_TOOLS_PAGE_SIZE < count($out)) {
+                $result['nextCursor'] = wpmcp_cursor_encode($offset + WPMCP_TOOLS_PAGE_SIZE);
+            }
+
+            return wpmcp_rpc_ok($id, $result);
 
         case 'tools/call':
+            // THE SHAPE OF THE REQUEST ITSELF IS -32602, which is what that code is
+            // reserved for here: an unknown tool, and a CallToolRequest that is not one.
+            // `arguments` silently becoming array() when it is a string or a list is how
+            // a caller's mistake turns into a tool running on defaults.
+            if (isset($params['name']) && !is_string($params['name'])) {
+                return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.name must be a string');
+            }
+            if (array_key_exists('arguments', $params)
+                && !(is_array($params['arguments'])
+                    && ($params['arguments'] === array() || !array_is_list($params['arguments'])))) {
+                return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.arguments must be an object');
+            }
+
             $name  = isset($params['name']) ? (string) $params['name'] : '';
             $args  = isset($params['arguments']) && is_array($params['arguments']) ? $params['arguments'] : array();
             $tools = wpmcp_tools();
@@ -806,6 +1046,21 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
                 ));
                 return wpmcp_rpc_ok($id, wpmcp_tool_result('This tool requires an admin-scope token.', true));
             }
+
+            // ALWAYS-ON INPUT VALIDATION, and it runs here: after the scope gate, so a
+            // token that may not call this tool at all is not handed a critique of its
+            // arguments, and before the run, so the tool never sees a value of the wrong
+            // type. The refusal is an MCP tool error - `isError: true` with the failures
+            // as text - and NOT -32602: the request is well-formed JSON-RPC naming a tool
+            // that exists, and an agent recovers from a tool error by fixing the call.
+            $failures = SchemaValidator::validateArguments($args, $tools[$name]['inputSchema']);
+            if ($failures !== array()) {
+                return wpmcp_rpc_ok($id, wpmcp_tool_result(
+                    'Invalid arguments for ' . $name . ":\n" . implode("\n", $failures),
+                    true
+                ));
+            }
+
             $result = call_user_func($tools[$name]['run'], $args);
             if (is_wp_error($result)) {
                 return wpmcp_tool_error_response($id, $result, $method, $name);

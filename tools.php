@@ -10,8 +10,39 @@
  * wpmcp_media_tools():    list-media / get-media / upload-media / delete-media.
  * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
  * wpmcp_code_tools():     the four jailed code-edit tools (active theme only).
- * Each tool = array('write'=>bool, 'description'=>str, 'inputSchema'=>array, 'run'=>callable).
- * Merged into the registry by endpoint.php's wpmcp_tools().
+ * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
+ *                   'inputSchema'=>array, 'run'=>callable).
+ * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
+ * missing any of those - annotations included, all four hints, each a real boolean.
+ *
+ * THE ANNOTATIONS ARE AUTHORED HERE, ONE ENTRY AT A TIME, and that is the point of them:
+ * `readOnlyHint` is !write (one fact, one declaration), but `destructiveHint`,
+ * `idempotentHint` and `openWorldHint` are judgements about what the tool does that no
+ * flag already carries. See wpmcp_annotation_hints() in endpoint.php for what each one
+ * means and why an unstated `destructiveHint` defaults to true. The judgements made here:
+ *
+ *   destructiveHint true   delete-post (force=true permanently deletes), delete-term,
+ *                          delete-media, moderate-comment (spam and trash destroy the
+ *                          comment's place in the thread), code-write (overwrites a
+ *                          theme file), code-delete.
+ *                  false   every read tool, and create-post / create-term /
+ *                          upload-media / reply-comment, which only add. update-post is
+ *                          false too: it edits fields the caller named and nothing else.
+ *   idempotentHint  false  the four tools that CREATE a new object per call
+ *                          (create-post, create-term, upload-media, reply-comment), and
+ *                          code-write, whose second call rotates the .bak onto the
+ *                          content the first one wrote - the file is the same, the
+ *                          backup is not.
+ *                   true   everything else: reading twice, deleting twice, setting the
+ *                          same status twice, writing the same fields twice.
+ *   openWorldHint   true   upload-media ALONE. It fetches a URL the caller supplies;
+ *                          every other tool's reach ends at this site's database and
+ *                          active theme.
+ *
+ * WHY NOT DERIVE THEM. Because `write` does not know the difference between creating a
+ * post and deleting one, and that difference is exactly what a client asks the human
+ * about. A derived annotation would be a restatement of the scope gate wearing the
+ * clothes of a safety hint.
  *
  * EVERY WP_Error CONSTRUCTED IN THIS FILE CARRIES A `wpmcp_` CODE, and it is load-bearing.
  * endpoint.php's wpmcp_tool_error_response() uses that prefix as the allow-list that
@@ -422,8 +453,18 @@ function wpmcp_core_tools() {
     return array(
         'site-info' => array(
             'write' => false,
+            'annotations' => array(
+                'readOnlyHint' => true,
+                'destructiveHint' => false,
+                'idempotentHint' => true,
+                'openWorldHint' => false,
+            ),
             'description' => 'Site name, URL, WordPress version, active theme, active plugin count.',
-            'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
+            // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
+            // makes an empty `properties` serialize as `{}` wherever it appears, at any
+            // depth, so the inline cast this used to carry is no longer the thing
+            // keeping the listing valid - and a second way of saying it would drift.
+            'inputSchema' => array('type' => 'object', 'properties' => array()),
             'run' => function ($args) {
                 $theme = wp_get_theme();
                 return array(
@@ -437,6 +478,12 @@ function wpmcp_core_tools() {
         ),
         'list-posts' => array(
             'write' => false,
+            'annotations' => array(
+                'readOnlyHint' => true,
+                'destructiveHint' => false,
+                'idempotentHint' => true,
+                'openWorldHint' => false,
+            ),
             'description' => 'List recent content the caller is allowed to see. Args: post_type (default "post"), status (default: every status the caller may see), limit (default 20, max 100).',
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string'),
@@ -525,6 +572,12 @@ function wpmcp_core_tools() {
         ),
         'get-post' => array(
             'write' => false,
+            'annotations' => array(
+                'readOnlyHint' => true,
+                'destructiveHint' => false,
+                'idempotentHint' => true,
+                'openWorldHint' => false,
+            ),
             'description' => 'Get title/status/raw content for a post or page. Args: id (integer, required).',
             'inputSchema' => array('type' => 'object',
                 'properties' => array('id' => array('type' => 'integer')),
@@ -565,6 +618,12 @@ function wpmcp_content_tools() {
 
     'create-post' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
         'description' => 'Create a post or page. Args: title, content, post_type (default post), status (default draft), excerpt, slug, terms {taxonomy:[id or name]}.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'title' => array('type' => 'string'), 'content' => array('type' => 'string'),
@@ -615,6 +674,12 @@ function wpmcp_content_tools() {
 
     'update-post' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Update a post/page. Args: id (required) plus any of title, content, status, excerpt, slug, terms. Set status=publish to publish.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
@@ -673,6 +738,12 @@ function wpmcp_content_tools() {
 
     'delete-post' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Delete a post/page. Args: id (required), force (default false). force=false trashes; force=true permanently deletes.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'force' => array('type' => 'boolean'),
@@ -704,6 +775,12 @@ function wpmcp_taxonomy_tools() {
 
     'list-terms' => array(
         'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'List taxonomy terms. Args: taxonomy (default category), search, hide_empty (default false).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'search' => array('type' => 'string'),
@@ -728,6 +805,12 @@ function wpmcp_taxonomy_tools() {
 
     'create-term' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
         'description' => 'Create a taxonomy term. Args: taxonomy (required), name (required), slug, parent, description.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'name' => array('type' => 'string'),
@@ -757,6 +840,12 @@ function wpmcp_taxonomy_tools() {
 
     'delete-term' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Delete a taxonomy term. Args: taxonomy (required), id (required).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'id' => array('type' => 'integer'),
@@ -787,6 +876,12 @@ function wpmcp_media_tools() {
 
     'list-media' => array(
         'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'List media attachments. Args: search, mime_type, page (default 1), per_page (default 20, max 100).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'search' => array('type' => 'string'), 'mime_type' => array('type' => 'string'),
@@ -818,6 +913,12 @@ function wpmcp_media_tools() {
 
     'get-media' => array(
         'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Get one media item. Args: id (required).',
         'inputSchema' => array('type' => 'object',
             'properties' => array('id' => array('type' => 'integer')), 'required' => array('id')),
@@ -846,6 +947,12 @@ function wpmcp_media_tools() {
 
     'upload-media' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => false,
+            'openWorldHint' => true,
+        ),
         'description' => 'Upload media by sideloading a URL. Args: source_url (required, http/https), filename, title, alt, post (attach to post id).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'source_url' => array('type' => 'string'), 'filename' => array('type' => 'string'),
@@ -896,6 +1003,12 @@ function wpmcp_media_tools() {
 
     'delete-media' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Delete a media attachment. Args: id (required), force (default false).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'force' => array('type' => 'boolean'),
@@ -926,6 +1039,12 @@ function wpmcp_comment_tools() {
 
     'list-comments' => array(
         'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'List comments the caller is allowed to read (emails and IPs never returned). Args: post (id), status (default "approve"; hold|spam|trash|all need moderate_comments and are otherwise treated as "approve"), search (matches comment text and author name), page, per_page.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'post' => array('type' => 'integer'), 'status' => array('type' => 'string'),
@@ -1012,6 +1131,12 @@ function wpmcp_comment_tools() {
 
     'moderate-comment' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Moderate a comment. Args: id (required), action (approve|unapprove|spam|trash|untrash).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'action' => array('type' => 'string'),
@@ -1040,6 +1165,12 @@ function wpmcp_comment_tools() {
 
     'reply-comment' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
         'description' => 'Reply to a comment. Args: id (required, parent comment), content (required).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'content' => array('type' => 'string'),
@@ -1140,6 +1271,12 @@ function wpmcp_code_tools() {
 
     'code-list' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'List files/dirs in the active theme. Args: path (relative, default ""). Denylisted entries show blocked=true.',
         'inputSchema' => array('type' => 'object', 'properties' => array('path' => array('type' => 'string'))),
         'run' => function ($a) {
@@ -1171,6 +1308,12 @@ function wpmcp_code_tools() {
 
     'code-read' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Read a text file in the active theme. Args: path (required). Denylisted/binary/oversized files are refused.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
@@ -1188,6 +1331,12 @@ function wpmcp_code_tools() {
 
     'code-write' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
         'description' => 'Create or overwrite a text file in the active theme. Args: path (required), content (required). Backs up to .bak; PHP is parse-checked and auto-reverted on a syntax error.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
@@ -1228,6 +1377,12 @@ function wpmcp_code_tools() {
 
     'code-delete' => array(
         'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
         'description' => 'Delete a file in the active theme (moved to .bak, not unlinked). Args: path (required).',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
