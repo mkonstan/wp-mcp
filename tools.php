@@ -22,6 +22,36 @@ function wpmcp_code_enabled() {
     return (bool) get_option('wpmcp_code_enabled', false);
 }
 
+/**
+ * May the current user touch theme files at all? Null when yes, a WP_Error when no.
+ *
+ * Every one of the four code tools begins with this, READ INCLUDED: code-read and
+ * code-list hand back theme PHP and the shape of the theme directory, which is source
+ * code, not content. wp-admin's theme editor is gated on exactly this trio, and
+ * before this the tools were gated on nothing but admin scope plus the
+ * wpmcp_code_enabled option - so an admin-scope token minted "Runs as:
+ * some-subscriber" on a site with code editing on could read, rewrite and delete
+ * files in the active theme.
+ *
+ * DISALLOW_FILE_EDIT and DISALLOW_FILE_MODS are honoured the way core honours them:
+ * they turn the capability off for everyone, administrators included, and an operator
+ * who sets them means it. (Core does this in map_meta_cap, so current_user_can alone
+ * would already answer false - the explicit check is here so the refusal says which
+ * of the three it was, and so it holds if that mapping ever moves.)
+ */
+function wpmcp_code_forbidden() {
+    if (defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS) {
+        return new WP_Error('forbidden', 'File modification is disabled on this site (DISALLOW_FILE_MODS).');
+    }
+    if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
+        return new WP_Error('forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
+    }
+    if (!current_user_can('edit_themes')) {
+        return wpmcp_cannot('edit theme files');
+    }
+    return null;
+}
+
 function wpmcp_code_denylist() {
     $d = get_option('wpmcp_code_denylist', null);
     if (!is_array($d)) {
@@ -218,6 +248,16 @@ function wpmcp_own_listable_statuses($post_type) {
 }
 
 /**
+ * Statuses that count as publishing, so they need publish_posts rather than merely
+ * edit_posts. `private` is one of them - core's wp-admin/includes/post.php requires
+ * publish_posts for it, because publishing privately is still publishing, and a
+ * Contributor who could set it would be putting live content on the site.
+ */
+function wpmcp_publishing_statuses() {
+    return array('publish', 'future', 'private');
+}
+
+/**
  * The refusal every write tool returns when the token's user lacks a capability.
  *
  * WHY EVERY WRITE TOOL NEEDS ONE. The low-level WordPress functions these tools call -
@@ -241,27 +281,70 @@ function wpmcp_cannot($what) {
     );
 }
 
-/** Apply {taxonomy:[id|name,...]} to a post, creating missing terms by name. */
+/**
+ * Apply {taxonomy:[id|name,...]} to a post, creating missing terms by name.
+ *
+ * TWO CAPABILITIES, NOT ONE, and this helper is where the term gates were being
+ * walked around: create-term requires edit_terms, but `create-post {terms: {category:
+ * ["something new"]}}` reached wp_insert_term through here with no check at all, so an
+ * Author could create categories. wp_set_object_terms checks nothing either, while
+ * core's own wp_insert_post requires assign_terms for its tax_input.
+ *
+ *   assign_terms  to attach a term that already exists
+ *   edit_terms    to bring a new one into being by name
+ *
+ * A caller with assign_terms but not edit_terms gets the existing terms attached and
+ * the unknown names REFUSED - reported back, never silently created and never
+ * silently dropped, because "I asked for three categories and got two" has to be
+ * visible to whatever asked.
+ *
+ * @return array{assigned: array<string, list<int>>, refused: array<string, list<string>>}
+ *   refused lists, per taxonomy, the names that would have needed edit_terms, and the
+ *   marker '*' for a taxonomy the caller cannot assign in at all.
+ */
 function wpmcp_apply_terms($post_id, $terms) {
+    $assigned = array();
+    $refused  = array();
+
     foreach ((array) $terms as $tax => $vals) {
         $tax = sanitize_key($tax);
         if (!taxonomy_exists($tax)) { continue; }
+
+        $tax_obj = get_taxonomy($tax);
+        if (!current_user_can($tax_obj->cap->assign_terms)) {
+            // '*' rather than the names: the whole taxonomy is out of reach, which is
+            // a different answer from "these particular names are new".
+            $refused[$tax] = array('*');
+            continue;
+        }
+        $may_create = current_user_can($tax_obj->cap->edit_terms);
+
         $ids = array();
         foreach ((array) $vals as $v) {
             if (is_numeric($v)) {
                 $ids[] = (int) $v;
-            } else {
-                $t = get_term_by('name', (string) $v, $tax);
-                if (!$t) {
-                    $new = wp_insert_term((string) $v, $tax);
-                    if (!is_wp_error($new)) { $ids[] = (int) $new['term_id']; }
-                } else {
-                    $ids[] = (int) $t->term_id;
-                }
+                continue;
             }
+            $t = get_term_by('name', (string) $v, $tax);
+            if ($t) {
+                $ids[] = (int) $t->term_id;
+                continue;
+            }
+            if (!$may_create) {
+                $refused[$tax][] = (string) $v;
+                continue;
+            }
+            $new = wp_insert_term((string) $v, $tax);
+            if (!is_wp_error($new)) { $ids[] = (int) $new['term_id']; }
         }
-        if ($ids) { wp_set_object_terms($post_id, $ids, $tax, false); }
+
+        if ($ids) {
+            wp_set_object_terms($post_id, $ids, $tax, false);
+            $assigned[$tax] = $ids;
+        }
     }
+
+    return array('assigned' => $assigned, 'refused' => $refused);
 }
 
 /** Resolve an editable post by id, or a WP_Error. $badTypeMsg is the bad_type message. */
@@ -463,7 +546,9 @@ function wpmcp_content_tools() {
             if (!current_user_can($pto->cap->create_posts)) {
                 return wpmcp_cannot('create ' . $postarr['post_type'] . ' content');
             }
-            if (in_array($postarr['post_status'], array('publish', 'future'), true)
+            // `private` belongs with publish/future: core's own post.php requires
+            // publish_posts for it, because publishing privately is still publishing.
+            if (in_array($postarr['post_status'], wpmcp_publishing_statuses(), true)
                 && !current_user_can($pto->cap->publish_posts)) {
                 return wpmcp_cannot('publish ' . $postarr['post_type'] . ' content');
             }
@@ -471,9 +556,16 @@ function wpmcp_content_tools() {
             if (isset($a['slug']))    { $postarr['post_name'] = sanitize_title((string) $a['slug']); }
             $id = wp_insert_post($postarr, true);
             if (is_wp_error($id)) { return $id; }
-            if (!empty($a['terms']) && is_array($a['terms'])) { wpmcp_apply_terms($id, $a['terms']); }
+            $out = array('id' => (int) $id, 'link' => get_permalink($id));
+            if (!empty($a['terms']) && is_array($a['terms'])) {
+                $t = wpmcp_apply_terms($id, $a['terms']);
+                // Reported, not swallowed: a caller that asked for three categories
+                // and got two has to be able to see which one did not happen.
+                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+            }
             $p = get_post($id);
-            return array('id' => (int) $id, 'link' => get_permalink($id), 'status' => $p ? $p->post_status : null);
+            $out['status'] = $p ? $p->post_status : null;
+            return $out;
         },
     ),
 
@@ -503,20 +595,34 @@ function wpmcp_content_tools() {
                 $changed[] = 'status';
                 // Publishing somebody else's draft is a capability of its own, and
                 // edit_post does not imply it (a Contributor may edit, never publish).
-                if (in_array($upd['post_status'], array('publish', 'future'), true)) {
+                // `private` is in that set too - see wpmcp_publishing_statuses().
+                if (in_array($upd['post_status'], wpmcp_publishing_statuses(), true)) {
                     $pto = get_post_type_object($p0->post_type);
                     if (!current_user_can($pto->cap->publish_posts)) {
                         return wpmcp_cannot('publish ' . $p0->post_type . ' content');
                     }
+                }
+                // Trashing through update-post is a delete by another name, so it
+                // answers to delete_post, not edit_post - otherwise delete-post's
+                // gate is one argument away from being bypassed.
+                if ($upd['post_status'] === 'trash' && !current_user_can('delete_post', $id)) {
+                    return wpmcp_cannot('trash post ' . $id);
                 }
             }
             if (isset($a['excerpt'])) { $upd['post_excerpt'] = (string) $a['excerpt']; $changed[] = 'excerpt'; }
             if (isset($a['slug']))    { $upd['post_name'] = sanitize_title((string) $a['slug']); $changed[] = 'slug'; }
             $r = wp_update_post($upd, true);
             if (is_wp_error($r)) { return $r; }
-            if (!empty($a['terms']) && is_array($a['terms'])) { wpmcp_apply_terms($id, $a['terms']); $changed[] = 'terms'; }
+            $out = array('id' => $id, 'link' => get_permalink($id));
+            if (!empty($a['terms']) && is_array($a['terms'])) {
+                $t = wpmcp_apply_terms($id, $a['terms']);
+                $changed[] = 'terms';
+                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+            }
             $p = get_post($id);
-            return array('id' => $id, 'link' => get_permalink($id), 'status' => $p->post_status, 'changed' => $changed);
+            $out['status']  = $p->post_status;
+            $out['changed'] = $changed;
+            return $out;
         },
     ),
 
@@ -708,6 +814,13 @@ function wpmcp_media_tools() {
             if (!current_user_can('upload_files')) {
                 return wpmcp_cannot('upload files');
             }
+            // Attaching to a post is a change to THAT post, which is why core's own
+            // wp_ajax_upload_attachment requires edit_post on the parent. Checked here
+            // too, and before the download, for the same reason as upload_files.
+            $post = isset($a['post']) ? (int) $a['post'] : 0;
+            if ($post > 0 && !current_user_can('edit_post', $post)) {
+                return wpmcp_cannot('attach media to post ' . $post);
+            }
             $url = isset($a['source_url']) ? esc_url_raw((string) $a['source_url']) : '';
             $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
             if (!in_array($scheme, array('http', 'https'), true)) {
@@ -728,7 +841,7 @@ function wpmcp_media_tools() {
                 : sanitize_file_name(basename((string) wp_parse_url($url, PHP_URL_PATH)));
             if ($name === '') { $name = 'upload'; }
             $file = array('name' => $name, 'tmp_name' => $tmp);
-            $post = isset($a['post']) ? (int) $a['post'] : 0;
+            // $post was read and cap-checked above, before the download.
             $id = media_handle_sideload($file, $post, isset($a['title']) ? (string) $a['title'] : null);
             if (is_wp_error($id)) { @unlink($tmp); return $id; }
             if (isset($a['alt'])) { update_post_meta($id, '_wp_attachment_image_alt', sanitize_text_field((string) $a['alt'])); }
@@ -807,6 +920,14 @@ function wpmcp_comment_tools() {
             $search = isset($a['search']) ? trim((string) $a['search']) : '';
             $filter = null;
             if ($search !== '') {
+                // WP_Comment_Query keys its cache on the query vars it RECOGNISES, and
+                // a clause injected through comments_clauses is not one of them - so
+                // with a persistent object cache an unfiltered call and a search with
+                // the same status/number/paged would share a cached id list. No leak
+                // (the read_post filter runs after the fetch) but the search would be
+                // wrong. cache_domain is a recognised var that exists for exactly this.
+                $args['cache_domain'] = 'wpmcp-search-' . md5($search);
+
                 $filter = function ($clauses) use ($search) {
                     global $wpdb;
                     $like = '%' . $wpdb->esc_like($search) . '%';
@@ -882,25 +1003,70 @@ function wpmcp_comment_tools() {
             $parent = isset($a['id']) ? (int) $a['id'] : 0;
             $pc = $parent ? get_comment($parent) : null;
             if (!$pc) { return new WP_Error('not_found', 'No parent comment.'); }
-            // wp_insert_comment checks nothing, and this tool inserts pre-approved.
-            // Replying to a comment on a post you cannot read is writing into a place
-            // you cannot see; the refusal reuses not_found so it does not confirm that
-            // the parent comment exists, matching get-post and list-comments.
-            if (!current_user_can('read_post', (int) $pc->comment_post_ID)) {
+            $post_id  = (int) $pc->comment_post_ID;
+            $moderator = current_user_can('moderate_comments');
+
+            // wp_insert_comment checks nothing at all: no capability, no comments_open.
+            // (The comments_open() guard in core is in wp_handle_comment_submission,
+            // the front-end path, which this never reaches.) read_post was too low a
+            // bar - this writes, it does not read. wp-admin's reply requires edit_post
+            // on the post being replied on; match that.
+            //
+            // not_found rather than a forbidden, and checked with read_post first, so a
+            // caller who cannot even see the post does not learn the comment exists.
+            if (!current_user_can('read_post', $post_id)) {
                 return new WP_Error('not_found', 'No parent comment.');
             }
-            $u = wp_get_current_user();
-            $cid = wp_insert_comment(array(
-                'comment_post_ID' => (int) $pc->comment_post_ID,
-                'comment_parent'  => $parent,
-                'comment_content' => (string) $a['content'],
-                'user_id'         => $u ? $u->ID : 0,
-                'comment_author'  => $u ? $u->display_name : '',
+            if (!current_user_can('edit_post', $post_id)) {
+                return wpmcp_cannot('reply to comments on post ' . $post_id);
+            }
+
+            // A closed thread is a decision someone made. A moderator may still reply
+            // (wp-admin lets them); nobody else reopens it by calling a tool.
+            if (!comments_open($post_id) && !$moderator) {
+                return wpmcp_cannot('reply on post ' . $post_id . ', where comments are closed');
+            }
+
+            $u   = wp_get_current_user();
+            $now = current_time('mysql');
+            // Every key wp_allow_comment() reads is supplied: it dereferences
+            // comment_author_IP, comment_agent, comment_author_url and
+            // comment_date_gmt directly, and on PHP 8 a missing one is a warning on
+            // the wire, not a silent null.
+            $comment = array(
+                'comment_post_ID'      => $post_id,
+                'comment_parent'       => $parent,
+                'comment_content'      => (string) $a['content'],
+                'user_id'              => $u ? $u->ID : 0,
+                'comment_author'       => $u ? $u->display_name : '',
                 'comment_author_email' => $u ? $u->user_email : '',
-                'comment_approved' => 1,
-            ));
+                'comment_author_url'   => $u ? $u->user_url : '',
+                'comment_author_IP'    => wpmcp_client_ip(),
+                'comment_agent'        => 'wp-mcp/' . WPMCP_VER,
+                'comment_date'         => $now,
+                'comment_date_gmt'     => current_time('mysql', true),
+                'comment_type'         => 'comment',
+            );
+
+            // Auto-approval is a moderator's privilege. For everybody else the site's
+            // own rules decide, via the same wp_allow_comment() the front end uses -
+            // so the moderation queue, the blocklist and Akismet all still apply
+            // instead of being walked past by anything holding an admin-scope token.
+            if ($moderator) {
+                $comment['comment_approved'] = 1;
+            } else {
+                $allowed = wp_allow_comment($comment, true);
+                if (is_wp_error($allowed)) { return $allowed; }
+                // wp_allow_comment returns 1, 0, 'spam' or 'trash'.
+                $comment['comment_approved'] = $allowed;
+            }
+
+            $cid = wp_insert_comment($comment);
             if (!$cid) { return new WP_Error('failed', 'Could not create reply.'); }
-            return array('id' => (int) $cid);
+            return array(
+                'id'     => (int) $cid,
+                'status' => wp_get_comment_status((int) $cid),
+            );
         },
     ),
 
@@ -918,6 +1084,8 @@ function wpmcp_code_tools() {
         'description' => 'List files/dirs in the active theme. Args: path (relative, default ""). Denylisted entries show blocked=true.',
         'inputSchema' => array('type' => 'object', 'properties' => array('path' => array('type' => 'string'))),
         'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
             $root = wpmcp_code_root();
             if ($root === '') { return new WP_Error('no_theme', 'Active theme directory not found.'); }
             $rel = isset($a['path']) ? ltrim(str_replace('\\', '/', (string) $a['path']), '/') : '';
@@ -948,6 +1116,8 @@ function wpmcp_code_tools() {
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, true);
             if (is_wp_error($r)) { return $r; }
             if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be read.'); }
@@ -964,6 +1134,8 @@ function wpmcp_code_tools() {
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
         ), 'required' => array('path', 'content')),
         'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, false);
             if (is_wp_error($r)) { return $r; }
             if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be written.'); }
@@ -1001,6 +1173,8 @@ function wpmcp_code_tools() {
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, true);
             if (is_wp_error($r)) { return $r; }
             if (!is_file($r['abs'])) { return new WP_Error('not_found', 'Not a file.'); }

@@ -36,15 +36,31 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
     private const LABEL            = Fixtures::PREFIX . 'writecaps';
     private const SUBSCRIBER_LOGIN = Fixtures::PREFIX . 'subscriber';
     private const EDITOR_LOGIN     = Fixtures::PREFIX . 'writeeditor';
+    private const AUTHOR_LOGIN     = Fixtures::PREFIX . 'writeauthor';
     private const TITLE            = Fixtures::PREFIX . 'writetarget';
     private const ORIGINAL         = 'wpmcp-test-original-body';
     private const OVERWRITE        = 'wpmcp-test-overwritten-by-a-subscriber';
 
+    /** A comment on the Editor's post, so reply-comment has a parent to aim at. */
+    private const PARENT_COMMENT   = Fixtures::PREFIX . 'reply-parent';
+
     private static int $subscriberId = 0;
     private static int $editorId     = 0;
+    private static int $authorId     = 0;
     private static int $postId       = 0;
+    private static int $parentCommentId = 0;
+    /** The draft the terms test creates; deleted in teardown. */
+    private static int $carrierId    = 0;
     private static string $subscriberToken = '';
     private static string $editorToken     = '';
+    private static string $authorToken     = '';
+
+    /**
+     * wpmcp_code_enabled at the start, so teardown can put it back. The code tools are
+     * not even listed unless the option is on, so the test has to turn it on - and a
+     * site where the operator had it off must not be left with it on.
+     */
+    private static ?string $codeEnabledBefore = null;
 
     public static function setUpBeforeClass(): void
     {
@@ -60,6 +76,9 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
 
         self::$subscriberId = Fixtures::createUser(self::SUBSCRIBER_LOGIN, 'subscriber');
         self::$editorId     = Fixtures::createUser(self::EDITOR_LOGIN, 'editor');
+        // An Author has assign_terms on category (it maps to edit_posts) but not
+        // edit_terms (manage_categories) - exactly the split R3 is about.
+        self::$authorId     = Fixtures::createUser(self::AUTHOR_LOGIN, 'author');
 
         // Published and owned by the Editor: the Subscriber has no claim on it at all.
         self::$postId = Fixtures::createPost(
@@ -69,10 +88,18 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
             self::ORIGINAL
         );
 
+        self::$parentCommentId = Fixtures::createComment(self::$postId, self::PARENT_COMMENT, true);
+
+        // The code tools are only registered when this option is on, so a refusal test
+        // for them needs it on. Remembered first, restored in teardown.
+        self::$codeEnabledBefore = WpCli::evaluate('echo get_option("wpmcp_code_enabled") === false ? "ABSENT" : (string) (int) get_option("wpmcp_code_enabled");');
+        WpCli::evaluate('update_option("wpmcp_code_enabled", 1);');
+
         // admin SCOPE on both, so the scope gate lets every write tool through and the
         // only thing left standing between the call and the database is the user.
         self::$subscriberToken = Fixtures::mintToken('admin', self::LABEL, self::$subscriberId);
         self::$editorToken     = Fixtures::mintToken('admin', self::LABEL, self::$editorId);
+        self::$authorToken     = Fixtures::mintToken('admin', self::LABEL, self::$authorId);
     }
 
     public static function tearDownAfterClass(): void
@@ -84,9 +111,22 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // Put the operator's code-editing setting back exactly as it was, including
+        // "there was no option at all".
+        if (self::$codeEnabledBefore !== null) {
+            WpCli::tryEvaluate(
+                self::$codeEnabledBefore === 'ABSENT'
+                    ? 'delete_option("wpmcp_code_enabled");'
+                    : 'update_option("wpmcp_code_enabled", ' . (int) self::$codeEnabledBefore . ');'
+            );
+            self::$codeEnabledBefore = null;
+        }
+
         Fixtures::deletePost(self::$postId);
+        Fixtures::deletePost(self::$carrierId);
         Fixtures::deleteUser(self::$subscriberId);
         Fixtures::deleteUser(self::$editorId);
+        Fixtures::deleteUser(self::$authorId);
         Fixtures::deleteTokensLabelled(self::LABEL);
         Fixtures::purge();
     }
@@ -154,6 +194,138 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * R1. The four code tools are the largest write on the surface - they read,
+     * rewrite and delete PHP in the active theme - and they checked no capability at
+     * all, only admin scope plus the wpmcp_code_enabled option. code-read and
+     * code-list are in scope too: theme PHP is source code, not content.
+     *
+     * @group sprint-1
+     */
+    public function testASubscriberBoundTokenCannotTouchThemeFiles(): void
+    {
+        $mcp = $this->mcp(self::$subscriberToken);
+
+        // The option really is on, so a refusal cannot be "the tool is not registered".
+        $listedTools = $mcp->post('tools/list');
+        self::assertStringContainsString(
+            'code-read',
+            (string) $listedTools->getBody(),
+            'The code tools are not registered, so this test would prove nothing.'
+            . ' wpmcp_code_enabled should have been turned on in setUpBeforeClass.'
+        );
+
+        self::assertRefused($mcp->callTool('code-list', ['path' => '']), 'code-list');
+        self::assertRefused($mcp->callTool('code-read', ['path' => 'style.css']), 'code-read');
+        self::assertRefused(
+            $mcp->callTool('code-write', [
+                'path'    => 'wpmcp-test-should-not-exist.css',
+                'content' => '/* wpmcp-test */',
+            ]),
+            'code-write'
+        );
+        self::assertRefused($mcp->callTool('code-delete', ['path' => 'style.css']), 'code-delete');
+
+        // And nothing was written: code-write is the one that leaves evidence.
+        self::assertSame(
+            '0',
+            WpCli::evaluate(
+                'echo (int) file_exists(get_stylesheet_directory()'
+                . ' . "/wpmcp-test-should-not-exist.css");'
+            ),
+            'code-write was refused but still created the file.'
+        );
+    }
+
+    /**
+     * R2. reply-comment was gated on read_post - a READ capability on a tool that
+     * writes - and inserted with comment_approved => 1, so a Subscriber-bound token
+     * posted pre-approved comments on any post it could see, moderation queue and
+     * all. wp-admin requires edit_post on the post being replied on.
+     *
+     * @group sprint-1
+     */
+    public function testASubscriberBoundTokenCannotReplyToComments(): void
+    {
+        $before = self::commentCount(self::$postId);
+
+        $result = $this->mcp(self::$subscriberToken)->callTool('reply-comment', [
+            'id'      => self::$parentCommentId,
+            'content' => 'wpmcp-test-reply-from-a-subscriber',
+        ]);
+
+        self::assertRefused($result, 'reply-comment');
+        self::assertSame(
+            $before,
+            self::commentCount(self::$postId),
+            'reply-comment was refused but a comment was still inserted.'
+        );
+    }
+
+    /**
+     * R2, the other half: an Editor CAN reply, and the reply is approved because an
+     * Editor holds moderate_comments. Without this the refusal above could just mean
+     * reply-comment is broken.
+     *
+     * @group sprint-1
+     */
+    public function testAnEditorBoundTokenRepliesAndTheReplyIsApproved(): void
+    {
+        $result = $this->mcp(self::$editorToken)->callTool('reply-comment', [
+            'id'      => self::$parentCommentId,
+            'content' => Fixtures::PREFIX . 'reply-from-the-editor',
+        ]);
+
+        self::assertFalse($result->isError, 'An Editor was refused: ' . $result->text);
+        self::assertSame(
+            'approved',
+            $result->data()['status'],
+            'A moderator\'s reply should be approved on insert.'
+        );
+    }
+
+    /**
+     * R3. create-post's `terms` reached wp_insert_term through wpmcp_apply_terms with
+     * no capability check, so the edit_terms gate that create-term just gained was one
+     * argument away from being bypassed - an Author could create categories.
+     *
+     * An Author, not the Subscriber: a Subscriber cannot create a post at all, so the
+     * request would be refused before it ever reached the terms.
+     *
+     * @group sprint-1
+     */
+    public function testAnAuthorBoundTokenCannotCreateCategoriesThroughPostTerms(): void
+    {
+        $newName = Fixtures::PREFIX . 'term-via-create-post';
+
+        $result = $this->mcp(self::$authorToken)->callTool('create-post', [
+            'title' => Fixtures::PREFIX . 'terms-carrier',
+            'terms' => ['category' => [$newName]],
+        ]);
+
+        self::assertFalse($result->isError, 'create-post failed outright: ' . $result->text);
+        $data = $result->data();
+        self::$carrierId = (int) $data['id'];
+
+        // Refused, and SAID so - a silent drop would leave the caller believing the
+        // category was applied.
+        self::assertArrayHasKey(
+            'terms_refused',
+            $data,
+            'The unknown category was not reported as refused: ' . $result->text
+        );
+        self::assertContains($newName, $data['terms_refused']['category']);
+
+        self::assertSame(
+            '0',
+            WpCli::evaluate(sprintf(
+                'echo (int) (bool) get_term_by("name", %s, "category");',
+                "'" . addcslashes($newName, "'\\") . "'"
+            )),
+            'An Author created a category through create-post {terms}.'
+        );
+    }
+
+    /**
      * A write refusal, and specifically a CAPABILITY refusal.
      *
      * isError on its own is not enough: every one of these tools has other ways to
@@ -198,6 +370,16 @@ final class WriteToolCapabilityTest extends FixtureIntegrationTestCase
             'content' => self::ORIGINAL,
         ]);
         self::assertFalse($restored->isError, 'Could not restore the fixture: ' . $restored->text);
+    }
+
+    /** Comments on a post, straight from the database. */
+    private static function commentCount(int $postId): string
+    {
+        return WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare('
+            . '"SELECT COUNT(*) FROM $wpdb->comments WHERE comment_post_ID = %%d", %d));',
+            $postId
+        ));
     }
 
     /** Read straight from the database, not through a tool that could also be broken. */

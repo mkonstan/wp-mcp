@@ -242,6 +242,17 @@ final class Fixtures
             self::deleteUser($id);
         }
 
+        // TERMS TOO. A red run of the create-post {terms} test left
+        // `wpmcp-test-term-via-create-post` on the site, because the debris check and
+        // the purge only knew about posts, users and tokens - the tools that can create
+        // a term were the ones that had no capability check, so nothing had ever
+        // created one before. Every taxonomy, not just category.
+        foreach (self::leftoverTerms() as $taxonomy => $ids) {
+            foreach ($ids as $id) {
+                WpCli::tryRun(['term', 'delete', $taxonomy, (string) $id]);
+            }
+        }
+
         WpCli::tryEvaluate(sprintf(
             'global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
             . '"DELETE FROM " . wpmcp_table() . " WHERE label LIKE %%s", %s));',
@@ -277,6 +288,45 @@ final class Fixtures
             '--post_status=publish,future,draft,pending,private,trash,auto-draft,inherit',
             '--format=csv', '--fields=ID,post_title',
         ]);
+    }
+
+    /**
+     * Fixture-named terms still on the site, in every taxonomy.
+     *
+     * `wp term list` needs a taxonomy, so the whole lot is done in one `wp eval` with
+     * get_terms over every registered taxonomy - cheaper than one spawn per taxonomy,
+     * and it cannot miss a taxonomy somebody registers later.
+     *
+     * @return array<string, list<int>> taxonomy => term ids
+     */
+    public static function leftoverTerms(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$out = array();'
+            . ' foreach (get_taxonomies(array(), "names") as $tax) {'
+            . '  $terms = get_terms(array("taxonomy" => $tax, "hide_empty" => false,'
+            . '   "name__like" => %s, "fields" => "ids"));'
+            . '  if (!is_wp_error($terms)) {'
+            . '   foreach ($terms as $id) { echo $tax, ":", (int) $id, ","; }'
+            . '  }'
+            . ' }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = array();
+
+        foreach (explode(',', $raw) as $pair) {
+            $pair = trim($pair);
+
+            if ($pair === '' || !str_contains($pair, ':')) {
+                continue;
+            }
+
+            [$taxonomy, $id] = explode(':', $pair, 2);
+            $found[$taxonomy][] = (int) $id;
+        }
+
+        return $found;
     }
 
     /**

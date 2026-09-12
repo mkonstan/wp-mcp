@@ -142,10 +142,15 @@ jobs:
             fi
             cases=$(grep -c '<testcase ' "$log" || true)
             empty=$(grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -cv 'tests="[1-9]' || true)
-            echo "$group: testcases=$cases classes-that-ran-nothing=$empty"
-            if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ]; then
-              echo "::error::$group did not execute every one of its test classes. A gate that skips is not a gate."
+            # Per-TEST skips too: a class whose every method calls markTestSkipped
+            # still reports tests="N", so the class-level check above misses it. Those
+            # emit a <skipped/> child per testcase.
+            skipped=$(grep -c '<skipped' "$log" || true)
+            echo "$group: testcases=$cases classes-that-ran-nothing=$empty skipped-tests=$skipped"
+            if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+              echo "::error::$group did not execute every one of its tests. A gate that skips is not a gate."
               grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -v 'tests="[1-9]' || true
+              grep -o '<testcase name="[^"]*"[^>]*>[[:space:]]*<skipped' "$log" || true
               status=1
             fi
             rm -f "$log"
