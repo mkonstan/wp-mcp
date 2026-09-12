@@ -18,11 +18,22 @@
  * Scope: 'read' tokens are refused any tool flagged write=true.
  * Registry: a tool without an explicit boolean `write`, a string description and an
  *   array inputSchema is not registered; a built-in's name cannot be re-declared.
+ * Errors: FIVE JSON-RPC codes and no others - see wpmcp_handle(). Anything unexpected
+ *   is one generic -32603 carrying a trace id; the throwable goes to trace.php's log.
  */
 if (!defined('ABSPATH')) { exit; }
 
 /* Holds the validated token row between permission_callback and the handler. */
 $GLOBALS['wpmcp_session'] = null;
+
+/**
+ * Largest request body this endpoint will do any work on: 4 MiB.
+ *
+ * Generous for JSON-RPC - the biggest legitimate body is a code-write, itself capped at
+ * 512 KB of content - and small enough that an oversized POST is refused before a token
+ * is looked up. See the cap in wpmcp_authorize_now().
+ */
+define('WPMCP_MAX_BODY', 4 * 1024 * 1024);
 
 add_action('rest_api_init', function () {
     $route = array(
@@ -35,6 +46,66 @@ add_action('rest_api_init', function () {
     // Token in an Authorization: Bearer header against a constant URL: kept out of logs.
     register_rest_route('wpmcp', '/mcp', $route);
 });
+
+/* ---------------- the verb gate ---------------- */
+
+/** Is this REST route one of ours? Both forms, token or no token. */
+function wpmcp_is_our_route($route) {
+    return (bool) preg_match('#^/wpmcp/mcp(/[a-f0-9]{64})?$#', (string) $route);
+}
+
+/**
+ * POST or OPTIONS, and nothing else - decided BEFORE any route handler, and therefore
+ * before permission_callback and before the token is read.
+ *
+ * WHY A rest_pre_dispatch FILTER RATHER THAN MORE REGISTERED METHODS. Registering GET
+ * and DELETE with a callback that answers 405 would work, but `rest_send_allow_header`
+ * (wp-includes/rest-api.php) then rebuilds the `Allow` header from every registered
+ * handler whose permission_callback passes - so the refusal would advertise
+ * `Allow: GET, DELETE`, the exact opposite of the truth. A pre-dispatch response has no
+ * matched route, so that filter leaves it alone and the header we set is the one sent.
+ *
+ * OPTIONS IS 204 WITH NO BODY, which core does not do on its own:
+ * `rest_handle_options_request` (rest_pre_dispatch, priority 10) answers 200 with the
+ * route's whole `help` schema. That is a description of the endpoint handed to anybody who
+ * asks, with no credential - small, but it is disclosure, and a CORS preflight has no use
+ * for it. This replaces it with an empty 204.
+ *
+ * GET and DELETE are 405 with `Allow: POST, OPTIONS` and a fixed body. A GET is the shape
+ * a browser address bar, a link prefetcher or a crawler produces, and a 404 invites a
+ * retry; 405 names the one verb that works.
+ *
+ * PHP_INT_MAX, AND THAT IS NOT PARANOIA - IT IS MEASURED. The first version of this ran at
+ * priority 9, before core's OPTIONS handler, and the 405 never reached the client: the
+ * site under test has ACF Pro, whose `ACF_Rest_Api::initialize()` is hooked on
+ * rest_pre_dispatch at priority 10 and RETURNS NOTHING. A filter callback that does not
+ * return its input replaces the accumulated value with null, so every earlier callback on
+ * that hook is silently discarded - our 405 among them, and the request fell through to
+ * core's 404 rest_no_route. Any plugin can do this to any rest_pre_dispatch short-circuit
+ * and nothing warns about it. Running last is the only position that cannot be erased,
+ * and it is also the position that lets this replace core's OPTIONS response.
+ *
+ * The incoming $result is still honoured for POST: a plugin that legitimately hijacks an
+ * MCP request keeps its answer. It is only overridden for a verb this endpoint refuses.
+ */
+add_filter('rest_pre_dispatch', 'wpmcp_gate_request_method', PHP_INT_MAX, 3);
+function wpmcp_gate_request_method($result, $server, $request) {
+    if (!wpmcp_is_our_route($request->get_route())) { return $result; }
+
+    $method = strtoupper((string) $request->get_method());
+
+    if ($method === 'POST') { return $result; }
+
+    if ($method === 'OPTIONS') { return new WP_REST_Response(null, 204); }
+
+    $response = new WP_REST_Response(
+        array('error' => 'Method not allowed. This endpoint speaks POST.'),
+        405
+    );
+    $response->header('Allow', 'POST, OPTIONS');
+
+    return $response;
+}
 
 /** The JSON-RPC method on this request (read from the POST body), or '' if none. */
 function wpmcp_request_method(WP_REST_Request $req) {
@@ -199,6 +270,7 @@ function wpmcp_unauthorized() {
  *   1. HTTPS            is_ssl(), unless WPMCP_ALLOW_INSECURE === true -> 403
  *   2. Origin           present and not ours -> 403; absent -> allowed (non-browser)
  *   3. Content-Type     not application/json -> 415
+ *   3b. body size       CONTENT_LENGTH > WPMCP_MAX_BODY                -> 413
  *   4. token shape      64 lower-case hex, from the path or Bearer -> 401
  *   5. token lookup     by SHA-256 hash                            -> 401
  *   6. user exists      get_userdata(user_id)                      -> 401
@@ -213,6 +285,16 @@ function wpmcp_unauthorized() {
  * oracle with a timing side channel. 4-8 narrow from "is this string even a token" to
  * "is it this token, still alive, from the right place", cheapest first and each one a
  * precondition of the next. 6 precedes 7 so a dead token's row is not even touched.
+ *
+ * 3b IS A CAP ON WORK, NOT ON MEMORY, and the difference matters. By the time any of
+ * this runs, WordPress core has already read the whole body and json_decode'd it - see
+ * the paragraph below - so the bytes are in memory whatever this gate says. What it does
+ * stop is the plugin spending anything on an oversized body: no token lookup, no
+ * database write, no tool dispatch, no second decode. A host that wants the bytes refused
+ * before PHP sees them sets client_max_body_size / post_max_size; that is the same
+ * division of labour as the HTTPS gate. CONTENT_LENGTH is the client's claim rather than
+ * a measurement, which is fine in this direction: a client that understates it gets its
+ * body truncated by the server instead.
  *
  * THIS PLUGIN READS NO PART OF THE REQUEST BODY BEFORE 8 - but WordPress does, and the
  * earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
@@ -309,6 +391,18 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
         );
     }
 
+    // 3b. Body size. Before the token lookup, so an oversized POST costs one integer
+    // comparison rather than a database round trip.
+    $length = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
+    if ($length > WPMCP_MAX_BODY) {
+        wpmcp_auth_event('body_too_large', array('length' => $length, 'ip' => $ip));
+        return new WP_Error(
+            'wpmcp_payload_too_large',
+            'Request body too large.',
+            array('status' => 413)
+        );
+    }
+
     // 4-8.
     $row = wpmcp_validate(wpmcp_extract_token($req), $ip);
     if (is_wp_error($row)) {
@@ -351,9 +445,11 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *
  * Three more shapes are refused for smaller but concrete reasons:
  *
- *   run_not_callable      call_user_func on a non-callable is a TypeError, which is a
- *                         500 carrying filesystem paths, and Sprint 3's disclosure
- *                         boundary does not exist yet.
+ *   run_not_callable      call_user_func on a non-callable is a TypeError. The boundary
+ *                         in wpmcp_handle() now turns that into a generic -32603 rather
+ *                         than a 500 carrying filesystem paths, but a tool that cannot
+ *                         run is still a registration bug and the author should hear
+ *                         about it once, at registration, rather than per call.
  *   description_not_string / schema_not_array
  *                         tools/list reads $t['description'] and $t['inputSchema']
  *                         directly, so a missing one is a PHP warning plus a null on
@@ -433,19 +529,98 @@ function wpmcp_tools() {
 }
 
 /* ---------------- JSON-RPC dispatch ---------------- */
-function wpmcp_handle(WP_REST_Request $req) {
-    $body = json_decode($req->get_body(), true);
-    if (!is_array($body)) {
-        return wpmcp_rpc_err(null, -32700, 'Parse error'); // already a WP_REST_Response
-    }
-    // Notifications (no id) - ack with 202, no body.
-    $id     = array_key_exists('id', $body) ? $body['id'] : null;
-    $method = isset($body['method']) ? (string) $body['method'] : '';
-    $params = isset($body['params']) && is_array($body['params']) ? $body['params'] : array();
 
-    if ($method === 'notifications/initialized' || (strpos($method, 'notifications/') === 0)) {
+/**
+ * THE ERROR BOUNDARY. Every response this endpoint produces comes through here.
+ *
+ * FIVE CODES, AND NO SIXTH. That is the whole wire vocabulary, and it is an allow-list
+ * rather than a catalogue of cases:
+ *
+ *   -32700  Parse error      the body is valid JSON but not a JSON object, so it cannot
+ *                            be a request and cannot carry an id. (Genuinely broken JSON
+ *                            never reaches us: core answers it 400 rest_invalid_json.)
+ *   -32600  Invalid Request  a JSON array body - a batch, which this endpoint does not
+ *                            support. id: null.
+ *   -32601  Method not found an unknown JSON-RPC method, `notifications/anything`
+ *                            included once it carries an id.
+ *   -32602  Invalid params   an unknown tool name on tools/call.
+ *   -32603  Internal error   ANYTHING unexpected. One message, "Internal error", plus
+ *                            data.trace_id. The detail is in trace.php's log.
+ *
+ * Adding a sixth code means a client would have to act differently on it. None does, so
+ * there is no sixth - see claude_code_memory/fail-loud-explicit-scope.md.
+ *
+ * WHY THE CATCH IS HERE AND NOWHERE ELSE. Before this, a TypeError inside a tool became
+ * a WordPress fatal: HTTP 500, and whatever display_errors was set to - on a default
+ * install, the class, the message, the absolute file path and the line, handed to a
+ * caller holding a read-scope token. One catch-all at the boundary closes every one of
+ * those paths at once, including the ones nobody enumerated, which is the point.
+ *
+ * The id, the method and the tool name are read BEFORE the try, because the error
+ * response needs them and the log line wants them. json_decode cannot throw without
+ * JSON_THROW_ON_ERROR, so that read is itself safe.
+ */
+function wpmcp_handle(WP_REST_Request $req) {
+    $raw  = (string) $req->get_body();
+    $body = json_decode($raw, true);
+
+    $id     = (is_array($body) && array_key_exists('id', $body)) ? $body['id'] : null;
+    $method = (is_array($body) && isset($body['method'])) ? (string) $body['method'] : '';
+    $tool   = '';
+
+    if ($method === 'tools/call' && isset($body['params']['name'])) {
+        $tool = is_scalar($body['params']['name']) ? (string) $body['params']['name'] : '';
+    }
+
+    try {
+        return wpmcp_dispatch($raw, $body, $id, $method);
+    } catch (\Throwable $e) {
+        // Nothing from $e reaches the wire. The trace id is the only thing that crosses.
+        return wpmcp_rpc_err($id, -32603, 'Internal error', array(
+            'trace_id' => wpmcp_trace($e, $method, $tool),
+        ));
+    }
+}
+
+/**
+ * The framing decisions, in the order they have to happen.
+ *
+ * BATCH IS REJECTED EXPLICITLY, FIRST, and on the RAW BODY rather than the decoded one.
+ * `json_decode('[]', true)` and `json_decode('{}', true)` are both the empty PHP array,
+ * so the decoded value cannot tell a zero-length batch from an empty object. The first
+ * non-whitespace byte can, exactly, and costs nothing.
+ *
+ * A NOTIFICATION IS A REQUEST WITH NO `id` KEY. Not a method name starting with
+ * `notifications/` - that was the old test and it was wrong in both directions. A client
+ * that sends `{"id": 7, "method": "notifications/tools/list_changed"}` has asked a
+ * question and is owed an answer (-32601, since we serve no such method), and a client
+ * that sends any method at all without an id has asked for silence and gets 202 with an
+ * empty body - whatever else is wrong with the body, because there is no id to answer to.
+ * JSON-RPC 2.0 section 4.1: a server MUST NOT reply to a notification.
+ *
+ * @param string     $raw    the request body as sent.
+ * @param mixed      $body   json_decode($raw, true).
+ * @param mixed      $id     the request id, or null when there is none.
+ * @param string     $method the JSON-RPC method, or ''.
+ */
+function wpmcp_dispatch($raw, $body, $id, $method) {
+    // A JSON array body: a batch. One refusal, named, so a client stops guessing.
+    if (substr(ltrim($raw), 0, 1) === '[') {
+        return wpmcp_rpc_err(null, -32600, 'Batch requests are not supported');
+    }
+
+    // Valid JSON that is not an object: no id can exist, so it is answerable but not
+    // dispatchable.
+    if (!is_array($body)) {
+        return wpmcp_rpc_err(null, -32700, 'Parse error');
+    }
+
+    // No id key -> a notification. Nothing is dispatched and nothing is returned.
+    if (!array_key_exists('id', $body)) {
         return new WP_REST_Response(null, 202);
     }
+
+    $params = isset($body['params']) && is_array($body['params']) ? $body['params'] : array();
 
     switch ($method) {
         case 'initialize':
@@ -491,7 +666,7 @@ function wpmcp_handle(WP_REST_Request $req) {
             }
             $result = call_user_func($tools[$name]['run'], $args);
             if (is_wp_error($result)) {
-                return wpmcp_rpc_ok($id, wpmcp_tool_result('Error: ' . $result->get_error_message(), true));
+                return wpmcp_tool_error_response($id, $result, $method, $name);
             }
             return wpmcp_rpc_ok($id, wpmcp_tool_result(wp_json_encode($result), false));
 
@@ -500,12 +675,51 @@ function wpmcp_handle(WP_REST_Request $req) {
     }
 }
 
+/**
+ * A WP_Error that came back from a tool: whose is it?
+ *
+ * TWO KINDS, AND ONLY THE PREFIX TELLS THEM APART. Every WP_Error this plugin constructs
+ * carries a code beginning `wpmcp_`. That is a sentence the tool's author wrote for the
+ * caller - "No post with that ID", "That file is on the denylist" - and it belongs on the
+ * wire as an MCP tool error: `isError: true` with the message as text, which is what an
+ * agent needs in order to do something else instead of retrying.
+ *
+ * Anything WITHOUT that prefix came out of WordPress: wpdb's last_error with the SQL in
+ * it, wp_insert_post's, wp_handle_upload's, an HTTP API failure naming an internal host.
+ * Nobody here wrote those for a client to read, and they are exactly as unpredictable as
+ * a throwable - so they are treated as one: generic -32603, trace id on the wire, the
+ * whole thing in the private log.
+ *
+ * The allow-list is the prefix, which means a tool added through the `wpmcp_tools` filter
+ * gets the safe treatment by default and has to opt in to speaking to the client.
+ */
+function wpmcp_tool_error_response($id, $error, $method, $tool) {
+    if (strpos((string) $error->get_error_code(), 'wpmcp_') === 0) {
+        return wpmcp_rpc_ok($id, wpmcp_tool_result('Error: ' . $error->get_error_message(), true));
+    }
+
+    return wpmcp_rpc_err($id, -32603, 'Internal error', array(
+        'trace_id' => wpmcp_trace_wp_error($error, $method, $tool),
+    ));
+}
+
 function wpmcp_tool_result($text, $isError) {
     return array('content' => array(array('type' => 'text', 'text' => (string) $text)), 'isError' => (bool) $isError);
 }
 function wpmcp_rpc_ok($id, $result) {
     return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'result' => $result), 200);
 }
-function wpmcp_rpc_err($id, $code, $message) {
-    return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'error' => array('code' => $code, 'message' => $message)), 200);
+
+/**
+ * A JSON-RPC error response. $code must be one of the five in wpmcp_handle()'s docblock.
+ *
+ * $data is the optional `error.data` member - used for exactly one thing, the trace id on
+ * a -32603, and nothing else ever goes in it.
+ */
+function wpmcp_rpc_err($id, $code, $message, $data = null) {
+    $error = array('code' => $code, 'message' => $message);
+
+    if ($data !== null) { $error['data'] = $data; }
+
+    return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'error' => $error), 200);
 }

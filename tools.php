@@ -12,6 +12,14 @@
  * wpmcp_code_tools():     the four jailed code-edit tools (active theme only).
  * Each tool = array('write'=>bool, 'description'=>str, 'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools().
+ *
+ * EVERY WP_Error CONSTRUCTED IN THIS FILE CARRIES A `wpmcp_` CODE, and it is load-bearing.
+ * endpoint.php's wpmcp_tool_error_response() uses that prefix as the allow-list that
+ * decides what a client is told: a `wpmcp_` code is a sentence an author wrote for the
+ * caller and reaches the wire as `isError: true` with its message, while any other code -
+ * a wpdb error, wp_insert_post's, wp_handle_upload's, anything from core - is treated
+ * exactly as a thrown throwable: generic -32603 plus a trace id, detail to the private log.
+ * Drop the prefix from a new error here and its message stops reaching the client.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -41,10 +49,10 @@ function wpmcp_code_enabled() {
  */
 function wpmcp_code_forbidden() {
     if (defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS) {
-        return new WP_Error('forbidden', 'File modification is disabled on this site (DISALLOW_FILE_MODS).');
+        return new WP_Error('wpmcp_forbidden', 'File modification is disabled on this site (DISALLOW_FILE_MODS).');
     }
     if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
-        return new WP_Error('forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
+        return new WP_Error('wpmcp_forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
     }
     if (!current_user_can('edit_themes')) {
         return wpmcp_cannot('edit theme files');
@@ -164,7 +172,15 @@ function wpmcp_bak_ok($bak) {
     return true;
 }
 
-/** Syntax-check PHP source. Returns true, or an error string. */
+/**
+ * Syntax-check PHP source. Returns true, or a short description of where it broke.
+ *
+ * THE PARSER'S OWN MESSAGE IS NOT RETURNED, and that is the disclosure boundary rather
+ * than taste: the ParseError's own message carries an absolute filesystem path,
+ * and this string is put on the wire by code-write. The LINE is the part the caller can
+ * act on - it is a line of source the caller just sent - and it leaks nothing. A unit
+ * test greps this file for that call; trace.php is the only place it is allowed.
+ */
 function wpmcp_php_parse_ok($code) {
     if (!defined('TOKEN_PARSE')) { return true; } // can't check on this runtime
     try {
@@ -172,9 +188,9 @@ function wpmcp_php_parse_ok($code) {
         token_get_all($code, TOKEN_PARSE); // @phpstan-ignore-line
         return true;
     } catch (ParseError $e) {
-        return $e->getMessage();
+        return 'syntax error on line ' . (int) $e->getLine();
     } catch (Throwable $e) {
-        return $e->getMessage();
+        return 'the source could not be parsed';
     }
 }
 
@@ -276,7 +292,7 @@ function wpmcp_publishing_statuses() {
  */
 function wpmcp_cannot($what) {
     return new WP_Error(
-        'forbidden',
+        'wpmcp_forbidden',
         "This token's user is not allowed to " . $what . '.'
     );
 }
@@ -372,8 +388,8 @@ function wpmcp_apply_terms($post_id, $terms) {
 function wpmcp_get_editable_post($id, $badTypeMsg) {
     $id = (int) $id;
     $p0 = $id ? get_post($id) : null;
-    if (!$p0) { return new WP_Error('not_found', 'No post with that ID.'); }
-    if (!wpmcp_post_type_ok($p0->post_type)) { return new WP_Error('bad_type', $badTypeMsg); }
+    if (!$p0) { return new WP_Error('wpmcp_not_found', 'No post with that ID.'); }
+    if (!wpmcp_post_type_ok($p0->post_type)) { return new WP_Error('wpmcp_bad_type', $badTypeMsg); }
     return $p0;
 }
 
@@ -381,15 +397,15 @@ function wpmcp_get_editable_post($id, $badTypeMsg) {
 function wpmcp_get_attachment($id) {
     $id = (int) $id;
     $p = $id ? get_post($id) : null;
-    if (!$p || $p->post_type !== 'attachment') { return new WP_Error('not_found', 'No attachment with that ID.'); }
+    if (!$p || $p->post_type !== 'attachment') { return new WP_Error('wpmcp_not_found', 'No attachment with that ID.'); }
     return $p;
 }
 
 /** Resolve+denylist a code target. Returns array('abs'=>..,'rel'=>..) or a WP_Error. */
 function wpmcp_code_target($a, $mustExist) {
     $r = wpmcp_code_resolve(isset($a['path']) ? $a['path'] : '', $mustExist);
-    if (!$r['ok']) { return new WP_Error('path', $r['error']); }
-    if (wpmcp_code_denied($r['rel'])) { return new WP_Error('denied', 'That file is on the denylist.'); }
+    if (!$r['ok']) { return new WP_Error('wpmcp_path', $r['error']); }
+    if (wpmcp_code_denied($r['rel'])) { return new WP_Error('wpmcp_denied', 'That file is on the denylist.'); }
     return array('abs' => $r['abs'], 'rel' => $r['rel']);
 }
 
@@ -426,7 +442,7 @@ function wpmcp_core_tools() {
                 // Same allow-list the write tools use: no revisions, no nav_menu_item,
                 // no wp_template, no attachments (media has its own tools).
                 if (!wpmcp_post_type_ok($type)) {
-                    return new WP_Error('bad_type', 'Not a listable post type: ' . $type);
+                    return new WP_Error('wpmcp_bad_type', 'Not a listable post type: ' . $type);
                 }
                 $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
 
@@ -510,12 +526,12 @@ function wpmcp_core_tools() {
             'run' => function ($args) {
                 $id = isset($args['id']) ? (int) $args['id'] : 0;
                 $p = $id ? get_post($id) : null;
-                if (!$p) { return new WP_Error('not_found', 'No post with that ID.'); }
+                if (!$p) { return new WP_Error('wpmcp_not_found', 'No post with that ID.'); }
                 // Deliberately the SAME error as a missing post, not a distinct
                 // "forbidden": a caller who cannot read the post must not be able to
                 // learn that it exists by probing IDs.
                 if (!current_user_can('read_post', $id)) {
-                    return new WP_Error('not_found', 'No post with that ID.');
+                    return new WP_Error('wpmcp_not_found', 'No post with that ID.');
                 }
                 // Also not_found, not a third message. `bad_type` here named the type
                 // it had refused, so probing ids told a Subscriber "exists, and is a
@@ -524,7 +540,7 @@ function wpmcp_core_tools() {
                 // cap check above does not stop the probe. No content was returned
                 // either way; the shape was the leak.
                 if (!wpmcp_post_type_ok($p->post_type)) {
-                    return new WP_Error('not_found', 'No post with that ID.');
+                    return new WP_Error('wpmcp_not_found', 'No post with that ID.');
                 }
                 return array(
                     'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
@@ -558,7 +574,7 @@ function wpmcp_content_tools() {
                 'post_status'  => isset($a['status']) ? sanitize_key($a['status']) : 'draft',
             );
             if (!wpmcp_post_type_ok($postarr['post_type'])) {
-                return new WP_Error('bad_type', 'Unsupported post_type (use a public content type; attachments use the media tools).');
+                return new WP_Error('wpmcp_bad_type', 'Unsupported post_type (use a public content type; attachments use the media tools).');
             }
             // wp_insert_post checks nothing. create_posts is the cap wp-admin gates
             // the "Add New" screen on; publishing is a second, separate capability,
@@ -666,7 +682,7 @@ function wpmcp_content_tools() {
             }
             $force = !empty($a['force']);
             $r = wp_delete_post($id, $force);
-            if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
+            if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => $force, 'trashed' => !$force);
         },
     ),
@@ -689,7 +705,7 @@ function wpmcp_taxonomy_tools() {
         )),
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : 'category';
-            if (!taxonomy_exists($tax)) { return new WP_Error('bad_taxonomy', 'Unknown taxonomy.'); }
+            if (!taxonomy_exists($tax)) { return new WP_Error('wpmcp_bad_taxonomy', 'Unknown taxonomy.'); }
             $terms = get_terms(array(
                 'taxonomy' => $tax, 'hide_empty' => !empty($a['hide_empty']),
                 'search' => isset($a['search']) ? (string) $a['search'] : '',
@@ -714,7 +730,7 @@ function wpmcp_taxonomy_tools() {
         ), 'required' => array('taxonomy', 'name')),
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : '';
-            if (!taxonomy_exists($tax)) { return new WP_Error('bad_taxonomy', 'Unknown taxonomy.'); }
+            if (!taxonomy_exists($tax)) { return new WP_Error('wpmcp_bad_taxonomy', 'Unknown taxonomy.'); }
             // wp_insert_term checks nothing. edit_terms is the cap WordPress maps for
             // creating and editing a term (manage_terms gates the admin LIST screen);
             // for the core taxonomies all three resolve to manage_categories anyway.
@@ -741,7 +757,7 @@ function wpmcp_taxonomy_tools() {
         ), 'required' => array('taxonomy', 'id')),
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : '';
-            if (!taxonomy_exists($tax)) { return new WP_Error('bad_taxonomy', 'Unknown taxonomy.'); }
+            if (!taxonomy_exists($tax)) { return new WP_Error('wpmcp_bad_taxonomy', 'Unknown taxonomy.'); }
             // wp_delete_term checks nothing.
             $tax_obj = get_taxonomy($tax);
             if (!current_user_can($tax_obj->cap->delete_terms)) {
@@ -749,7 +765,7 @@ function wpmcp_taxonomy_tools() {
             }
             $r = wp_delete_term((int) $a['id'], $tax);
             if (is_wp_error($r)) { return $r; }
-            if (!$r) { return new WP_Error('not_found', 'Term not found.'); }
+            if (!$r) { return new WP_Error('wpmcp_not_found', 'Term not found.'); }
             return array('id' => (int) $a['id'], 'deleted' => true);
         },
     ),
@@ -806,7 +822,7 @@ function wpmcp_media_tools() {
             // Same non-disclosing refusal get-post uses: identical to the message a
             // missing id returns, so ids cannot be probed for existence.
             if (!current_user_can('read_post', $id)) {
-                return new WP_Error('not_found', 'No attachment with that ID.');
+                return new WP_Error('wpmcp_not_found', 'No attachment with that ID.');
             }
             $meta = wp_get_attachment_metadata($id);
             $file = get_attached_file($id);
@@ -847,7 +863,7 @@ function wpmcp_media_tools() {
             $url = isset($a['source_url']) ? esc_url_raw((string) $a['source_url']) : '';
             $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
             if (!in_array($scheme, array('http', 'https'), true)) {
-                return new WP_Error('bad_url', 'source_url must be http or https.');
+                return new WP_Error('wpmcp_bad_url', 'source_url must be http or https.');
             }
             require_once ABSPATH . 'wp-admin/includes/file.php';
             require_once ABSPATH . 'wp-admin/includes/media.php';
@@ -858,7 +874,7 @@ function wpmcp_media_tools() {
             $sz  = @filesize($tmp);
             if ($max > 0 && ($sz === false || $sz > $max)) {
                 @unlink($tmp);
-                return new WP_Error('too_big', 'Downloaded file exceeds the upload size limit.');
+                return new WP_Error('wpmcp_too_big', 'Downloaded file exceeds the upload size limit.');
             }
             $name = isset($a['filename']) ? sanitize_file_name((string) $a['filename'])
                 : sanitize_file_name(basename((string) wp_parse_url($url, PHP_URL_PATH)));
@@ -888,7 +904,7 @@ function wpmcp_media_tools() {
                 return wpmcp_cannot('delete attachment ' . $id);
             }
             $r = wp_delete_attachment($id, !empty($a['force']));
-            if (!$r) { return new WP_Error('delete_failed', 'Could not delete.'); }
+            if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => true);
         },
     ),
@@ -996,7 +1012,7 @@ function wpmcp_comment_tools() {
         ), 'required' => array('id', 'action')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
-            if (!$id || !get_comment($id)) { return new WP_Error('not_found', 'No comment with that ID.'); }
+            if (!$id || !get_comment($id)) { return new WP_Error('wpmcp_not_found', 'No comment with that ID.'); }
             // wp_set_comment_status and friends check nothing. moderate_comments is
             // the cap wp-admin requires for the whole moderation queue, and
             // edit_comment maps to it on the post's editors.
@@ -1005,13 +1021,13 @@ function wpmcp_comment_tools() {
             }
             $action = isset($a['action']) ? sanitize_key($a['action']) : '';
             $valid = array('approve', 'unapprove', 'spam', 'trash', 'untrash');
-            if (!in_array($action, $valid, true)) { return new WP_Error('bad_action', 'Unknown action.'); }
+            if (!in_array($action, $valid, true)) { return new WP_Error('wpmcp_bad_action', 'Unknown action.'); }
             if ($action === 'trash')        { $ok = wp_trash_comment($id); }
             elseif ($action === 'untrash')  { $ok = wp_untrash_comment($id); }
             elseif ($action === 'spam')     { $ok = wp_spam_comment($id); }
             elseif ($action === 'unapprove'){ $ok = wp_set_comment_status($id, 'hold'); }
             else                            { $ok = wp_set_comment_status($id, 'approve'); }
-            if (!$ok) { return new WP_Error('failed', 'Action failed.'); }
+            if (!$ok) { return new WP_Error('wpmcp_failed', 'Action failed.'); }
             return array('id' => $id, 'status' => wp_get_comment_status($id));
         },
     ),
@@ -1025,7 +1041,7 @@ function wpmcp_comment_tools() {
         'run' => function ($a) {
             $parent = isset($a['id']) ? (int) $a['id'] : 0;
             $pc = $parent ? get_comment($parent) : null;
-            if (!$pc) { return new WP_Error('not_found', 'No parent comment.'); }
+            if (!$pc) { return new WP_Error('wpmcp_not_found', 'No parent comment.'); }
             $post_id  = (int) $pc->comment_post_ID;
             $moderator = current_user_can('moderate_comments');
 
@@ -1040,7 +1056,7 @@ function wpmcp_comment_tools() {
             // not_found rather than a forbidden, and checked with read_post first, so a
             // caller who cannot even see the post does not learn the comment exists.
             if (!current_user_can('read_post', $post_id)) {
-                return new WP_Error('not_found', 'No parent comment.');
+                return new WP_Error('wpmcp_not_found', 'No parent comment.');
             }
             if (!current_user_can('edit_post', $post_id)) {
                 return wpmcp_cannot('reply to comments on post ' . $post_id);
@@ -1098,7 +1114,7 @@ function wpmcp_comment_tools() {
             $cid = wp_new_comment($comment, true);
 
             if (is_wp_error($cid)) { return $cid; }
-            if (!$cid) { return new WP_Error('failed', 'Could not create reply.'); }
+            if (!$cid) { return new WP_Error('wpmcp_failed', 'Could not create reply.'); }
 
             return array(
                 'id'     => (int) $cid,
@@ -1124,13 +1140,13 @@ function wpmcp_code_tools() {
             $denied = wpmcp_code_forbidden();
             if ($denied) { return $denied; }
             $root = wpmcp_code_root();
-            if ($root === '') { return new WP_Error('no_theme', 'Active theme directory not found.'); }
+            if ($root === '') { return new WP_Error('wpmcp_no_theme', 'Active theme directory not found.'); }
             $rel = isset($a['path']) ? ltrim(str_replace('\\', '/', (string) $a['path']), '/') : '';
-            if (strpos($rel, '..') !== false) { return new WP_Error('illegal', 'Illegal path.'); }
+            if (strpos($rel, '..') !== false) { return new WP_Error('wpmcp_illegal', 'Illegal path.'); }
             $dir = $root . ($rel !== '' ? '/' . $rel : '');
             $abs = realpath($dir);
             if ($abs === false || !wpmcp_path_within($abs, $root) || !is_dir($abs)) {
-                return new WP_Error('not_found', 'No such directory.');
+                return new WP_Error('wpmcp_not_found', 'No such directory.');
             }
             $entries = array();
             foreach (scandir($abs) as $name) {
@@ -1157,9 +1173,9 @@ function wpmcp_code_tools() {
             if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, true);
             if (is_wp_error($r)) { return $r; }
-            if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be read.'); }
-            if (!is_file($r['abs'])) { return new WP_Error('not_found', 'Not a file.'); }
-            if (filesize($r['abs']) > 524288) { return new WP_Error('too_big', 'File exceeds 512KB.'); }
+            if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('wpmcp_ext', 'Only text files may be read.'); }
+            if (!is_file($r['abs'])) { return new WP_Error('wpmcp_not_found', 'Not a file.'); }
+            if (filesize($r['abs']) > 524288) { return new WP_Error('wpmcp_too_big', 'File exceeds 512KB.'); }
             return array('path' => $r['rel'], 'content' => file_get_contents($r['abs']));
         },
     ),
@@ -1175,16 +1191,16 @@ function wpmcp_code_tools() {
             if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, false);
             if (is_wp_error($r)) { return $r; }
-            if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('ext', 'Only text files may be written.'); }
+            if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('wpmcp_ext', 'Only text files may be written.'); }
             $content = isset($a['content']) ? (string) $a['content'] : '';
-            if (strlen($content) > 524288) { return new WP_Error('too_big', 'Content exceeds 512KB.'); }
+            if (strlen($content) > 524288) { return new WP_Error('wpmcp_too_big', 'Content exceeds 512KB.'); }
 
             $existed = is_file($r['abs']);
             $bak = $r['abs'] . '.bak';
-            if (!wpmcp_bak_ok($bak)) { return new WP_Error('bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
+            if (!wpmcp_bak_ok($bak)) { return new WP_Error('wpmcp_bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
             if ($existed) { @copy($r['abs'], $bak); }
             $bytes = file_put_contents($r['abs'], $content);
-            if ($bytes === false) { return new WP_Error('write_failed', 'Could not write file.'); }
+            if ($bytes === false) { return new WP_Error('wpmcp_write_failed', 'Could not write file.'); }
 
             $reverted = false; $perr = null;
             if (strtolower(pathinfo($r['rel'], PATHINFO_EXTENSION)) === 'php') {
@@ -1214,10 +1230,10 @@ function wpmcp_code_tools() {
             if ($denied) { return $denied; }
             $r = wpmcp_code_target($a, true);
             if (is_wp_error($r)) { return $r; }
-            if (!is_file($r['abs'])) { return new WP_Error('not_found', 'Not a file.'); }
+            if (!is_file($r['abs'])) { return new WP_Error('wpmcp_not_found', 'Not a file.'); }
             $bak = $r['abs'] . '.bak';
-            if (!wpmcp_bak_ok($bak)) { return new WP_Error('bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
-            if (!@rename($r['abs'], $bak)) { return new WP_Error('delete_failed', 'Could not move file to .bak.'); }
+            if (!wpmcp_bak_ok($bak)) { return new WP_Error('wpmcp_bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
+            if (!@rename($r['abs'], $bak)) { return new WP_Error('wpmcp_delete_failed', 'Could not move file to .bak.'); }
             return array('path' => $r['rel'], 'deleted' => true, 'backup' => basename($bak));
         },
     ),
