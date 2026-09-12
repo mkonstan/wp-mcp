@@ -93,6 +93,15 @@ jobs:
       - name: Start WordPress (Docker, plugin mapped in and activated)
         # .wp-env.json maps the checkout as the wp-mcp plugin and activates it.
         # ubuntu-latest runners ship Docker, so nothing else is needed.
+        #
+        # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
+        # plain HTTP on port 8888, and the endpoint refuses every non-HTTPS request
+        # before it reads the token. Without the constant the whole integration tier
+        # would answer 403 and every sprint-1 and sprint-2 test would fail for a reason
+        # that has nothing to do with the code. The HTTPS gate itself is covered by
+        # TransportGatesTest (which skips its plaintext case when WPMCP_TEST_URL is not
+        # https) and by the infra-trust suite, which is deliberately not run here - see
+        # phpunit.xml.dist.
         run: npx --yes @wordpress/env start --debug
 
       - name: Enable pretty permalinks
@@ -129,7 +138,7 @@ jobs:
         # the log, and no WpMcp test class that contributed none.
         run: |
           status=0
-          for group in sprint-0 sprint-1; do
+          for group in sprint-0 sprint-1 sprint-2; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"

@@ -60,21 +60,41 @@ function wpmcp_extract_token(WP_REST_Request $req) {
 /**
  * Is this request allowed to carry a credential at all?
  *
- * MEASURED, NOT ASSUMED, on the site under test (Local by Flywheel, nginx in front of
- * PHP-FPM): `is_ssl()` answers true over https://jaygroup.local and false over
- * http://jaygroup.local. Local terminates TLS in its router and forwards to the site's
- * nginx on plain HTTP, but that nginx maps X-Forwarded-Proto into the `HTTPS` fastcgi
- * parameter (`map $http_x_forwarded_proto $resolved_scheme` ->
- * `fastcgi_param HTTPS $fastcgi_https`), so $_SERVER['HTTPS'] is 'on' and is_ssl() is
- * already right. Probed with a temporary mu-plugin: is_ssl=true HTTPS=on
- * XFP=https over https, is_ssl=false HTTPS='' XFP=http over http.
+ * THIS GATE IS ONLY AS STRONG AS THE PROXY IN FRONT OF WORDPRESS. Say that plainly,
+ * because the first version of this docblock did not and was wrong.
  *
- * THEREFORE THIS FUNCTION DOES NOT READ HTTP_X_FORWARDED_PROTO. Trusting a forwarded
- * header here would let any client that can reach PHP claim the request was encrypted
- * when it was not - which is the whole gate. A deployment where is_ssl() genuinely
- * cannot see the truth must teach WordPress (the documented $_SERVER['HTTPS']
- * assignment in wp-config.php, behind whatever proxy check that site trusts), the same
- * place home_url() and every cookie already depend on.
+ * The function reads `is_ssl()` and nothing else. `is_ssl()` reads $_SERVER - HTTPS,
+ * SERVER_PORT (wp-includes/load.php) - which PHP got from the web server, which on a
+ * proxied deployment got it from a header. WordPress has no way to know whether that
+ * header came from the proxy or from the client. So:
+ *
+ *   - A reverse proxy that SETS `X-Forwarded-Proto` itself, overwriting whatever the
+ *     client sent, makes this gate real.
+ *   - A reverse proxy that FORWARDS the client's `X-Forwarded-Proto` unchanged makes it
+ *     advisory: a client posts over plain HTTP with `X-Forwarded-Proto: https` and the
+ *     request is accepted, token in cleartext.
+ *
+ * MEASURED on the site this was developed against (Local by Flywheel), and it is the
+ * second kind. Local's router maps the client's header straight through
+ * (`…/Local/run/router/nginx/conf/nginx.conf`
+ * `map $http_x_forwarded_proto $protocol { default $scheme; https https; }` then
+ * `proxy_set_header X-Forwarded-Proto $protocol`), the site's own nginx maps that into
+ * the FastCGI `HTTPS` parameter, and is_ssl() answers true. Verified three ways: https
+ * -> 403 never happens (correct), plain http -> 403 (correct), plain http plus
+ * `X-Forwarded-Proto: https` -> 200 with tools/list served (NOT correct, and not
+ * fixable here). tests/integration/InfraTrustTest.php pins that case; it is red on
+ * Local on purpose and is excluded from the default suite for that reason.
+ *
+ * THE OPERATOR ACTION, which is the only thing that closes it: your reverse proxy must
+ * set `X-Forwarded-Proto` from its own view of the connection and must never pass the
+ * client's value through. nginx: `proxy_set_header X-Forwarded-Proto $scheme;`.
+ *
+ * AND THIS FUNCTION STILL DOES NOT READ HTTP_X_FORWARDED_PROTO ITSELF. Reading it would
+ * not improve anything - it is the same untrusted header - and would remove the one
+ * place an operator can fix this, which is the proxy. A deployment where is_ssl() cannot
+ * see the truth must teach WordPress (the documented $_SERVER['HTTPS'] assignment in
+ * wp-config.php, behind whatever proxy check that site trusts), which is where
+ * home_url() and every cookie already get their answer.
  *
  * WPMCP_ALLOW_INSECURE === true, and only exactly true, is the escape hatch for a
  * local development site with no certificate. It is a constant rather than an option

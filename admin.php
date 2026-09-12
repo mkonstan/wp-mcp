@@ -90,6 +90,17 @@ function wpmcp_render_admin() {
 
       <?php if (wpmcp_site_is_https()): ?>
         <p>Endpoint base: <code><?php echo esc_html(wpmcp_endpoint_url('/')); ?>{token}</code></p>
+        <div class="notice notice-warning">
+          <p><strong>HTTPS enforcement relies on your proxy overwriting &mdash; not
+             forwarding &mdash; <code>X-Forwarded-Proto</code>.</strong></p>
+          <p>WordPress decides whether a request arrived encrypted from what the web
+             server told PHP, and a reverse proxy, CDN or local dev stack that passes the
+             <em>client's</em> <code>X-Forwarded-Proto</code> through lets a client claim
+             HTTPS over a plaintext connection &mdash; token in cleartext, request
+             accepted. Your proxy must set that header from its own view of the
+             connection. In nginx:
+             <code>proxy_set_header X-Forwarded-Proto $scheme;</code></p>
+        </div>
       <?php else: ?>
         <?php // No URL at all: every request to it would be refused, and printing one
               // that cannot work is worse than printing none. ?>

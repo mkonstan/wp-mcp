@@ -102,6 +102,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the request lifecycle, the per-reques
 
 Read [SECURITY.md](SECURITY.md). Short version: the model is solid for its purpose, with two things to know before production, behind a proxy/CDN you must configure the real client IP (a filter is provided), and the path-in-URL option lands the token in access logs (use the header instead).
 
+### HTTPS enforcement depends on your proxy
+
+The endpoint refuses any request that is not over HTTPS — 403, before the token is read. It decides with WordPress's `is_ssl()`, which reads what the web server told PHP, which on a proxied deployment is a header. WordPress cannot tell whether that header came from your proxy or from the client.
+
+**Your reverse proxy must set `X-Forwarded-Proto` itself, and must never pass the client's value through.** In nginx: `proxy_set_header X-Forwarded-Proto $scheme;`. A proxy, CDN or local development stack that forwards the client's value makes this gate advisory — a client can POST over plain HTTP with `X-Forwarded-Proto: https`, and the request is accepted with the token in cleartext.
+
+`composer test:infra` is the one-test suite that checks this against a running host. It is excluded from `composer test` and from CI because it is a fact about your deployment, not about the code — run it against the production host after any proxy change. It is expected to FAIL on Local by Flywheel, whose router forwards the client's header.
+
+For a local development site with no certificate, and nowhere else, `define('WPMCP_ALLOW_INSECURE', true);` in `wp-config.php` turns the gate off.
+
 ## Support
 
 WP MCP is free and GPL-licensed — use it however you like. If you like what you

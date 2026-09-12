@@ -28,6 +28,26 @@
         </testsuite>
     </testsuites>
 
+    <!--
+      infra-trust is excluded from every default run, and from CI.
+
+      It asks a question about the DEPLOYMENT, not about the code: does the proxy in
+      front of WordPress overwrite X-Forwarded-Proto, or forward the client's? The
+      answer is red on Local by Flywheel and on wp-env, and no change to this
+      repository can make it green - only a change to somebody's proxy config can. A
+      test like that must not be able to turn `composer test` red, and it must not be
+      quietly skipped either, because a skip is green and the fact would vanish.
+
+      So it lives behind its own command, `composer test:infra`, to be run against the
+      host you actually serve from. A group named on the command line overrides this
+      exclusion, which is exactly how that command reaches it.
+    -->
+    <groups>
+        <exclude>
+            <group>infra-trust</group>
+        </exclude>
+    </groups>
+
     <php>
         <!--
           Read from the real environment. Do NOT hardcode a URL here: an unset

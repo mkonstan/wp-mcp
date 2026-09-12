@@ -24,8 +24,12 @@
  *    narrows on top. Delete the user and the token stops working.
  *  - The endpoint is dormant when no live token exists.
  *  - Token travels in the URL path or an Authorization: Bearer header.
- *  - HTTPS is required. Over plaintext the endpoint answers 403 before it reads the
- *    token; WPMCP_ALLOW_INSECURE === true in wp-config.php is the local-dev override.
+ *  - HTTPS is required: over plaintext the endpoint answers 403 before it reads the
+ *    token. It decides with is_ssl(), so the gate is only as strong as the proxy in
+ *    front of WordPress - a proxy that FORWARDS the client's X-Forwarded-Proto rather
+ *    than OVERWRITING it lets a client claim HTTPS over a plaintext connection. Your
+ *    reverse proxy must set that header itself and never pass the client's value.
+ *    WPMCP_ALLOW_INSECURE === true in wp-config.php is the local-dev override.
  *  - A browser Origin must be one of the site's own; absent Origin is allowed, which
  *    is what non-browser clients send. POST must be application/json, or 415.
  *  - Every token refusal is one byte-identical 401. Which of the six it was lives in
