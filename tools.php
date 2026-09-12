@@ -160,6 +160,63 @@ function wpmcp_post_type_ok($type) {
     return is_post_type_viewable($type);
 }
 
+/**
+ * The post statuses of $post_type the current user is allowed to see listed.
+ *
+ * WHY THIS EXISTS RATHER THAN 'any'. WP_Query's `perm => 'readable'` is not the guard
+ * it looks like: it scopes exactly one bucket - the `private` status - and only when
+ * `post_status` is an explicit list. The 'any' keyword takes a different branch that
+ * merely excludes `exclude_from_search` statuses, so `perm` never applies at all, and
+ * `draft` sits in the bucket only `perm => 'editable'` scopes. Passing 'any' therefore
+ * listed every author's private and draft posts - id, title, status, slug, link - to
+ * any token. Deciding the statuses here, from capabilities, is what actually closes it.
+ *
+ * Narrower than 'any' by one deliberate margin: a site with CUSTOM post statuses will
+ * not see them listed, because this returns only the five core ones.
+ */
+function wpmcp_listable_statuses($post_type) {
+    $pto      = get_post_type_object($post_type);
+    $statuses = array('publish');
+    if (!$pto) { return $statuses; }
+
+    if (current_user_can($pto->cap->read_private_posts)) {
+        $statuses[] = 'private';
+    }
+    // Unpublished work is other people's drafts. Seeing it is an editorial
+    // capability, and edit_others_posts is the one WordPress uses for that.
+    if (current_user_can($pto->cap->edit_others_posts)) {
+        $statuses[] = 'draft';
+        $statuses[] = 'pending';
+        $statuses[] = 'future';
+    }
+    return $statuses;
+}
+
+/**
+ * The statuses of $post_type the current user may see on their OWN posts but not on
+ * other people's - the complement of wpmcp_listable_statuses().
+ *
+ * An Author holds neither read_private_posts nor edit_others_posts, so the list above
+ * gives them `publish` alone and their own drafts vanish from their own token's
+ * listing. WP_Query cannot express "everybody's publish OR only my drafts" in one
+ * query: the post_status buckets are OR'd, but `perm` scopes them by author
+ * all-or-nothing, so `perm => 'editable'` would hide other people's PUBLISHED posts
+ * too. Hence a second, author-scoped query, and hence this list.
+ *
+ * Empty for anyone who cannot author posts at all, and empty for an Editor or an
+ * Administrator - they already see every status, so they run one query exactly as
+ * before.
+ */
+function wpmcp_own_listable_statuses($post_type) {
+    $pto = get_post_type_object($post_type);
+    if (!$pto || !current_user_can($pto->cap->edit_posts)) { return array(); }
+
+    return array_values(array_diff(
+        array('private', 'draft', 'pending', 'future'),
+        wpmcp_listable_statuses($post_type)
+    ));
+}
+
 /** Apply {taxonomy:[id|name,...]} to a post, creating missing terms by name. */
 function wpmcp_apply_terms($post_id, $terms) {
     foreach ((array) $terms as $tax => $vals) {
@@ -230,7 +287,7 @@ function wpmcp_core_tools() {
         ),
         'list-posts' => array(
             'write' => false,
-            'description' => 'List recent content. Args: post_type (default "post"), status (default "any"), limit (default 20, max 100).',
+            'description' => 'List recent content the caller is allowed to see. Args: post_type (default "post"), status (default: every status the caller may see), limit (default 20, max 100).',
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string'),
                 'status'    => array('type' => 'string'),
@@ -243,29 +300,60 @@ function wpmcp_core_tools() {
                 if (!wpmcp_post_type_ok($type)) {
                     return new WP_Error('bad_type', 'Not a listable post type: ' . $type);
                 }
-                $q = new WP_Query(array(
-                    'post_type'      => $type,
-                    'post_status'    => isset($args['status']) ? sanitize_key($args['status']) : 'any',
-                    'posts_per_page' => isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20,
-                    'no_found_rows'  => true,
-                    // Without read_private_posts, only the user's OWN private posts
-                    // come back.
-                    //
-                    // KNOWN LIMIT, read WP_Query before trusting this arg further.
-                    // 'perm' => 'readable' scopes exactly one bucket - the `private`
-                    // status - and only when post_status is an explicit list. The
-                    // 'any' keyword below takes a different branch entirely (it just
-                    // excludes exclude_from_search statuses), and `draft` lands in the
-                    // bucket only 'editable' scopes. So the default status:"any", and
-                    // status:"draft", still LIST other authors' private and draft
-                    // posts: id, title, status, slug, link. Not content - get-post
-                    // checks read_post per id and refuses. Closing that is a change to
-                    // this tool's default output and was left out of Sprint 1 on
-                    // purpose; see the sprint report.
-                    'perm'           => 'readable',
-                ));
+                $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
+
+                // 'any' is never handed to WP_Query: it takes a branch where `perm` is
+                // not consulted at all, so it lists every author's private and draft
+                // posts. The permitted set is decided from capabilities instead.
+                $permitted = wpmcp_listable_statuses($type);
+                $own       = wpmcp_own_listable_statuses($type);
+                $asked     = isset($args['status']) ? sanitize_key($args['status']) : '';
+
+                if ($asked !== '' && $asked !== 'any') {
+                    // Intersection, not a refusal: asking for a status you may not see
+                    // is answered with an empty list, the same answer as a status with
+                    // nothing in it. An error here would say "that status exists and is
+                    // being withheld", which is the disclosure get-post avoids too.
+                    $permitted = array_values(array_intersect($permitted, array($asked)));
+                    $own       = array_values(array_intersect($own, array($asked)));
+                }
+
+                $posts = array();
+                if ($permitted) {
+                    $q = new WP_Query(array(
+                        'post_type'      => $type,
+                        'post_status'    => $permitted,
+                        'posts_per_page' => $limit,
+                        'no_found_rows'  => true,
+                        // Belt and braces over the list above: on an explicit status
+                        // list this also scopes `private` to the user's own posts when
+                        // they lack read_private_posts.
+                        'perm'           => 'readable',
+                    ));
+                    $posts = $q->posts;
+                }
+                // Own unpublished work, which the first query cannot reach - see
+                // wpmcp_own_listable_statuses(). Disjoint status sets, so no duplicates.
+                if ($own) {
+                    $q2 = new WP_Query(array(
+                        'post_type'      => $type,
+                        'post_status'    => $own,
+                        'author'         => get_current_user_id(),
+                        'posts_per_page' => $limit,
+                        'no_found_rows'  => true,
+                    ));
+                    $posts = array_merge($posts, $q2->posts);
+                    // Re-impose WP_Query's own ordering across the merge, then the
+                    // limit, so `limit` still means what it says.
+                    usort($posts, function ($a, $b) {
+                        $cmp = strcmp((string) $b->post_date_gmt, (string) $a->post_date_gmt);
+                        return $cmp !== 0 ? $cmp : ((int) $b->ID - (int) $a->ID);
+                    });
+                    $posts = array_slice($posts, 0, $limit);
+                }
+
                 $items = array();
-                foreach ($q->posts as $p) {
+                foreach ($posts as $p) {
                     $items[] = array(
                         'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
                         'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),

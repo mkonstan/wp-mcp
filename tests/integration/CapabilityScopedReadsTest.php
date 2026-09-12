@@ -21,6 +21,14 @@
  * capability - and it does so with a role that genuinely lacks it, rather than
  * asserting a restriction WordPress does not impose.
  *
+ * THE DEFAULT LISTING IS COVERED SEPARATELY, and it is the case that was broken.
+ * `perm => 'readable'` alone does not fix it: WP_Query only consults `perm` when
+ * `post_status` is an explicit list, and even then it scopes only the `private`
+ * bucket. `status: "any"` takes a different branch entirely. So list-posts now
+ * decides the statuses from capabilities, and these tests pin all three sides of it -
+ * another author's private post and draft hidden, the user's OWN draft still shown,
+ * and the admin token's listing unchanged.
+ *
  * Every fixture is named `wpmcp-test-*` and removed in tearDownAfterClass.
  *
  * @group sprint-1
@@ -38,6 +46,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private const LABEL          = Fixtures::PREFIX . 'caps';
     private const PRIVATE_TITLE  = Fixtures::PREFIX . 'private';
     private const DRAFT_TITLE    = Fixtures::PREFIX . 'draft';
+    private const OWN_DRAFT_TITLE = Fixtures::PREFIX . 'own-draft';
     private const SECRET         = 'wpmcp-test-secret-body';
     private const APPROVED_TEXT  = Fixtures::PREFIX . 'approved-comment';
     private const HELD_TEXT      = Fixtures::PREFIX . 'held-comment';
@@ -49,6 +58,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     private static int $authorId  = 0;
     private static int $privateId = 0;
     private static int $draftId   = 0;
+    private static int $ownDraftId = 0;
     private static string $authorToken = '';
     private static string $adminToken  = '';
 
@@ -76,6 +86,16 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'wpmcp-test-draft-body'
         );
 
+        // The author's OWN draft. Without it, "the author sees no drafts" would pass
+        // for the wrong reason - a listing that hides everyone's drafts, their own
+        // included, is a regression, not a fix.
+        self::$ownDraftId = Fixtures::createPost(
+            self::OWN_DRAFT_TITLE,
+            'draft',
+            self::$authorId,
+            'wpmcp-test-own-draft-body'
+        );
+
         // One approved and one held-for-moderation comment, so "approved only" is a
         // real filter rather than an empty result that would pass either way.
         Fixtures::createComment(self::$draftId, self::APPROVED_TEXT, true);
@@ -92,6 +112,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // to user 1, tokens go by label. purge() is the net underneath all of it.
         Fixtures::deletePost(self::$privateId);
         Fixtures::deletePost(self::$draftId);
+        Fixtures::deletePost(self::$ownDraftId);
         Fixtures::deleteUser(self::$editorId);
         Fixtures::deleteUser(self::$authorId);
         Fixtures::deleteTokensLabelled(self::LABEL);
@@ -149,6 +170,97 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             $result->column('id'),
             'An Author saw another user\'s private post in a private-status listing.'
         );
+    }
+
+    /**
+     * (g) The DEFAULT listing - no arguments at all - is the one that mattered most
+     * and the one that leaked. WP_Query's `status: "any"` takes a branch that never
+     * consults `perm`, so before this the Author's own token listed the Editor's
+     * private post and draft: id, title, status, slug and link. A title and a link
+     * are a read. Same call, and it must now show neither.
+     *
+     * @group sprint-1
+     */
+    public function testTheDefaultListingHidesAnotherAuthorsPrivateAndDraftPosts(): void
+    {
+        $result = $this->mcp(self::$authorToken)->callTool('list-posts', ['limit' => 100]);
+
+        self::assertFalse($result->isError, 'list-posts failed: ' . $result->text);
+
+        $ids = $result->column('id');
+        self::assertNotContains(
+            self::$privateId,
+            $ids,
+            'The default list-posts still shows another author\'s private post.'
+        );
+        self::assertNotContains(
+            self::$draftId,
+            $ids,
+            'The default list-posts still shows another author\'s draft.'
+        );
+        self::assertStringNotContainsString(self::PRIVATE_TITLE, $result->text);
+        self::assertStringNotContainsString(self::DRAFT_TITLE, $result->text);
+    }
+
+    /**
+     * The other half of (g): the Author's OWN draft is still listed. WordPress lets
+     * an author edit their own drafts, so hiding them would be a regression dressed
+     * up as a fix - and it is what the capability-gated status list does on its own,
+     * measured, which is why list-posts runs a second author-scoped query.
+     *
+     * @group sprint-1
+     */
+    public function testTheDefaultListingStillShowsTheUsersOwnDraft(): void
+    {
+        $result = $this->mcp(self::$authorToken)->callTool('list-posts', ['limit' => 100]);
+
+        self::assertFalse($result->isError, 'list-posts failed: ' . $result->text);
+        self::assertContains(
+            self::$ownDraftId,
+            $result->column('id'),
+            'The Author cannot see their own draft. The status list is gated on'
+            . ' edit_others_posts, so own unpublished work needs the second,'
+            . ' author-scoped query - see wpmcp_own_listable_statuses().'
+        );
+    }
+
+    /**
+     * (h) Asking for a status you may not see is an empty list, not an error. A
+     * refusal would confirm that something is being withheld, which is exactly the
+     * disclosure get-post goes out of its way to avoid.
+     *
+     * @group sprint-1
+     */
+    public function testAskingForAStatusTheUserMayNotSeeIsEmptyRatherThanAnError(): void
+    {
+        $result = $this->mcp(self::$authorToken)
+            ->callTool('list-posts', ['status' => 'private', 'limit' => 100]);
+
+        self::assertFalse(
+            $result->isError,
+            'An unpermitted status was refused instead of returning nothing: ' . $result->text
+        );
+        self::assertSame([], $result->items(), 'Expected no items for an Author asking for private posts.');
+        self::assertSame(0, $result->data()['count']);
+    }
+
+    /**
+     * (i) The admin token's DEFAULT listing is unchanged: both the private post and
+     * the draft are there. This is the assertion that stops the fix above from being
+     * "hide unpublished posts from everyone".
+     *
+     * @group sprint-1
+     */
+    public function testTheAdminTokensDefaultListingStillShowsPrivateAndDraftPosts(): void
+    {
+        $result = $this->mcp(self::$adminToken)->callTool('list-posts', ['limit' => 100]);
+
+        self::assertFalse($result->isError, 'list-posts failed: ' . $result->text);
+
+        $ids = $result->column('id');
+        self::assertContains(self::$privateId, $ids, 'The admin token lost sight of the private post.');
+        self::assertContains(self::$draftId, $ids, 'The admin token lost sight of the draft.');
+        self::assertContains(self::$ownDraftId, $ids, 'The admin token lost sight of the Author\'s draft.');
     }
 
     /**
