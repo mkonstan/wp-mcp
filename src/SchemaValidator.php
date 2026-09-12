@@ -23,7 +23,7 @@
  * being silently ignored. Everything else is absent on purpose: no `$ref`, no `oneOf`,
  * `anyOf`, `allOf`, `not`, no `format`, no `patternProperties`, no `const`. An
  * unsupported keyword in a schema is NOT enforced, which is why
- * tests/unit/SchemaDialectTest.php asserts that every built-in schema stays inside
+ * tests/unit/ToolContractTest.php asserts that every built-in schema stays inside
  * KEYWORDS - the validator's silence about a keyword it does not know is a hole, and
  * that test is what keeps the hole out of this plugin's own tools.
  *
@@ -291,7 +291,7 @@ final class SchemaValidator
      * A TYPE NAME THIS DIALECT DOES NOT KNOW PASSES. It cannot be checked, so refusing
      * on it would refuse a legal input over a schema this validator does not understand
      * - a decision for the author of the schema, not for the caller. Built-in schemas
-     * are held to TYPES by tests/unit/SchemaDialectTest.php instead.
+     * are held to TYPES by tests/unit/ToolContractTest.php instead.
      */
     private static function matches($value, string $type): bool
     {
@@ -372,11 +372,24 @@ final class SchemaValidator
      * The key came from the caller, so its length is the caller's choice and it ends up
      * in a message sent back - the same shape of problem as the echoed
      * MCP-Protocol-Version header, and the same answer.
+     *
+     * TRUNCATED ON A CHARACTER BOUNDARY, NOT A BYTE ONE. A byte `substr` at 64 splits a
+     * three-byte character whose first byte lands on 64, and the half-character left
+     * behind is invalid UTF-8: `json_encode` refuses the whole document on it
+     * (JSON_ERROR_UTF8), and wp_json_encode's `_wp_json_sanity_check` instead strips the
+     * bad bytes - so the failure message comes back mangled rather than truncated, or
+     * not at all. Found by review 2026-09-12; a 2-byte character happens to cut cleanly
+     * at 64 and a 3-byte one does not, which is exactly the kind of difference a
+     * byte-length cap cannot see. mb_strcut cuts to a byte budget WITHOUT splitting a
+     * character, which is the operation wanted here - mb_substr would cap characters and
+     * let a 64-character key of 4-byte emoji through at 256 bytes.
      */
     private static function escape(string $key): string
     {
         if (strlen($key) > self::MAX_KEY) {
-            $key = substr($key, 0, self::MAX_KEY) . '...';
+            $key = (function_exists('mb_strcut')
+                ? (string) mb_strcut($key, 0, self::MAX_KEY, 'UTF-8')
+                : substr($key, 0, self::MAX_KEY)) . '...';
         }
 
         return str_replace(array('~', '/'), array('~0', '~1'), $key);

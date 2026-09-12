@@ -150,7 +150,9 @@ final class ToolContractTest extends TestCase
             'list-posts'       => [false, true,  false],
             'get-post'         => [false, true,  false],
             'create-post'      => [false, false, false],
-            'update-post'      => [false, true,  false],
+            // TRUE, and the row that was wrong: update-post replaces every field it
+            // touches and replaces the post's terms in any taxonomy it names.
+            'update-post'      => [true,  true,  false],
             'delete-post'      => [true,  true,  false],
             'list-terms'       => [false, true,  false],
             'create-term'      => [false, false, false],

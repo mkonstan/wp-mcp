@@ -299,7 +299,7 @@ final class SchemaValidatorTest extends TestCase
      * `enum`, `minimum`/`maximum`, `minLength`/`maxLength`, `items` - the keywords the
      * dialect supports ahead of the built-in schemas using them.
      *
-     * NO BUILT-IN USES THESE TODAY (see SchemaDialectTest), and they are implemented
+     * NO BUILT-IN USES THESE TODAY (see ToolContractTest::testEveryBuiltInSchemaStaysInsideTheDialect), and they are implemented
      * anyway for one reason: an unsupported keyword is not enforced, so a schema author
      * who reaches for `enum` would otherwise get silence. Tested so the support is real.
      *
@@ -428,6 +428,59 @@ final class SchemaValidatorTest extends TestCase
             $failures,
             'RFC 6901 escaping is what stops a key containing a slash from reading as two'
             . ' path segments: ' . implode(' | ', $failures)
+        );
+    }
+
+    /**
+     * A long key truncated ON A CHARACTER BOUNDARY, so the message stays encodable.
+     *
+     * THE CASE IS CONSTRUCTED, NOT SAMPLED: 63 ASCII bytes then a three-byte character,
+     * so its first byte sits at offset 63 and a byte-wise `substr($key, 0, 64)` keeps one
+     * byte of three. That leaves invalid UTF-8 in the failure line, and `json_encode`
+     * refuses the WHOLE document on it (JSON_ERROR_UTF8) rather than the one string -
+     * wp_json_encode's sanity check instead strips the bad bytes, so the caller gets a
+     * mangled message. A two-byte character happens to cut cleanly at 64, which is why
+     * this needs a deliberate width rather than "a long unicode key". Found by review
+     * 2026-09-12.
+     *
+     * @group sprint-5
+     */
+    public function testALongMultiByteKeyIsTruncatedOnACharacterBoundary(): void
+    {
+        // U+20AC EURO SIGN: three bytes, e2 82 ac.
+        $key = str_repeat('a', 63) . "\u{20AC}" . str_repeat('b', 40);
+
+        // THE PREMISE, asserted rather than assumed: a byte-wise cut at MAX_KEY really
+        // does break this key. Without this the test could be green against a key that
+        // happens to cut cleanly, and would then prove nothing about the fix.
+        // preg_match with /u answers 1 on valid UTF-8 and FALSE on invalid - not 0, which
+        // is "no match" - so the premise is "anything but 1".
+        self::assertNotSame(
+            1,
+            preg_match('//u', substr($key, 0, 64)),
+            'This key does not straddle the 64-byte boundary with a partial character, so'
+            . ' it is the wrong fixture for this test.'
+        );
+
+        $failures = SchemaValidator::validateArguments([$key => 1], ['type' => 'object']);
+
+        self::assertCount(1, $failures, implode(' | ', $failures));
+        self::assertSame(
+            1,
+            preg_match('//u', $failures[0]),
+            'The failure line is not valid UTF-8: a multi-byte character was cut in half'
+            . ' by a byte-wise truncation. Bytes: ' . bin2hex($failures[0])
+        );
+        self::assertIsString(
+            json_encode(['text' => $failures[0]]),
+            'json_encode refused the failure message, which is what invalid UTF-8 does to'
+            . ' the whole response document: ' . bin2hex($failures[0])
+        );
+        self::assertStringContainsString('...', $failures[0], $failures[0]);
+        self::assertStringNotContainsString(
+            str_repeat('b', 10),
+            $failures[0],
+            'The key was not truncated at all.'
         );
     }
 

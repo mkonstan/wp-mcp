@@ -21,13 +21,22 @@
  * flag already carries. See wpmcp_annotation_hints() in endpoint.php for what each one
  * means and why an unstated `destructiveHint` defaults to true. The judgements made here:
  *
- *   destructiveHint true   delete-post (force=true permanently deletes), delete-term,
- *                          delete-media, moderate-comment (spam and trash destroy the
- *                          comment's place in the thread), code-write (overwrites a
- *                          theme file), code-delete.
+ *   destructiveHint true   update-post, delete-post (force=true permanently deletes),
+ *                          delete-term, delete-media, moderate-comment (spam and trash
+ *                          destroy the comment's place in the thread), code-write
+ *                          (overwrites a theme file), code-delete.
  *                  false   every read tool, and create-post / create-term /
- *                          upload-media / reply-comment, which only add. update-post is
- *                          false too: it edits fields the caller named and nothing else.
+ *                          upload-media / reply-comment, which only ADD: each call
+ *                          brings a new post, term, attachment or comment into being
+ *                          and replaces nothing that was there.
+ *
+ *                  THE TEST IS MCP'S OWN AND IT IS NARROW: `false` promises the update
+ *                  is ADDITIVE. update-post was false, and that was wrong - it replaces
+ *                  every field it touches, and its `terms` path replaces the post's
+ *                  terms in that taxonomy rather than adding to them. Found by review
+ *                  2026-09-12. "Only the fields the caller named" is scope, not
+ *                  additivity, and a client honouring the hint would have let an agent
+ *                  overwrite a published body without asking. When in doubt, true.
  *   idempotentHint  false  the four tools that CREATE a new object per call
  *                          (create-post, create-term, upload-media, reply-comment), and
  *                          code-write, whose second call rotates the .bak onto the
@@ -674,9 +683,16 @@ function wpmcp_content_tools() {
 
     'update-post' => array(
         'write' => true,
+        // destructiveHint TRUE. MCP's `false` means the tool performs only ADDITIVE
+        // updates, and this one does not: every field it touches REPLACES what was
+        // there - post_title, post_content, post_status, post_excerpt, post_name - and
+        // `terms` reaches wp_set_object_terms($id, $ids, $tax, false), whose trailing
+        // `false` means replace rather than append, so naming one category removes the
+        // others. "Only the fields the caller named" is a statement about SCOPE, and
+        // scoped is not additive.
         'annotations' => array(
             'readOnlyHint' => false,
-            'destructiveHint' => false,
+            'destructiveHint' => true,
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
