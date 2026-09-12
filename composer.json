@@ -22,13 +22,15 @@
         "test": "phpunit",
         "test:unit": "phpunit --testsuite unit",
         "test:integration": "phpunit --testsuite integration",
-        "test:infra": "phpunit --group infra-trust"
+        "test:infra": "phpunit --group infra-trust",
+        "test:client": "bash bin/claude-code-smoke.sh"
     },
     "scripts-descriptions": {
         "test": "Run every suite (integration self-skips when WPMCP_TEST_URL is unset).",
         "test:unit": "Pure PHP, no WordPress, no Docker.",
         "test:integration": "Black-box HTTP against WPMCP_TEST_URL.",
-        "test:infra": "Ask the host WPMCP_TEST_URL points at whether its HTTPS enforcement is real. Excluded from every other run; expected to FAIL on Local by Flywheel and on wp-env, whose proxies forward the client X-Forwarded-Proto. Run it against production."
+        "test:infra": "Ask the host WPMCP_TEST_URL points at whether its HTTPS enforcement is real. Excluded from every other run; expected to FAIL on Local by Flywheel and on wp-env, whose proxies forward the client X-Forwarded-Proto. Run it against production.",
+        "test:client": "The client gate: a REAL MCP client (the Claude Code CLI) handshakes with WPMCP_TEST_URL, lists its tools and calls one, and the answer is checked against the database. Needs `claude` on PATH and costs one Claude call, so it is out of `composer test` and out of CI. Run it by hand when the handshake, the transport or the tool registry changes."
     },
     "config": {
         "sort-packages": true,

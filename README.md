@@ -112,6 +112,20 @@ The endpoint refuses any request that is not over HTTPS — 403, before the toke
 
 For a local development site with no certificate, and nowhere else, `define('WPMCP_ALLOW_INSECURE', true);` in `wp-config.php` turns the gate off.
 
+## Testing
+
+Dev dependencies only — the plugin itself ships as plain PHP with nothing vendored. `composer install`, then:
+
+| Command | What it runs |
+|---|---|
+| `composer test` | Everything below except the two gates that are excluded by design. |
+| `composer test:unit` | Pure PHP. No WordPress, no Docker, seconds. |
+| `composer test:integration` | Black-box HTTP against `WPMCP_TEST_URL` — a real site, real TLS, real capability checks. Skips itself when that variable is unset. |
+| `composer test:infra` | One test, about your **deployment** rather than the code. See [HTTPS enforcement](#https-enforcement-depends-on-your-proxy). |
+| `composer test:client` | The client gate: a real MCP client (the Claude Code CLI) handshakes with your site, lists its tools and calls one. |
+
+`composer test:client` is **out of `composer test` and out of CI**, because it costs a Claude API call and needs the `claude` CLI on PATH. It is the only test in the repository that is not our own client asserting our own beliefs — it sends what a real client actually sends, and the assertion is a value read straight from your database that the model had no other way to know. Run it by hand when the handshake, the transport or the tool registry changes. See [docs/CONNECT-CLIENTS.md](docs/CONNECT-CLIENTS.md).
+
 ## Support
 
 WP MCP is free and GPL-licensed — use it however you like. If you like what you
