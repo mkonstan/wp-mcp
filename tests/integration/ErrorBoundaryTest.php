@@ -86,6 +86,21 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
         return Fixtures::name('tool-throws');
     }
 
+    /** A tool returning a core WP_Error code the caller can act on: message relays. */
+    private static function relayToolName(): string
+    {
+        return Fixtures::name('tool-core-relay');
+    }
+
+    /** A tool returning a core WP_Error nobody wrote for a client: goes generic. */
+    private static function opaqueToolName(): string
+    {
+        return Fixtures::name('tool-core-opaque');
+    }
+
+    /** The SQL-shaped string the opaque tool puts in its WP_Error DATA. */
+    private const OPAQUE_DATA = 'INSERT INTO wp_terms SECRET-SQL-MUST-NOT-REACH-A-CLIENT';
+
     /**
      * The control: the tool IS registered and callable, so a failure below is the
      * boundary talking and not a filter that never ran.
@@ -225,52 +240,236 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * Is the trace log readable over HTTP? MEASURED, not assumed, and the answer is a
-     * property of the host rather than of this repository.
+     * A core WP_Error code on the relay allow-list reaches the caller as a tool error, and
+     * is NOT logged.
      *
-     * On Local by Flywheel the answer is YES: nginx never reads .htaccess and its config
-     * has no rule for /wp-content/, so the file is served with 200 and its full contents.
-     * That IS the finding, and it is the reason the plugin asks the question itself
-     * instead of shipping three lines of Apache syntax and calling the log private. So
-     * this test asserts the ONE thing that must be true either way: either the host
-     * refuses the file, or the plugin's own self-check noticed and raised the admin
-     * warning. A host that serves it AND says nothing is the failure.
+     * WHY THE LIST EXISTS. Wrapping every core WP_Error in "Internal error" made the
+     * agent's own mistakes unreadable: `term_exists` means "use the term, do not create
+     * it", `comment_flood` means "wait and retry", `http_request_failed` on a source_url
+     * means "you typed the URL wrong". An agent cannot self-correct on "Internal error", so
+     * it repeats the call, and each repeat writes a stack trace for something that is not a
+     * bug. Five codes, all of them the caller's own doing, all of them actionable.
      *
      * @group sprint-3
      */
-    public function testTheTraceLogIsEitherUnreachableOrLoudlyFlagged(): void
+    public function testARelayableCoreErrorReachesTheCallerAndIsNotLogged(): void
     {
-        // The self-check also creates the directory and the empty log, so the URL has a
-        // file behind it - a 404 from a missing file would answer a different question.
+        $before = strlen(TraceLog::contents());
+
+        $result = $this->mcp(self::$token)->callTool(self::relayToolName());
+
+        self::assertTrue($result->isError, 'A WP_Error must come back as isError: ' . $result->text);
+        self::assertStringContainsString(
+            'already exists',
+            $result->text,
+            'term_exists is on the relay allow-list, so core\'s own sentence must reach the'
+            . ' caller - "Internal error" leaves an agent with nothing to act on. Got: '
+            . $result->text
+        );
+
+        self::assertSame(
+            $before,
+            strlen(TraceLog::contents()),
+            'A relayed, caller-caused error wrote a trace. The log is for bugs; five codes'
+            . ' were allow-listed precisely so a mistyped argument does not fill it with'
+            . ' stacks.'
+        );
+    }
+
+    /**
+     * Any other core WP_Error stays generic - and its DATA goes to the log, which is the
+     * whole reason core errors come here at all.
+     *
+     * S4. wpdb does not put the failing query in the error MESSAGE: `db_insert_error`'s
+     * message is "Could not insert term into the database." and `$wpdb->last_error` is in
+     * the error DATA. The first version logged only the message, so the one case the
+     * docblock cited as justification for treating core errors as throwables was the case
+     * whose detail never reached the log.
+     *
+     * @group sprint-3
+     */
+    public function testAnOpaqueCoreErrorIsGenericOnTheWireAndCompleteInTheLog(): void
+    {
+        $response = $this->mcp(self::$token)->post('tools/call', [
+            'name'      => self::opaqueToolName(),
+            'arguments' => [],
+        ]);
+
+        $raw  = (string) $response->getBody();
+        $body = json_decode($raw, true);
+
+        self::assertIsArray($body, 'Not JSON: ' . $raw);
+        self::assertSame(-32603, $body['error']['code'] ?? null, $raw);
+        self::assertSame('Internal error', $body['error']['message'] ?? null, $raw);
+
+        self::assertStringNotContainsString(
+            self::OPAQUE_DATA,
+            $raw,
+            'The WP_Error data - where wpdb puts the failing query - reached the client.'
+        );
+        self::assertStringNotContainsString(
+            'Could not insert term',
+            $raw,
+            'Core\'s message for a code that is NOT on the relay allow-list reached the'
+            . ' client. Only the five allow-listed codes may speak. Body: ' . $raw
+        );
+
+        $traceId = (string) ($body['error']['data']['trace_id'] ?? '');
+
+        self::assertMatchesRegularExpression('/^[0-9a-f]{8}$/', $traceId, $raw);
+
+        $entry = TraceLog::entry($traceId);
+
+        self::assertStringContainsString('class=WP_Error:db_insert_error', $entry, $entry);
+        self::assertStringContainsString(
+            self::OPAQUE_DATA,
+            $entry,
+            'The WP_Error DATA is not in the trace entry, so the SQL that caused the failure'
+            . ' is nowhere at all - which was the one thing the private log was for.'
+            . ' Entry: ' . $entry
+        );
+    }
+
+    /**
+     * B1. The old, guessable URL is gone: `GET /wp-content/wpmcp/trace.log` is not served.
+     *
+     * MEASURED BEFORE THE FIX: that exact URL returned 200 with 14 KB of absolute Windows
+     * paths including the OS username, the plugin's development checkout path, mu-plugin
+     * file names, tool names, user ids, token row ids and every stack frame's arguments -
+     * to anybody, with no token, on nginx, Caddy and LiteSpeed alike, because `.htaccess`
+     * is an Apache file those servers neither read nor serve. The plugin's self-check
+     * noticed and the plugin carried on writing, which made it an observation rather than a
+     * guard. The memory rule this sprint implements says the log must be VERIFIED
+     * UNREACHABLE, so the name is now unguessable and the legacy file is deleted on sight.
+     *
+     * @group sprint-3
+     */
+    public function testTheOldGuessableLogUrlIsNotServed(): void
+    {
+        // Provoke a write, so a 404 below cannot be "the directory does not exist yet".
+        self::assertNotSame('', TraceLog::contents(), 'The log is empty, so nothing has'
+            . ' been written and this test would pass on an absent directory.');
+
+        $response = $this->client()->get('wp-content/wpmcp/' . TraceLog::LEGACY_NAME);
+
+        self::assertNotSame(
+            200,
+            $response->getStatusCode(),
+            'wp-content/wpmcp/' . TraceLog::LEGACY_NAME . ' is still served. Either the'
+            . ' log is still written under its old fixed name, or a file left by the'
+            . ' previous version was not removed - and a stranger reads the stack traces.'
+        );
+    }
+
+    /**
+     * The real name is not derivable from anything a client sees.
+     *
+     * The guard is the secrecy of one string, so the test is that the string does not
+     * appear in any response a caller can obtain: the generic error, a tools/list, a
+     * tools/call, the directory itself. The 32 hex digits are searched for on their own as
+     * well as the whole file name, because half a name is a name.
+     *
+     * @group sprint-3
+     */
+    public function testTheRealLogNameIsNotDerivableFromAnythingAClientSees(): void
+    {
+        $name = TraceLog::fileName();
+
+        self::assertMatchesRegularExpression(
+            '/^trace-[0-9a-f]{32}\.log$/',
+            $name,
+            'The log file name is not the unguessable shape, so the URL is derivable.'
+        );
+
+        $secret = substr($name, strlen('trace-'), 32);
+
+        $surfaces = [
+            'the generic error' => (string) $this->mcp(self::$token)->post('tools/call', [
+                'name'      => self::toolName(),
+                'arguments' => [],
+            ])->getBody(),
+            'tools/list'        => (string) $this->mcp(self::$token)->post('tools/list')->getBody(),
+            'initialize'        => (string) $this->mcp(self::$token)->post('initialize')->getBody(),
+            'the directory'     => (string) $this->client()->get('wp-content/wpmcp/')->getBody(),
+        ];
+
+        foreach ($surfaces as $what => $body) {
+            self::assertStringNotContainsString($name, $body, $what . ' names the log file.');
+            self::assertStringNotContainsString(
+                $secret,
+                $body,
+                $what . ' contains the log name\'s random half, so the URL is derivable.'
+            );
+        }
+    }
+
+    /**
+     * Belt and braces, all three of which are now secondary to the random name: the
+     * self-check still runs against the REAL file name, the file is 0600, and the
+     * `.htaccess` is written the way Apache 2.4 can actually parse.
+     *
+     * THE SELF-CHECK IS NOT REDUNDANT. It catches the one thing the secret name does not:
+     * a directory listing, which hands the name to everybody. A 200 on the real URL
+     * therefore still has to raise the site-wide warning.
+     *
+     * S9: `Deny from all` on its own is an unknown directive on an Apache 2.4 without
+     * mod_access_compat, and an unknown directive in an .htaccess turns the directory into
+     * a 500 - "not readable", but by breaking the server. Each spelling sits behind the
+     * IfModule that makes it legal.
+     *
+     * @group sprint-3
+     */
+    public function testTheRemainingGuardsAreInPlace(): void
+    {
         $selfCheck = TraceLog::selfCheck();
 
         self::assertNotSame(
             'null',
             $selfCheck,
-            'The plugin could not fetch its own log URL at all, so it cannot know whether'
-            . ' the log is public. wp_remote_get to ' . TraceLog::url() . ' failed.'
+            'The plugin could not fetch its own log URL at all, so it cannot tell whether a'
+            . ' directory listing has exposed the name. wp_remote_get to ' . TraceLog::url()
+            . ' failed.'
         );
 
-        $response = $this->client()->get('wp-content/wpmcp/trace.log');
-        $status   = $response->getStatusCode();
+        $status = $this->client()->get('wp-content/wpmcp/' . TraceLog::fileName())->getStatusCode();
 
-        if ($status !== 200) {
-            self::assertFalse(
-                TraceLog::exposedOptionIsSet(),
-                'This host refuses the trace log (' . $status . ') but the plugin\'s'
-                . ' self-check still has the admin warning raised, so the admin page is'
-                . ' crying wolf.'
-            );
+        self::assertSame(
+            $status === 200,
+            TraceLog::exposedOptionIsSet(),
+            'The self-check and reality disagree: the real log URL answered ' . $status
+            . ' and the site-wide warning is '
+            . (TraceLog::exposedOptionIsSet() ? 'raised' : 'down')
+            . '. Either a readable log is silent, or the admin screens cry wolf.'
+        );
 
-            return;
-        }
+        // 0600, WHERE THE FILESYSTEM CAN SAY SO. MEASURED on the development site: it is
+        // Windows, fileperms() answers 0666 whatever the file is, and chmod() returns true
+        // while changing nothing - NTFS ACLs are not POSIX mode bits. So the assertion is
+        // "0600, or a host that cannot express it", which has real teeth in CI (wp-env is
+        // Linux) and states the local fact instead of skipping and going quietly green.
+        $mode = TraceLog::mode();
+        $os   = TraceLog::osFamily();
 
         self::assertTrue(
-            TraceLog::exposedOptionIsSet(),
-            'THIS HOST SERVES wp-content/wpmcp/trace.log WITH 200 - stack traces, absolute'
-            . ' file paths and SQL, to anybody - AND the plugin\'s self-check did not'
-            . ' notice. A silent exposure is the one outcome that is not allowed: the'
-            . ' admin page must carry the red warning naming the server config to add.'
+            $mode === '0600' || $os === 'Windows',
+            'The trace log is ' . $mode . ' on a ' . $os . ' host, not 0600. On a shared'
+            . ' host whose parent path is traversable, another account reads it.'
+        );
+
+        $htaccess = TraceLog::htaccess();
+
+        self::assertStringContainsString('<IfModule mod_authz_core.c>', $htaccess, $htaccess);
+        self::assertStringContainsString('Require all denied', $htaccess, $htaccess);
+        self::assertStringContainsString('<IfModule !mod_authz_core.c>', $htaccess, $htaccess);
+
+        // Every directive sits inside a block, so the file's first non-blank line is an
+        // IfModule and no bare directive can be met by an Apache that does not know it.
+        self::assertSame(
+            '<IfModule mod_authz_core.c>',
+            trim((string) strtok($htaccess, "\n")),
+            'The .htaccess opens with a bare directive rather than an IfModule. On Apache'
+            . ' 2.4 without mod_access_compat an unknown directive turns the whole directory'
+            . ' into a 500 - "not readable", but by breaking the server. Content: ' . $htaccess
         );
     }
 
@@ -287,15 +486,46 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
     {
         $name    = self::toolName();
         $message = self::THROWN_MESSAGE;
+        $relay   = self::relayToolName();
+        $opaque  = self::opaqueToolName();
+        $data    = self::OPAQUE_DATA;
 
         return <<<PHP
 add_filter('wpmcp_tools', static function (\$tools) {
+    \$schema = array('type' => 'object', 'properties' => new stdClass());
+
     \$tools['{$name}'] = array(
         'write'       => false,
         'description' => 'wp-mcp test fixture: throws a TypeError.',
-        'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
+        'inputSchema' => \$schema,
         'run'         => static function (\$args) {
             throw new TypeError('{$message}');
+        },
+    );
+
+    // A core code on the relay allow-list: the caller's own mistake, in words it can
+    // act on. term_exists is what create-term gets when the term is already there.
+    \$tools['{$relay}'] = array(
+        'write'       => false,
+        'description' => 'wp-mcp test fixture: a relayable core WP_Error.',
+        'inputSchema' => \$schema,
+        'run'         => static function (\$args) {
+            return new WP_Error('term_exists', 'A term with the name provided already exists.', 42);
+        },
+    );
+
+    // A core code nobody wrote for a client, with the failing query in the DATA, which is
+    // exactly where wpdb puts it.
+    \$tools['{$opaque}'] = array(
+        'write'       => false,
+        'description' => 'wp-mcp test fixture: an opaque core WP_Error.',
+        'inputSchema' => \$schema,
+        'run'         => static function (\$args) {
+            return new WP_Error(
+                'db_insert_error',
+                'Could not insert term into the database.',
+                '{$data}'
+            );
         },
     );
 

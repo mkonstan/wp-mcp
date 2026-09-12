@@ -12,6 +12,11 @@
  * runner may be writing to it; every assertion is therefore "this trace id appears",
  * never "the log contains only this". That also means the tests stay correct when run
  * twice in a row, which clearing would not.
+ *
+ * THE FILE NAME IS A SECRET AND IS ASKED FOR, NEVER BUILT. It is `trace-<32 hex>.log`,
+ * generated once per site and kept in the `wpmcp_trace_log_name` option, so the test has to
+ * read it from the site the same way the plugin does. A test that hardcoded the old
+ * `trace.log` would be asserting against the very name B1 removed.
  */
 
 declare(strict_types=1);
@@ -20,13 +25,22 @@ namespace WpMcp\Tests\Support;
 
 final class TraceLog
 {
+    /** The name the log had before B1 gave it a random one. Must not be servable. */
+    public const LEGACY_NAME = 'trace.log';
+
+    /** This site's log file name, from the plugin itself. */
+    public static function fileName(): string
+    {
+        return WpCli::evaluate('echo wpmcp_trace_file_name();');
+    }
+
     /** Whole log, or '' when the file does not exist yet. */
     public static function contents(): string
     {
         // base64 so the text survives wp-env's own re-quoting and WpCli::clean(), which
         // keeps only non-empty lines of a container's stdout.
         $encoded = WpCli::evaluate(
-            '$f = WP_CONTENT_DIR . "/wpmcp/trace.log";'
+            '$f = wpmcp_trace_path();'
             . ' echo is_file($f) ? base64_encode((string) file_get_contents($f)) : "";'
         );
 
@@ -75,9 +89,35 @@ final class TraceLog
         );
     }
 
-    /** Does the admin page's red "readable from the web" warning stand? */
+    /** Does the site-wide red "readable from the web" warning stand? */
     public static function exposedOptionIsSet(): bool
     {
         return WpCli::evaluate('echo (int) wpmcp_trace_log_is_exposed();') === '1';
+    }
+
+    /** PHP_OS_FAMILY on the SITE, which is not this runner's on a containerised CI. */
+    public static function osFamily(): string
+    {
+        return WpCli::evaluate('echo PHP_OS_FAMILY;');
+    }
+
+    /** The file's permission bits, as four octal digits ('0600'), or '' when absent. */
+    public static function mode(): string
+    {
+        return WpCli::evaluate(
+            '$f = wpmcp_trace_path();'
+            . ' echo is_file($f) ? substr(sprintf("%o", fileperms($f)), -4) : "";'
+        );
+    }
+
+    /** The `.htaccess` the plugin wrote beside the log, or '' when there is none. */
+    public static function htaccess(): string
+    {
+        $encoded = WpCli::evaluate(
+            '$f = wpmcp_trace_dir() . "/.htaccess";'
+            . ' echo is_file($f) ? base64_encode((string) file_get_contents($f)) : "";'
+        );
+
+        return trim($encoded) === '' ? '' : (string) base64_decode(trim($encoded), true);
     }
 }

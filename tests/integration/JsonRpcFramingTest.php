@@ -38,6 +38,9 @@ namespace WpMcp\Tests\Integration;
 
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\MuPlugin;
+use WpMcp\Tests\Support\TestRecorder;
+use WpMcp\Tests\Support\WpCli;
 
 final class JsonRpcFramingTest extends FixtureIntegrationTestCase
 {
@@ -46,6 +49,9 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
 
     /** The route both verb tests aim at - the header form, no token in the path. */
     private const ROUTE = 'wp-json/wpmcp/mcp';
+
+    /** The mu-plugin carrying the tool that records having run. */
+    private const MARKER_TOOL = 'marker-tool';
 
     private static int $userId = 0;
     private static string $token = '';
@@ -62,6 +68,9 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        TestRecorder::install();
+        MuPlugin::drop(self::MARKER_TOOL, self::markerToolSource());
+
         self::$userId = Fixtures::createUser(self::login(), 'author');
         self::$token  = Fixtures::mintToken('read', self::label(), self::$userId);
     }
@@ -75,9 +84,39 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        MuPlugin::remove(self::MARKER_TOOL);
+        TestRecorder::uninstall();
         Fixtures::deleteUser(self::$userId);
         Fixtures::deleteTokensLabelled(self::label());
         Fixtures::purge();
+    }
+
+    /** The tool that leaves a marker behind when its run callback executes. */
+    private static function markerTool(): string
+    {
+        return Fixtures::name('tool-marker');
+    }
+
+    /** The transient that tool sets. Fixture-named, so purge() and the debris check see it. */
+    private static function markerTransient(): string
+    {
+        return Fixtures::name('dispatched');
+    }
+
+    private static function markerWasSet(): bool
+    {
+        return WpCli::evaluate(sprintf(
+            'echo get_transient(%s) ? "1" : "0";',
+            "'" . addcslashes(self::markerTransient(), "'\\") . "'"
+        )) === '1';
+    }
+
+    private static function clearMarker(): void
+    {
+        WpCli::tryEvaluate(sprintf(
+            'echo (int) delete_transient(%s);',
+            "'" . addcslashes(self::markerTransient(), "'\\") . "'"
+        ));
     }
 
     /**
@@ -120,23 +159,60 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * No `id` key: 202, empty body, nothing dispatched - whatever the method says.
+     * The control for the test below: called WITH an id, the marker tool runs and leaves
+     * its marker. Without this, "the marker is absent" would also be satisfied by a tool
+     * that never worked at all.
+     *
+     * @group sprint-3
+     */
+    public function testTheMarkerToolRunsWhenItIsActuallyCalled(): void
+    {
+        self::clearMarker();
+
+        $result = $this->mcp(self::$token)->callTool(self::markerTool());
+
+        self::assertFalse($result->isError, $result->text);
+        self::assertTrue(
+            self::markerWasSet(),
+            'The marker tool was called with an id and did not leave its marker, so the'
+            . ' absence assertion in the notification test proves nothing.'
+        );
+    }
+
+    /**
+     * No `id` key: 202, empty body, and - the part the name claims - NOTHING DISPATCHED.
+     *
+     * THE MARKER IS WHAT MAKES THIS REAL. The first version asserted only the 202 and the
+     * empty body, which a regression that dispatched the call and then returned 202 would
+     * have passed: the side effect would have happened and the test would have been green.
+     * So one of the three bodies is an id-less `tools/call` naming a tool whose run
+     * callback sets a transient, and the transient must not be there afterwards.
      *
      * Three bodies, because the rule is about the absence of `id` and nothing else: a
-     * well-formed notification, one whose method this server does not serve, and one with
-     * no method at all. All three are silence.
+     * well-formed notification, one whose method this server does not serve, and an id-less
+     * call to a real tool. All three are silence.
+     *
+     * @depends testTheMarkerToolRunsWhenItIsActuallyCalled
      *
      * @group sprint-3
      */
     public function testABodyWithNoIdIsAcknowledgedAndNotDispatched(): void
     {
+        $call = json_encode([
+            'jsonrpc' => '2.0',
+            'method'  => 'tools/call',
+            'params'  => ['name' => self::markerTool(), 'arguments' => []],
+        ]);
+
         $bodies = [
-            'a real notification'  => '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            'an unknown method'    => '{"jsonrpc":"2.0","method":"does/not/exist"}',
-            'no method at all'     => '{"jsonrpc":"2.0","params":{"x":1}}',
+            'a real notification'     => '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            'an unknown method'       => '{"jsonrpc":"2.0","method":"does/not/exist"}',
+            'an id-less tools/call'   => (string) $call,
         ];
 
         foreach ($bodies as $what => $json) {
+            self::clearMarker();
+
             $response = $this->mcp(self::$token)->postRaw($json);
             $raw      = (string) $response->getBody();
 
@@ -151,6 +227,12 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
                 '',
                 $raw,
                 'The 202 for a notification (' . $what . ') carried a body.'
+            );
+            self::assertFalse(
+                self::markerWasSet(),
+                'The id-less request (' . $what . ') was DISPATCHED: the marker tool\'s run'
+                . ' callback executed and left its transient behind. A 202 after the side'
+                . ' effect has already happened is not "nothing dispatched".'
             );
         }
     }
@@ -184,35 +266,62 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * A 5 MiB body is refused 413 by the plugin, before the token is looked up.
+     * A 5 MiB body is refused 413 by the plugin, BEFORE the token is looked up.
      *
-     * THE BODY IS ASSERTED, not only the status. nginx and PHP both answer 413 of their
+     * THE TOKEN IS DELIBERATELY MALFORMED, and that is the whole ordering claim. The first
+     * version sent a VALID token, which cannot distinguish "the cap ran first" from "the
+     * cap ran after a successful lookup" - both are 413. A malformed token would be 401 if
+     * anything looked at it, so a 413 here can only mean the cap came first.
+     *
+     * THE BODY IS ASSERTED TOO, not only the status: nginx and PHP each answer 413 of their
      * own accord once their own limits are crossed, so a status-only assertion would pass
-     * on a host where this gate does not exist at all. The fixed body naming
-     * wpmcp_payload_too_large is what proves the refusal is ours.
+     * on a host where this gate does not exist at all.
+     *
+     * AND THE AUTH EVENTS ARE READ BACK. `body_too_large` must have fired exactly once and
+     * `validate_fail` not at all - the positive proof that the token was never examined.
      *
      * @group sprint-3
      */
-    public function testAnOversizedBodyIsRefusedBeforeAnyWork(): void
+    public function testAnOversizedBodyIsRefusedBeforeTheTokenIsLookedUp(): void
     {
         $filler  = str_repeat('A', 5 * 1024 * 1024);
         $payload = '{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"' . $filler . '"}}';
 
-        $response = $this->mcp(self::$token)->postRaw($payload);
+        // 64 characters, so it passes the shape gate's length check, and not hex, so the
+        // lookup would refuse it: a 401 here would mean the cap runs too late.
+        $malformed = str_repeat('z', 64);
+
+        TestRecorder::reset();
+
+        $response = $this->mcp($malformed)->postRaw($payload);
         $raw      = (string) $response->getBody();
 
         self::assertSame(
             413,
             $response->getStatusCode(),
-            'A ' . strlen($payload) . '-byte body was not refused 413. Body: '
-            . substr($raw, 0, 500)
+            'A ' . strlen($payload) . '-byte body with a MALFORMED token was not refused'
+            . ' 413. A 401 means the token is examined before the size is, so an oversized'
+            . ' body still costs a database round trip. Body: ' . substr($raw, 0, 500)
         );
         self::assertStringContainsString(
             'wpmcp_payload_too_large',
             $raw,
-            'Something answered 413, but not this plugin - so the cap in'
-            . ' wpmcp_authorize() is not what refused it, and on a host with higher'
-            . ' server limits the body would go through. Body: ' . substr($raw, 0, 500)
+            'Something answered 413, but not this plugin - so the cap in wpmcp_authorize()'
+            . ' is not what refused it, and on a host with higher server limits the body'
+            . ' would go through. Body: ' . substr($raw, 0, 500)
+        );
+
+        self::assertSame(
+            1,
+            TestRecorder::countOf(TestRecorder::AUTH . 'body_too_large'),
+            'The body_too_large auth event did not fire exactly once, so the 413 did not'
+            . ' come from the cap. Events: ' . json_encode(TestRecorder::events())
+        );
+        self::assertSame(
+            0,
+            TestRecorder::countOf(TestRecorder::AUTH . 'validate_fail'),
+            'A validate_fail event fired, so the malformed token WAS looked up before the'
+            . ' size was checked. Events: ' . json_encode(TestRecorder::events())
         );
     }
 
@@ -253,6 +362,36 @@ final class JsonRpcFramingTest extends FixtureIntegrationTestCase
             $raw,
             'The OPTIONS response describes the endpoint to an unauthenticated caller.'
         );
+    }
+
+    /**
+     * A tool whose run callback leaves a transient behind, so "was this dispatched?" is an
+     * observable question rather than an inference from a status code.
+     *
+     * The transient is fixture-named, so Fixtures::purge() removes it and the debris check
+     * would report it if a crashed run left one.
+     */
+    private static function markerToolSource(): string
+    {
+        $name      = self::markerTool();
+        $transient = self::markerTransient();
+
+        return <<<PHP
+add_filter('wpmcp_tools', static function (\$tools) {
+    \$tools['{$name}'] = array(
+        'write'       => false,
+        'description' => 'wp-mcp test fixture: records that it ran.',
+        'inputSchema' => array('type' => 'object', 'properties' => new stdClass()),
+        'run'         => static function (\$args) {
+            set_transient('{$transient}', 1, 600);
+
+            return array('ran' => true);
+        },
+    );
+
+    return \$tools;
+});
+PHP;
     }
 
     /** 405, `Allow: POST, OPTIONS`, and not a 401 - no token was sent. */
