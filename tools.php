@@ -369,8 +369,19 @@ function wpmcp_core_tools() {
                     $posts = array_merge($posts, $q2->posts);
                     // Re-impose WP_Query's own ordering across the merge, then the
                     // limit, so `limit` still means what it says.
+                    //
+                    // post_date, NOT post_date_gmt. Every status registered with
+                    // date_floating - draft, pending, auto-draft - is stored by
+                    // wp_insert_post with post_date_gmt AND post_modified_gmt set to
+                    // '0000-00-00 00:00:00' (measured on WP 7.1; only the non-GMT
+                    // columns are populated). Sorting on either GMT column therefore
+                    // puts every own draft behind every dated post, and the slice
+                    // below drops them first - so on any site with `limit` published
+                    // posts or more, the own-draft case this merge exists for failed.
+                    // post_date is also the column WP_Query's own `orderby => date`
+                    // uses, so both halves stay in the order they arrived in.
                     usort($posts, function ($a, $b) {
-                        $cmp = strcmp((string) $b->post_date_gmt, (string) $a->post_date_gmt);
+                        $cmp = strcmp((string) $b->post_date, (string) $a->post_date);
                         return $cmp !== 0 ? $cmp : ((int) $b->ID - (int) $a->ID);
                     });
                     $posts = array_slice($posts, 0, $limit);

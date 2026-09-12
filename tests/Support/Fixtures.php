@@ -70,6 +70,49 @@ final class Fixtures
     }
 
     /**
+     * Create $count posts named "<prefix>1".."<prefix>N" in one `wp eval`.
+     *
+     * One process instead of N. A test that needs more published posts than
+     * list-posts' default limit needs ~25 of them, and 25 wp-cli spawns cost about
+     * fifteen seconds locally and considerably more through `wp-env run`. They are
+     * created in ascending order, so the last one has the highest ID.
+     *
+     * @return list<int> the new post IDs, in creation order
+     */
+    public static function createPosts(int $count, string $titlePrefix, string $status, int $author): array
+    {
+        self::assertPrefixed($titlePrefix);
+
+        $ids = WpCli::evaluate(sprintf(
+            'for ($i = 1; $i <= %d; $i++) {'
+            . ' $id = wp_insert_post(array('
+            . '  "post_title" => %s . $i,'
+            . '  "post_status" => %s,'
+            . '  "post_type" => "post",'
+            . '  "post_author" => %d,'
+            . '  "post_content" => "wpmcp-test-bulk"'
+            . ' ), true);'
+            . ' if (is_wp_error($id)) { echo "ERROR:" . $id->get_error_message(); exit(1); }'
+            . ' echo (int) $id, ",";'
+            . '}',
+            $count,
+            self::phpString($titlePrefix),
+            self::phpString($status),
+            $author
+        ));
+
+        $out = array_values(array_filter(array_map('intval', explode(',', $ids))));
+
+        if (count($out) !== $count) {
+            throw new RuntimeException(
+                "Expected {$count} bulk fixture posts, got " . count($out) . ": {$ids}"
+            );
+        }
+
+        return $out;
+    }
+
+    /**
      * @param string $email author email, or '' to leave it empty. Set it only when a
      *                      test needs to prove the email is NOT reachable - it is
      *                      never returned by any tool.

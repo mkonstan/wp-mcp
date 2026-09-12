@@ -59,12 +59,20 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     /** An id far past anything the site could hold, for the "really missing" case. */
     private const MISSING_ID = 999999999;
 
+    /**
+     * More published posts than list-posts' default limit of 20, so the first query
+     * fills the limit on its own and a mis-sorted merge truncates the own draft.
+     */
+    private const BULK_COUNT = 25;
+
     private static int $editorId  = 0;
     private static int $authorId  = 0;
     private static int $privateId = 0;
     private static int $draftId   = 0;
     private static int $ownDraftId = 0;
     private static int $publicId  = 0;
+    /** @var list<int> */
+    private static array $bulkIds = [];
     private static string $authorToken = '';
     private static string $adminToken  = '';
 
@@ -99,16 +107,6 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
             'wpmcp-test-draft-body'
         );
 
-        // The author's OWN draft. Without it, "the author sees no drafts" would pass
-        // for the wrong reason - a listing that hides everyone's drafts, their own
-        // included, is a regression, not a fix.
-        self::$ownDraftId = Fixtures::createPost(
-            self::OWN_DRAFT_TITLE,
-            'draft',
-            self::$authorId,
-            'wpmcp-test-own-draft-body'
-        );
-
         // The comment fixtures are split across two posts so each assertion isolates
         // exactly one mechanism.
         //
@@ -130,6 +128,34 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         // comment's author, text and date.
         Fixtures::createComment(self::$privateId, self::PRIVATE_COMMENT_TEXT, true);
 
+        // MORE PUBLISHED POSTS THAN list-posts' DEFAULT LIMIT. The own-draft case is
+        // served by a second, author-scoped query whose results are merged with the
+        // first and then sliced to `limit`; if the merge sorts on a column that is
+        // zero for drafts, every own draft lands past the slice. That only shows up
+        // when the first query already fills the limit, which a fresh wp-env (one
+        // post) never does. 25 > the default 20, so it does.
+        self::$bulkIds = Fixtures::createPosts(
+            self::BULK_COUNT,
+            Fixtures::PREFIX . 'pub-',
+            'publish',
+            self::$editorId
+        );
+
+        // The author's OWN draft, created LAST so it is the newest post on the site
+        // by post_date and has the highest ID. Under a correct sort it is therefore
+        // first in the merged list; under the old post_date_gmt sort its date is
+        // '0000-00-00 00:00:00' and it is last, which is the bug.
+        //
+        // Without this fixture "the author sees no drafts" would pass for the wrong
+        // reason: a listing that hides everyone's drafts, their own included, is a
+        // regression, not a fix.
+        self::$ownDraftId = Fixtures::createPost(
+            self::OWN_DRAFT_TITLE,
+            'draft',
+            self::$authorId,
+            'wpmcp-test-own-draft-body'
+        );
+
         self::$authorToken = Fixtures::mintToken('read', self::LABEL, self::$authorId);
         // User 1 is the site's original administrator: the "unchanged behaviour" case.
         self::$adminToken = Fixtures::mintToken('read', self::LABEL, 1);
@@ -150,6 +176,7 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
         Fixtures::deletePost(self::$draftId);
         Fixtures::deletePost(self::$ownDraftId);
         Fixtures::deletePost(self::$publicId);
+        foreach (self::$bulkIds as $id) { Fixtures::deletePost($id); }
         Fixtures::deleteUser(self::$editorId);
         Fixtures::deleteUser(self::$authorId);
         Fixtures::deleteTokensLabelled(self::LABEL);
@@ -243,19 +270,35 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
      * up as a fix - and it is what the capability-gated status list does on its own,
      * measured, which is why list-posts runs a second author-scoped query.
      *
+     * NO `limit` ARGUMENT, on purpose. The default is 20 and the fixtures include 25
+     * published posts, so the capability-scoped query fills the limit by itself and
+     * the merged own draft survives only if the merge sorts on a column that is
+     * actually populated for a draft. It is not enough for the draft to be in the
+     * result set; it has to be in the first 20.
+     *
      * @group sprint-1
      */
-    public function testTheDefaultListingStillShowsTheUsersOwnDraft(): void
+    public function testTheDefaultListingStillShowsTheUsersOwnDraftWithinTheDefaultLimit(): void
     {
-        $result = $this->mcp(self::$authorToken)->callTool('list-posts', ['limit' => 100]);
+        $result = $this->mcp(self::$authorToken)->callTool('list-posts');
 
         self::assertFalse($result->isError, 'list-posts failed: ' . $result->text);
+
+        $ids = $result->column('id');
+        self::assertCount(
+            20,
+            $ids,
+            'The default limit is meant to be 20 and the fixtures provide more than'
+            . ' that many published posts, so this listing should be full.'
+        );
         self::assertContains(
             self::$ownDraftId,
-            $result->column('id'),
-            'The Author cannot see their own draft. The status list is gated on'
-            . ' edit_others_posts, so own unpublished work needs the second,'
-            . ' author-scoped query - see wpmcp_own_listable_statuses().'
+            $ids,
+            'The Author cannot see their own draft at the DEFAULT limit. The merge'
+            . ' sorts the author-scoped query in with the first one and then slices to'
+            . ' `limit`; draft and pending posts are stored with post_date_gmt AND'
+            . ' post_modified_gmt = 0000-00-00, so sorting on either sends every own'
+            . ' draft past the slice. Sort on post_date.'
         );
     }
 
