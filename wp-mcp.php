@@ -74,6 +74,17 @@ define('WPMCP_MAX_LIFETIME', 365 * DAY_IN_SECONDS); // 31536000s
 /** The shortest active window that can be minted. Below this, nothing could use it. */
 define('WPMCP_MIN_WINDOW', 60);
 
+/**
+ * The defaults, as constants rather than as numbers typed into the mint form.
+ *
+ * They are read in two places that must agree: the form (admin.php), and the v2 -> v3
+ * migration, which gives a pre-existing token the same hard lifetime a freshly minted one
+ * would get. When those two disagreed, a migrated token was renewable for a period the
+ * documentation did not describe.
+ */
+define('WPMCP_DEFAULT_WINDOW', 6 * HOUR_IN_SECONDS);
+define('WPMCP_DEFAULT_LIFETIME', 30 * DAY_IN_SECONDS);
+
 // Token-table schema revision. Bump it whenever the CREATE TABLE below changes:
 // wpmcp_maybe_upgrade() compares it against the wpmcp_db_ver option on every load and
 // re-runs dbDelta plus the data migrations. The activation hook alone is not enough -
@@ -231,24 +242,56 @@ function wpmcp_migrate_drop_address_column() {
 }
 
 /**
- * Revision 3: give every pre-existing row the two timers, without changing what it does.
+ * Revision 3: give every pre-existing row the two timers.
  *
- * A v2 row had one expiry. The rule that keeps an already-issued token behaving exactly
- * as it did is: its old expires_at becomes BOTH the end of its first active window and
- * its hard lifetime, and the window length is however long it was originally granted.
- * So a token minted for 12 hours still answers for those 12 hours and then stops - the
- * difference being that it now stops DORMANT rather than deleted, and an admin can
- * renew it instead of re-issuing it.
+ * A v2 row had ONE expiry, and the upgrade has to answer two questions with it: when does
+ * this token stop answering, and how long may it be renewed for.
+ *
+ *   active_until = the old expires_at
+ *       The token stops answering at exactly the moment it always would have. Leaving the
+ *       new column at its default would make every already-issued token dormant the
+ *       instant the site updated - a plugin update that logged every connector out.
+ *
+ *   window_secs  = how long it was originally granted, capped at WPMCP_MAX_WINDOW
+ *       So the first Renew gives the token the window it had. The cap is not decoration:
+ *       a hand-extended row can carry a 90-day grant, and without it that row's first
+ *       Renew would hand out a 90-day active window on a model whose whole point is a
+ *       twelve-hour ceiling.
+ *
+ *   expires_at   = created_at + WPMCP_DEFAULT_LIFETIME
+ *       So the row is RENEWABLE, which is the half that was wrong in the first cut of this
+ *       function. Setting the hard lifetime to the old expiry as well made the row go
+ *       straight to DEAD at that instant - wpmcp_token_state() tests the lifetime before
+ *       the window - never dormant, with Renew a write that changed nothing, while the
+ *       CHANGELOG, this docblock and the KB all promised the opposite. A token that
+ *       existed before the upgrade now behaves like one minted after it: it goes dormant
+ *       when it always would have, and an admin can renew it for thirty days from when it
+ *       was minted.
+ *
+ * THE ONE GUARD on that last line: a row whose old expiry is ALREADY further out than
+ * created_at + the default keeps its old expiry. Shortening it would kill a token that
+ * works today, and would leave active_until past expires_at - a row that is inside its
+ * window and past its end at the same time, which is not a state anything downstream can
+ * describe.
  *
  * window_secs = 0 IS THE SENTINEL, and it is a sound one: wpmcp_mint() clamps the window
  * to at least WPMCP_MIN_WINDOW, so no row this plugin ever wrote can carry 0. That makes
  * the UPDATE idempotent - it runs on every schema bump for the rest of the plugin's life
  * and touches a row exactly once.
  *
- * GREATEST(..., 60) on the computed window, because a row whose created_at and
- * expires_at are equal (a hand-edited fixture, a clock that moved) would otherwise get a
- * zero-length window - which is both the sentinel and a token that is dormant the
- * instant it is renewed.
+ * THE ASSIGNMENTS ARE ORDER-DEPENDENT and the order is deliberate. MySQL evaluates a
+ * multi-column UPDATE left to right and a later assignment sees the NEW value of an
+ * earlier column, so expires_at is written last and the two lines above it read the old
+ * one. Swapping them silently changes every migrated row.
+ *
+ * COALESCE on both date expressions, because TIMESTAMPDIFF and DATE_ADD both answer NULL
+ * for a zero created_at, and a NULL into a NOT NULL column under a strict SQL mode fails
+ * the whole migration - which parks the plugin in wpmcp_install()'s retry path forever.
+ * No row this plugin writes has a zero created_at; a hand-edited one might.
+ *
+ * GREATEST(..., WPMCP_MIN_WINDOW) on the computed window, because a row whose created_at
+ * and expires_at are equal would otherwise get a zero-length window - which is both the
+ * sentinel and a token that is dormant the instant it is renewed.
  *
  * Returns the number of rows changed, or false if the query failed.
  */
@@ -256,11 +299,15 @@ function wpmcp_migrate_token_lifetimes() {
     global $wpdb;
     $table = wpmcp_table();
 
+    $min      = (int) WPMCP_MIN_WINDOW;
+    $max      = (int) WPMCP_MAX_WINDOW;
+    $lifetime = (int) WPMCP_DEFAULT_LIFETIME;
+
     return $wpdb->query(
         "UPDATE $table SET"
         . ' active_until = expires_at,'
-        . ' window_secs = GREATEST(TIMESTAMPDIFF(SECOND, created_at, expires_at), '
-        . (int) WPMCP_MIN_WINDOW . ')'
+        . " window_secs = LEAST(GREATEST(COALESCE(TIMESTAMPDIFF(SECOND, created_at, expires_at), {$min}), {$min}), {$max}),"
+        . " expires_at = GREATEST(COALESCE(DATE_ADD(created_at, INTERVAL {$lifetime} SECOND), expires_at), expires_at)"
         . ' WHERE window_secs = 0'
     );
 }

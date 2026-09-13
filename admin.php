@@ -48,13 +48,14 @@ function wpmcp_endpoint_url() {
  * defence in depth costs one max() and means a caller that never touches the form cannot
  * write an out-of-range window either.
  *
- * SIX HOURS IS THE DEFAULT because that is the normal case: a token on somebody's laptop
- * that should stop answering by the end of the working day. Twelve is the ceiling, and
- * the way to keep a connector alive past it is Renew, not a longer window.
+ * WPMCP_DEFAULT_WINDOW - six hours - because that is the normal case: a token on
+ * somebody's laptop that should stop answering by the end of the working day. Twelve is
+ * the ceiling, and the way to keep a connector alive past it is Renew, not a longer
+ * window.
  */
 function wpmcp_form_window_secs($hours) {
     if ($hours === null || $hours === '' || !is_numeric($hours)) {
-        return 6 * HOUR_IN_SECONDS;
+        return WPMCP_DEFAULT_WINDOW;
     }
 
     $hours = min(12.0, max(0.5, (float) $hours));
@@ -65,14 +66,15 @@ function wpmcp_form_window_secs($hours) {
 /**
  * The mint form's "Lifetime (days)" field, in seconds.
  *
- * THIRTY DAYS IS THE DEFAULT because the field exists for connectors, and a connector
- * that has to be deleted and re-added more often than monthly is a connector nobody
- * keeps. A year is the ceiling: past that a credential nobody has looked at is not a
- * credential anybody is managing.
+ * WPMCP_DEFAULT_LIFETIME - thirty days - because the field exists for connectors, and a
+ * connector that has to be deleted and re-added more often than monthly is a connector
+ * nobody keeps. A year is the ceiling: past that a credential nobody has looked at is not
+ * a credential anybody is managing. The v2 -> v3 migration reads the same constant, so a
+ * token that predates the upgrade gets the lifetime a fresh one would.
  */
 function wpmcp_form_lifetime_secs($days) {
     if ($days === null || $days === '' || !is_numeric($days)) {
-        return 30 * DAY_IN_SECONDS;
+        return WPMCP_DEFAULT_LIFETIME;
     }
 
     $days = min(365, max(1, (int) $days));

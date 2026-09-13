@@ -9,8 +9,9 @@ Three breaking changes, all in how a token is presented and how long it lives. T
 the protocol negotiation and the wire format are untouched.
 
 Upgrading is one database migration (schema revision 3) that runs on the first request
-after the plugin files change. Existing tokens keep working exactly as they did until
-their old expiry, at which point they go dormant instead of vanishing - see below.
+after the plugin files change. Existing tokens keep answering until exactly the moment
+they always would have; at that moment they go **dormant** instead of vanishing, and an
+admin can renew them for thirty days from when they were minted - see below.
 
 ### Breaking: the token travels in a header, and only in a header
 
@@ -84,10 +85,18 @@ Run automatically on the first request after the update, and idempotent.
 
 - Adds `active_until` and `window_secs`; `expires_at` keeps its name and now means the
   hard lifetime.
-- Backfills every existing row so it behaves exactly as it did: `active_until` becomes the
-  old `expires_at`, and `window_secs` becomes however long the token was originally
-  granted. A token minted for twelve hours still answers for those twelve hours - it then
-  goes dormant rather than being deleted, and can be renewed.
+- Backfills every existing row with both timers:
+  - `active_until` becomes the old `expires_at`, so the token stops answering at exactly
+    the moment it always would have. A token minted for twelve hours still answers for
+    those twelve hours.
+  - `window_secs` becomes however long the token was originally granted, capped at 12
+    hours - so its first Renew gives it the window it had, and a hand-extended row cannot
+    hand out a 90-day active window.
+  - `expires_at` becomes `created_at` + 30 days, the same default a freshly minted token
+    gets, **so the row is renewable**. It then goes dormant rather than being deleted, and
+    Renew brings the same token back without the client being touched. A row whose old
+    expiry is already further out than that keeps its old expiry rather than being
+    shortened.
 - Drops `bound_ip`, with an explicit `ALTER TABLE` guarded by a column-exists check,
   because `dbDelta()` only ever adds and widens and cannot drop a column.
 - The revision is recorded only once every column exists and every backfill has succeeded,
