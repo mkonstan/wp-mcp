@@ -468,7 +468,7 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'Site name, URL, WordPress version, active theme, active plugin count.',
+            'description' => 'Get name, URL, WP version, theme, plugin count.',
             // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
             // makes an empty `properties` serialize as `{}` wherever it appears, at any
             // depth, so the inline cast this used to carry is no longer the thing
@@ -1061,7 +1061,7 @@ function wpmcp_comment_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List comments the caller is allowed to read (emails and IPs never returned). Args: post (id), status (default "approve"; hold|spam|trash|all need moderate_comments and are otherwise treated as "approve"), search (matches comment text and author name), page, per_page.',
+        'description' => 'List comments the caller may read. Emails and IPs are never returned. Args: post (id), status (default "approve"; hold|spam|trash|all need moderate_comments and are otherwise treated as "approve"), search (matches comment text and author name), page, per_page.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'post' => array('type' => 'integer'), 'status' => array('type' => 'string'),
             'search' => array('type' => 'string'), 'page' => array('type' => 'integer'),
@@ -1353,7 +1353,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Create or overwrite a text file in the active theme. Args: path (required), content (required). Backs up to .bak; PHP is parse-checked and auto-reverted on a syntax error.',
+        'description' => 'Create or overwrite a text file in the theme. Active theme only. Args: path (required), content (required). Backs up to .bak; PHP is parse-checked and auto-reverted on a syntax error.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
         ), 'required' => array('path', 'content')),

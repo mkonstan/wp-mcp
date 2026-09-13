@@ -214,6 +214,12 @@ the built-ins are assembled and before scope filtering. An entry must declare a 
 and a callable `run`. An entry missing any of them is refused at registration rather than
 given a default, and it cannot re-declare a built-in's name.
 
+Two things about the description. A `description`, or any
+`inputSchema.properties.*.description`, over 1,000 characters is refused: clients cap
+these by truncating, so the end of a long one would silently never reach the model. And
+keep the first sentence under 50 characters, because clients show only that until the tool
+loads.
+
 ```php
 add_filter('wpmcp_tools', function ($tools) {
     $tools['say-hello'] = array(

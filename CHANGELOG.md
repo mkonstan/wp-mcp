@@ -66,7 +66,8 @@ admin who minted them.
   being half-processed.
 - A notification (no `id`) is answered with 202 and an empty body. A request that carries
   an `id` is answered even when its method name looks like a notification.
-- A body over 5 MB is refused with 413 before it is parsed.
+- A body whose `Content-Length` exceeds 4 MiB is refused with 413 before the token is
+  looked up.
 
 ### Handshake
 
@@ -88,6 +89,13 @@ admin who minted them.
   description.
 - An empty object inside a schema serializes as `{}` rather than `[]`, which some clients
   rejected.
+- A tool description, or any parameter description, over 1,000 characters is refused at
+  registration. Clients cap these by truncating, so the end of a long one would never
+  reach the model and nothing would say so.
+- Every built-in description now opens with a verb-first summary that ends inside the
+  first 50 characters, which is roughly all a client shows the model until the tool is
+  fully loaded. `site-info`, `list-comments` and `code-write` were reworded; the detail
+  after the first sentence is unchanged.
 
 ### Uninstall
 

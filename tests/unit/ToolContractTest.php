@@ -254,6 +254,179 @@ final class ToolContractTest extends TestCase
     }
 
     /**
+     * No built-in description is long enough for a client to cut it.
+     *
+     * Clients cap a tool description, and a parameter description, at 1000 characters,
+     * and they enforce the cap by TRUNCATING. A description that runs over does not
+     * produce an error anywhere: it reaches the model as its own first 1000 characters,
+     * missing whatever the author put at the end, which in this catalog is routinely the
+     * part that matters (`force=false trashes; force=true permanently deletes`). Nothing
+     * on the server side would notice.
+     *
+     * Today's longest is 267 characters, so this has 700-odd characters of headroom. It
+     * goes red when somebody grows a description past the point a client keeps it.
+     *
+     * @group sprint-6
+     */
+    public function testNoDescriptionReachesTheClientCap(): void
+    {
+        $longest = 0;
+
+        foreach (WireSerializationTest::catalog() as $name => $tool) {
+            $length  = mb_strlen($tool['description']);
+            $longest = max($longest, $length);
+
+            self::assertLessThanOrEqual(
+                WPMCP_MAX_DESCRIPTION,
+                $length,
+                "{$name}'s description is {$length} characters. A client truncates at "
+                . WPMCP_MAX_DESCRIPTION . ' and says nothing, so the end of it would'
+                . ' simply not reach the model.'
+            );
+
+            $properties = $tool['inputSchema']['properties'] ?? [];
+
+            foreach ((array) self::asMap($properties) as $argument => $property) {
+                $map = self::asMap($property);
+
+                if ($map === null || !isset($map['description'])
+                    || !is_string($map['description'])) {
+                    continue;
+                }
+
+                $length  = mb_strlen($map['description']);
+                $longest = max($longest, $length);
+
+                self::assertLessThanOrEqual(
+                    WPMCP_MAX_DESCRIPTION,
+                    $length,
+                    "The description of {$name}'s {$argument} argument is {$length}"
+                    . ' characters, past the point a client keeps it.'
+                );
+            }
+        }
+
+        self::assertGreaterThan(
+            0,
+            $longest,
+            'No description was measured at all, so this test proved nothing.'
+        );
+    }
+
+    /**
+     * The first sentence of every description says what the tool does, in under 50
+     * characters, starting with a verb.
+     *
+     * WHY 50. A client loads tools lazily, and until a tool is fully loaded the model is
+     * shown roughly the first 50 characters of its description. That prefix is therefore
+     * the whole of what the model knows when it decides whether this tool is the one it
+     * wants. `Site name, URL, WordPress version, active theme, a` was the old site-info
+     * and it arrives as a list of nouns with the verb cut off.
+     *
+     * The three banned openers are the ways a description wastes that prefix on
+     * ceremony: `This tool lists...`, `Allows you to list...`, `Use this to list...`. The
+     * verb goes first.
+     *
+     * Unlike the 1000-character cap, nothing is rejected at registration for this. It is
+     * a rule about the catalog's prose, enforced on the catalog, and a filter-added tool
+     * is its author's business.
+     *
+     * @group sprint-6
+     */
+    public function testEveryDescriptionOpensWithAShortVerbFirstSentence(): void
+    {
+        $ceremony = ['This', 'Allows', 'Use '];
+
+        foreach (WireSerializationTest::catalog() as $name => $tool) {
+            $description = $tool['description'];
+            $sentenceEnd = strpos($description, '.');
+
+            self::assertNotFalse(
+                $sentenceEnd,
+                "{$name}'s description has no sentence end in it at all, so a client"
+                . ' showing a prefix has nothing to cut on.'
+            );
+            self::assertLessThan(
+                50,
+                $sentenceEnd,
+                "{$name}'s first sentence ends at character {$sentenceEnd}. A client shows"
+                . ' the model about the first 50 characters until the tool is fully'
+                . " loaded, so the summary has to fit inside that. It reads: '"
+                . substr($description, 0, 50) . "'"
+            );
+
+            foreach ($ceremony as $opener) {
+                self::assertStringStartsNotWith(
+                    $opener,
+                    $description,
+                    "{$name}'s description opens with '{$opener}', which spends the only"
+                    . ' characters the model is guaranteed to see on ceremony. Start with'
+                    . ' the verb.'
+                );
+            }
+        }
+    }
+
+    /**
+     * The length check itself, on both strings it reads.
+     *
+     * The test above says the catalog is inside the cap; this says the registry would
+     * actually refuse an entry that is not. A filter-added tool is where a 4 KB
+     * description comes from.
+     *
+     * @group sprint-6
+     */
+    public function testTheDescriptionLengthCheck(): void
+    {
+        $atTheLimit = str_repeat('a', WPMCP_MAX_DESCRIPTION);
+        $overIt     = $atTheLimit . 'a';
+
+        $tool = [
+            'description' => $atTheLimit,
+            'inputSchema' => [
+                'type'       => 'object',
+                'properties' => ['id' => ['type' => 'integer', 'description' => $atTheLimit]],
+            ],
+        ];
+
+        self::assertTrue(
+            wpmcp_descriptions_within_limit($tool),
+            'Exactly at the limit is inside it; a client keeps 1000 characters.'
+        );
+
+        $longTool                = $tool;
+        $longTool['description'] = $overIt;
+
+        self::assertFalse(
+            wpmcp_descriptions_within_limit($longTool),
+            'A tool description one character over the cap was accepted.'
+        );
+
+        $longArgument = $tool;
+        $longArgument['inputSchema']['properties']['id']['description'] = $overIt;
+
+        self::assertFalse(
+            wpmcp_descriptions_within_limit($longArgument),
+            'A parameter description over the cap was accepted. The cap applies to every'
+            . ' string a client shows the model, not only the tool-level one.'
+        );
+
+        self::assertTrue(
+            wpmcp_descriptions_within_limit(['description' => 'short']),
+            'A tool with no inputSchema at all must not be refused by this check.'
+        );
+
+        // The empty-object form the serializer produces for a no-argument tool.
+        self::assertTrue(
+            wpmcp_descriptions_within_limit([
+                'description' => 'short',
+                'inputSchema' => ['type' => 'object', 'properties' => new \stdClass()],
+            ]),
+            'A stdClass properties map must not trip the check.'
+        );
+    }
+
+    /**
      * Every keyword used anywhere in a schema, pointer => keyword.
      *
      * Recurses through `properties` and `items` only, because those are the two positions

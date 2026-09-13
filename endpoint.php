@@ -496,6 +496,15 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         that reads only what is present will not apply. Same rule as
  *                         `write`: absence of a declaration is not a declaration of
  *                         safety. See wpmcp_annotation_hints().
+ *   description_too_long  the tool's `description`, or any
+ *                         `inputSchema.properties.*.description`, longer than
+ *                         WPMCP_MAX_DESCRIPTION characters. Clients cap these, and the
+ *                         cap is applied by TRUNCATING: a 4 KB description reaches the
+ *                         model as the first 1000 characters of itself, so the sentence
+ *                         that said "force: true deletes permanently" is simply gone and
+ *                         nothing says so. Refusing the tool is the loud version of a
+ *                         failure that is otherwise silent and model-side. Measured on
+ *                         characters rather than bytes, which is what a client counts.
  *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
  *                         wins and the filter entry is dropped. A same-name entry is
  *                         how the fail-closed rule gets walked around one level up:
@@ -554,9 +563,13 @@ function wpmcp_tools() {
         } elseif (!isset($tool['inputSchema']) || !is_array($tool['inputSchema'])) {
             $reason = 'schema_not_array';
         } elseif (!wpmcp_annotations_complete($tool)) {
-            // LAST in the chain on purpose: every reason above is the one a pre-Sprint-5
-            // entry would have hit, so adding this check did not renumber any of them.
             $reason = 'annotations_incomplete';
+        } elseif (!wpmcp_descriptions_within_limit($tool)) {
+            // APPENDED, not inserted. Each reason above is the one an entry written
+            // against an earlier version of this plugin would already have hit, so a new
+            // check goes on the end and no existing rejection changes the reason it
+            // reports.
+            $reason = 'description_too_long';
         }
 
         if ($reason !== '') {
@@ -607,6 +620,59 @@ function wpmcp_annotations_complete($tool) {
     foreach (wpmcp_annotation_hints() as $hint) {
         if (!array_key_exists($hint, $tool['annotations'])
             || !is_bool($tool['annotations'][$hint])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Longest description this server will publish, in characters.
+ *
+ * 1000 is where clients cut. The number is not in the MCP specification, which says
+ * nothing about length; it is a property of the clients that read what this server sends,
+ * and they apply it by truncating rather than by complaining. The plugin's own longest
+ * description is 267 characters, so the cap costs the built-ins nothing and exists for
+ * what a filter adds.
+ */
+define('WPMCP_MAX_DESCRIPTION', 1000);
+
+/**
+ * Is every description in this tool short enough to survive a client intact?
+ *
+ * Checks the tool's own `description` and the `description` of every top-level property
+ * of its `inputSchema`. Those are the two strings that reach a model, and a truncated one
+ * is worse than a short one: the caller reads an instruction that stops mid-sentence and
+ * has no way to know something was removed.
+ *
+ * Only top-level properties, deliberately. A nested property description is already
+ * inside a parent whose own description this checks, and a recursive walk over a
+ * filter-supplied structure of unknown depth is a different kind of risk.
+ *
+ * A description that is absent or not a string is not this function's business - the
+ * description_not_string check ahead of it has already refused that entry.
+ */
+function wpmcp_descriptions_within_limit($tool) {
+    if (isset($tool['description']) && is_string($tool['description'])
+        && mb_strlen($tool['description']) > WPMCP_MAX_DESCRIPTION) {
+        return false;
+    }
+
+    $schema = isset($tool['inputSchema']) ? $tool['inputSchema'] : null;
+    $props  = null;
+
+    if (is_object($schema)) { $schema = (array) $schema; }
+    if (is_array($schema) && isset($schema['properties'])) { $props = $schema['properties']; }
+    if (is_object($props)) { $props = (array) $props; }
+    if (!is_array($props)) { return true; }
+
+    foreach ($props as $property) {
+        if (is_object($property)) { $property = (array) $property; }
+        if (!is_array($property)) { continue; }
+
+        if (isset($property['description']) && is_string($property['description'])
+            && mb_strlen($property['description']) > WPMCP_MAX_DESCRIPTION) {
             return false;
         }
     }
