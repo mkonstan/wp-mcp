@@ -168,7 +168,8 @@ function wpmcp_install() {
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
 
-    // Record the revision ONLY once the schema and the data are both actually there.
+    // Record the revision once the schema and the data are both actually there - see the
+    // comment on the drop below for the one step that is deliberately not a precondition.
     //
     // dbDelta never throws and returns a report, not a status; the migration's own
     // documented failure return is a bare false. Stamping the version regardless
@@ -182,7 +183,29 @@ function wpmcp_install() {
     if (!wpmcp_token_column_exists('window_secs')) { return false; }
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
     if (wpmcp_migrate_token_lifetimes() === false) { return false; }
-    if (wpmcp_migrate_drop_address_column() === false) { return false; }
+
+    // THE DROP IS THE ONE STEP THAT DOES NOT GATE THE STAMP, and the difference is
+    // whether the plugin is CORRECT without it. The three columns and the two backfills
+    // are preconditions: without them a token authenticates as nobody, or is dormant the
+    // instant the site updated. A leftover column that nothing reads or writes costs a
+    // few bytes a row and changes no behaviour at all.
+    //
+    // Gating on it was a real hazard on a host whose database user may ADD but not DROP -
+    // managed hosts do hand out grants like that. The revision would never be recorded,
+    // so wpmcp_maybe_upgrade() would run dbDelta plus three SHOW COLUMNS plus two UPDATEs
+    // on EVERY REQUEST, forever, with the plugin otherwise working perfectly and nothing
+    // anywhere saying why the site had got slower.
+    //
+    // So: stamp, and say so once per attempt in the log, because a silent unexplained
+    // leftover is how the next person loses an afternoon.
+    if (wpmcp_migrate_drop_address_column() === false) {
+        error_log(
+            'wp-mcp: could not drop the legacy bound_ip column from ' . wpmcp_table()
+            . '. The plugin is fully upgraded and works correctly; the column is unused'
+            . ' and can be dropped by hand. This usually means the database user has no'
+            . ' DROP privilege.'
+        );
+    }
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
     return true;
@@ -229,9 +252,11 @@ function wpmcp_migrate_token_user_ids() {
  * no-op. MySQL gained `DROP COLUMN IF EXISTS` in 8.0.29 and MariaDB has had it longer;
  * neither is a floor this plugin can assume, so the check is done in PHP.
  *
- * Returns the query result, or true when there was nothing to do. false is the
- * documented failure, and wpmcp_install() refuses to stamp the revision on it - see the
- * comment there about failing closed and retryable.
+ * Returns the query result, or true when there was nothing to do. false is the documented
+ * failure, and it does NOT stop wpmcp_install() recording the revision: nothing reads or
+ * writes this column, so a site that cannot drop it is fully upgraded and correct, and
+ * refusing to stamp would put it in a dbDelta-per-request loop forever. The failure is
+ * written to the log instead - see wpmcp_install().
  */
 function wpmcp_migrate_drop_address_column() {
     global $wpdb;

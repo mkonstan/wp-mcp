@@ -99,8 +99,12 @@ Run automatically on the first request after the update, and idempotent.
     shortened.
 - Drops `bound_ip`, with an explicit `ALTER TABLE` guarded by a column-exists check,
   because `dbDelta()` only ever adds and widens and cannot drop a column.
-- The revision is recorded only once every column exists and every backfill has succeeded,
-  so a failed migration is retried on the next request rather than stamped and forgotten.
+- The revision is recorded once every column exists and every backfill has succeeded, so a
+  failed migration is retried on the next request rather than stamped and forgotten. The
+  column drop is the one step that does not gate it: nothing reads that column, so a host
+  whose database user cannot `DROP` is fully upgraded and correct. A failed drop writes one
+  `wp-mcp:` line to the error log instead. Gating on it would have left such a host running
+  `dbDelta()` and both backfills on every request forever, with nothing saying why.
 
 ### Admin page
 
