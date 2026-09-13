@@ -134,20 +134,31 @@ echo "smoke: token minted (read scope, 15 min, label ${LABEL})."
 
 # ---------------------------------------------------------------- the client's config
 #
-# THE PATH-URL FORM, `/wp-json/wpmcp/mcp/<token>` - the route registered in endpoint.php as
-# `/mcp/(?P<token>[a-f0-9]{64})`. Claude Code could send `Authorization: Bearer` instead
-# (`-H`, or a `headers` key here) and the endpoint accepts both, but the path form is what
-# the GUI clients are stuck with, so it is the form worth exercising.
+# THE HEADER FORM, AND IT IS NOW THE ONLY FORM. The endpoint registers one route, at the
+# constant URL below, and takes the credential from `Authorization: Bearer` and nowhere
+# else. The URL that carried the token in its path is gone - it was written into every
+# access log and proxy log it passed through, and a hosted connector re-sent it for months.
+#
+# So this gate exercises exactly what every real client now does, GUI clients included:
+# claude.ai and Claude Desktop custom connectors have a "Request headers" setting that
+# delivers `authorization: Bearer <token>` intact (measured on a public site, 2026-09-13),
+# and the equivalent by hand is
+#
+#   claude mcp add --transport http wpmcp <url> --header "Authorization: Bearer <token>"
+#
+# A `headers` map in the config file is that same thing for a `--mcp-config` run, which is
+# what this script uses so that nothing global on this machine is touched.
 
 WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t wpmcp-smoke)"
-ENDPOINT="${SITE_URL}/wp-json/wpmcp/mcp/${TOKEN}"
+ENDPOINT="${SITE_URL}/wp-json/wpmcp/mcp"
 
 cat > "${WORKDIR}/.mcp.json" <<JSON
 {
   "mcpServers": {
     "wpmcp": {
       "type": "http",
-      "url": "${ENDPOINT}"
+      "url": "${ENDPOINT}",
+      "headers": { "Authorization": "Bearer ${TOKEN}" }
     }
   }
 }

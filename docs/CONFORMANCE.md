@@ -15,12 +15,14 @@ such header is treated as `2025-03-26`, which is what the specification asks for
 
 ## Transport
 
-HTTP POST, one JSON response per request. Two routes, one credential:
+HTTP POST, one JSON response per request. One route, one credential form:
 
 ```
-POST /wp-json/wpmcp/mcp/{token}   token in the path
-POST /wp-json/wpmcp/mcp           token in an Authorization: Bearer header
+POST /wp-json/wpmcp/mcp           Authorization: Bearer <64 lowercase hex>
 ```
+
+The URL is constant and never carries the token. A path that does - `/wp-json/wpmcp/mcp/`
+followed by a token - is not a registered route and answers `404 rest_no_route`.
 
 Stateless. No session id is issued, and an `Mcp-Session-Id` sent by a client is ignored.
 

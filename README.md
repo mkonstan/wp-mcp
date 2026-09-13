@@ -64,11 +64,18 @@ to and its last use, with a revoke button per row.
 
 ## Connect a client
 
-The endpoint speaks JSON-RPC over HTTP at `/wp-json/wpmcp/mcp`. The token travels one of
-two ways, and which one you can use is decided by the client.
+The endpoint speaks JSON-RPC over HTTP at `/wp-json/wpmcp/mcp`. That URL is constant for
+the life of the site and never contains the token. There is exactly one way to present a
+credential:
 
-Header form, for a client that can send request headers (Claude Code, most CLI and library
-clients). The token stays out of your web server's access log:
+```
+Authorization: Bearer <64 lowercase hex characters>
+```
+
+A URL that carried the token used to be accepted as well. It is gone: such a URL is written
+into every access log, proxy log and browser history it passes through, and a hosted
+connector keeps re-sending it for months. A request to that endpoint path with a token
+appended to it is now a plain REST `404`.
 
 ```json
 {
@@ -82,17 +89,25 @@ clients). The token stays out of your web server's access log:
 }
 ```
 
-Path form, where the whole address is the credential:
-
-```
-https://your-site.example/wp-json/wpmcp/mcp/YOUR_TOKEN
+```bash
+claude mcp add --transport http wpmcp https://your-site.example/wp-json/wpmcp/mcp   --header "Authorization: Bearer YOUR_TOKEN"
 ```
 
-Claude Desktop and claude.ai custom connectors have no field for a request header, so the
-path form is the only one they can use. That puts the token in your access log, which is
-part of why the expiry is capped. Both forms are validated identically.
+claude.ai and Claude Desktop custom connectors send the header too: **Add custom
+connector**, paste the URL, pick **No sign-in** for authentication, then add a request
+header named `authorization` with the value `Bearer YOUR_TOKEN`.
 
-A Desktop or claude.ai connector also dials from Anthropic's servers rather than from your
+**If every request is refused with `reason=missing` while you are certain the header is
+being sent**, the web server is eating it. Apache running PHP as CGI or FastCGI does not
+pass `Authorization` through to PHP. WordPress's own `.htaccess` block re-exports it, and
+the plugin reads that re-export, so make sure the block is present:
+
+```apache
+RewriteEngine On
+RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+```
+
+A Desktop or claude.ai connector dials from Anthropic's servers rather than from your
 machine, so it can only reach a site on the public internet with a publicly valid
 certificate. A `.local` development site cannot be connected that way at all. The Claude
 Code CLI dials from your own machine and can.
@@ -295,7 +310,7 @@ install`, then:
 |---|---|---|
 | `composer test` | Both tiers below. | Nothing, though integration self-skips without a site. |
 | `composer test:unit` | Pure PHP: framing, the schema validator, serialization, version negotiation, cursors, the version invariant. | PHP 8.1+. Seconds. |
-| `composer test:integration` | Black-box HTTP against a real site: real users, real roles, real capability checks, real TLS, both token forms. | `WPMCP_TEST_URL`, and `wp` on PATH to seed fixtures. Minutes. |
+| `composer test:integration` | Black-box HTTP against a real site: real users, real roles, real capability checks, real TLS, the real credential header. | `WPMCP_TEST_URL`, and `wp` on PATH to seed fixtures. Minutes. |
 | `composer test:infra` | Two tests that only a host with real TLS can answer: that a valid token over plain HTTP is refused, and that a forwarded `X-Forwarded-Proto` cannot talk its way past that refusal. | An `https://` host at `WPMCP_TEST_URL`. Fails rather than skips on a host without TLS. Out of `composer test` and out of CI. |
 | `composer test:client` | A real MCP client (the Claude Code CLI) handshakes with your site, lists its tools, calls one, and the answer is checked against your database. | `claude` on PATH, and one Claude API call. Out of `composer test` and out of CI. |
 

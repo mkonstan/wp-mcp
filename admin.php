@@ -28,9 +28,15 @@ function wpmcp_site_is_https() {
     return strtolower((string) wp_parse_url(home_url(), PHP_URL_SCHEME)) === 'https';
 }
 
-/** The endpoint URL, forced to https - the only scheme the endpoint answers on. */
-function wpmcp_endpoint_url($path = '') {
-    return set_url_scheme(rest_url('wpmcp/mcp' . $path), 'https');
+/**
+ * The endpoint URL, forced to https - the only scheme the endpoint answers on.
+ *
+ * NO ARGUMENT, and that is the point. It used to take a path so the mint page could
+ * append a token to it; there is no such URL any more. This address is CONSTANT for the
+ * life of the site, so a client that has it never needs to be told a new one.
+ */
+function wpmcp_endpoint_url() {
+    return set_url_scheme(rest_url('wpmcp/mcp'), 'https');
 }
 
 function wpmcp_render_admin() {
@@ -54,12 +60,11 @@ function wpmcp_render_admin() {
         } else {
             $owner_user = get_userdata($owner ? $owner : get_current_user_id());
             $minted = array(
-                'url'     => wpmcp_endpoint_url('/' . $res['raw']),
-                'base'    => wpmcp_endpoint_url(),
-                'raw'     => $res['raw'],
-                'scope'   => $scope,
-                'hours'   => $hours,
-                'owner'   => $owner_user ? $owner_user->user_login : '',
+                'url'      => wpmcp_endpoint_url(),
+                'raw'      => $res['raw'],
+                'scope'    => $scope,
+                'hours'    => $hours,
+                'owner'    => $owner_user ? $owner_user->user_login : '',
             );
         }
     }
@@ -89,7 +94,8 @@ function wpmcp_render_admin() {
       <p>Short-lived, IP-pinned tokens for the MCP endpoint. Read-only by default.</p>
 
       <?php if (wpmcp_site_is_https()): ?>
-        <p>Endpoint base: <code><?php echo esc_html(wpmcp_endpoint_url('/')); ?>{token}</code></p>
+        <p>Endpoint URL (constant - it never changes, and never contains the token):
+           <code><?php echo esc_html(wpmcp_endpoint_url()); ?></code></p>
         <div class="notice notice-warning">
           <p><strong>HTTPS enforcement relies on your proxy overwriting &mdash; not
              forwarding &mdash; <code>X-Forwarded-Proto</code>.</strong></p>
@@ -169,23 +175,40 @@ function wpmcp_render_admin() {
         <div class="notice notice-success">
           <p><strong>Token created - copy it now, it won't be shown again:</strong></p>
           <p style="display:flex;gap:8px;align-items:center">
-            <?php // The URL form on an https site; the bare token on one that has no
-                  // working endpoint, because a copyable http:// URL is a trap. ?>
-            <input type="text" id="wpmcp-newtok" readonly style="flex:1;font-family:monospace" value="<?php echo esc_attr(wpmcp_site_is_https() ? $minted['url'] : $minted['raw']); ?>" onclick="this.select()">
+            <?php // THE TOKEN ITSELF, not a URL: the header is the only place a token
+                  // goes now, so the one string worth a copy button is the token. ?>
+            <input type="text" id="wpmcp-newtok" readonly style="flex:1;font-family:monospace" value="<?php echo esc_attr($minted['raw']); ?>" onclick="this.select()">
             <button type="button" class="button button-primary" onclick="var i=document.getElementById('wpmcp-newtok');i.focus();i.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}if(navigator.clipboard){navigator.clipboard.writeText(i.value).catch(function(){});}var b=this,t=b.textContent;b.textContent=ok?'Copied':'Select + Ctrl C';setTimeout(function(){b.textContent=t;},1500);">Copy</button>
           </p>
-          <?php if (!wpmcp_site_is_https()): ?>
-            <p><strong>That is the token itself, not a URL.</strong> This site is not on
-               HTTPS, so the endpoint refuses every request and there is no address
-               worth copying yet.</p>
-          <?php endif; ?>
           <p>Runs as: <strong><?php echo esc_html($minted['owner']); ?></strong> &middot;
              Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
-             Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong> &middot;
-             It binds to the IP of the first tool call; once bound, every request must match.</p>
-          <p style="margin-top:10px"><strong>Header style</strong> (recommended; keeps the token out of server logs):</p>
-          <p><?php if (wpmcp_site_is_https()): ?>URL: <code><?php echo esc_html($minted['base']); ?></code><br><?php endif; ?>
-             Header: <code>Authorization: Bearer <?php echo esc_html($minted['raw']); ?></code></p>
+             Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong></p>
+
+          <?php if (wpmcp_site_is_https()): ?>
+            <p style="margin-top:14px"><strong>The two things a client needs</strong> &mdash;
+               the URL never changes and never contains the token:</p>
+            <p>URL: <code><?php echo esc_html($minted['url']); ?></code><br>
+               Header: <code>Authorization: Bearer <?php echo esc_html($minted['raw']); ?></code></p>
+
+            <p style="margin-top:14px"><strong>claude.ai and Claude Desktop</strong>
+               (Settings &rarr; Connectors &rarr; Add custom connector):</p>
+            <ol style="margin:0 0 0 22px">
+              <li>URL: <code><?php echo esc_html($minted['url']); ?></code></li>
+              <li>Authentication: <strong>No sign-in</strong> (OAuth is not offered here).</li>
+              <li>Request header &mdash; name <code>authorization</code>, value
+                  <code>Bearer <?php echo esc_html($minted['raw']); ?></code></li>
+            </ol>
+            <p class="description">Claude cannot edit that header after the connector is
+               added: changing the token means deleting the connector and adding it
+               again.</p>
+
+            <p style="margin-top:14px"><strong>Claude Code</strong>:</p>
+            <p><code>claude mcp add --transport http wpmcp <?php echo esc_html($minted['url']); ?> --header "Authorization: Bearer <?php echo esc_html($minted['raw']); ?>"</code></p>
+          <?php else: ?>
+            <p><strong>That is the token itself.</strong> This site is not on HTTPS, so
+               the endpoint refuses every request and there is no address worth copying
+               yet.</p>
+          <?php endif; ?>
         </div>
       <?php endif; ?>
 

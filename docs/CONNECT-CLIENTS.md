@@ -72,7 +72,7 @@ tool rather than `--dangerously-skip-permissions`.
 ### Doing it by hand
 
 ```bash
-claude mcp add --transport http wpmcp "https://<site>/wp-json/wpmcp/mcp/<token>"
+claude mcp add --transport http wpmcp "https://<site>/wp-json/wpmcp/mcp"   --header "Authorization: Bearer <token>"
 claude            # then: /mcp   to see the server, and ask it to call site-info
 claude mcp remove wpmcp
 ```
@@ -93,27 +93,56 @@ active on it.
 3. Runs as: the WordPress user the token authenticates as. That user's capabilities are the
    ceiling on everything the connector can see or do.
 4. Label: something you will recognise in the token table.
-5. Expires in (hours): 12 is a hard cap with no override. The connector stops working when
-   the token expires, and you re-mint and re-paste. That is the design.
-6. Generate token. The green notice shows it once. The site stores only a SHA-256 hash and
-   cannot show it again. On an HTTPS site the copy field already holds the full URL:
+5. Expires in (hours): 12 is a hard cap with no override. Claude cannot edit a connector's
+   header after the connector is added, so when the token expires you mint another and
+   delete and re-add the connector.
+6. Generate token. The green notice shows it once, with the URL, the header line and the
+   recipe below already filled in. The site stores only a SHA-256 hash and cannot show the
+   token again.
 
-   ```
-   https://example.com/wp-json/wpmcp/mcp/<64 lowercase hex characters>
-   ```
+The token travels in a header and nowhere else:
 
-The token is in the URL path on purpose. Claude's connector UI has no field for a request
-header, so `Authorization: Bearer`, the form that keeps the token out of access logs and the
-one the test suite uses, is not available here. The path form exists for exactly this client.
-It does mean the token appears in your web server's access log, which is an accepted trade
-for a credential that dies within 12 hours.
+```
+URL:    https://example.com/wp-json/wpmcp/mcp
+Header: Authorization: Bearer <64 lowercase hex characters>
+```
+
+The URL is constant for the life of the site. A URL that carried the token used to be
+accepted and is not any more - it lands in every access log, proxy log and browser history
+it passes through, and a hosted connector re-sends it for months. `/wp-json/wpmcp/mcp/`
+followed by a token is now a plain `404`.
 
 ### Add the connector
 
-Go to Settings > Connectors > Add custom connector, paste that URL, and save. Look for the
-option that takes a remote MCP server URL rather than the one that edits a local JSON config
-for a stdio server, because this endpoint speaks HTTP and has no stdio transport. Nothing
-else is needed: no OAuth, no session id, no state between requests.
+Settings > Connectors > **Add custom connector**. Look for the option that takes a remote
+MCP server URL rather than the one that edits a local JSON config for a stdio server: this
+endpoint speaks HTTP and has no stdio transport.
+
+1. **URL**: `https://example.com/wp-json/wpmcp/mcp`
+2. **Authentication**: *No sign-in*. This server does not speak OAuth, and the connector
+   does not need it.
+3. **Request headers** (under Advanced settings): name `authorization`, value
+   `Bearer <your token>`.
+
+Nothing else is needed: no session id, no state between requests.
+
+Measured on a public test site, 2026-09-13: claude.ai delivers that header intact on every
+call, and **cannot edit it once the connector has been added**. Changing the token means
+deleting the connector and adding it again.
+
+Also measured: during *Connect*, claude.ai first probes the URL with **no credential at
+all**. One `validate_fail reason=missing` line in the log at connect time is normal and does
+not stop the connector from connecting.
+
+**If the connector will not authenticate and the log says `reason=missing` every time**, the
+web server is eating the header. Apache running PHP as CGI or FastCGI does not pass
+`Authorization` to PHP at all. WordPress's own `.htaccess` block re-exports it as
+`REDIRECT_HTTP_AUTHORIZATION`, which this plugin reads; make sure the block is there:
+
+```apache
+RewriteEngine On
+RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+```
 
 ### What success looks like
 
@@ -155,7 +184,8 @@ a tool, so silence after a working connection is normal.
 | `origin_deny origin=...` | The client sent an `Origin` that is not one of this site's own, and the CSRF gate refused it. | Add the exact origin the log printed: `add_filter('wpmcp_allowed_origins', fn($o) => array_merge($o, ['https://claude.ai']));` |
 | `insecure_deny` | The request arrived as plain HTTP. | The URL must be `https://`. |
 | `content_type_deny content_type=...` | The POST was not `application/json`. | A client bug. Report the value. |
-| `validate_fail reason=expired` | 12 hours are up. | Mint a new token and paste the new URL. |
+| `validate_fail reason=missing` | No `Authorization: Bearer` header reached PHP. | Normal once, during a claude.ai *Connect* probe. Every time means the client is not sending it, or Apache under CGI/FastCGI is eating it - see the `.htaccess` block in section 2. |
+| `validate_fail reason=expired` | 12 hours are up. | Mint a new token, then delete and re-add the connector with the new header value. |
 | `validate_fail reason=ip_mismatch` | The token is pinned to a different IP than this request came from. | Mint a fresh token. The pin is per token and permanent. |
 | `validate_fail reason=not_found` | The token is not in the table. | A truncated paste, or the row was revoked. |
 | HTTP 400, `-32600`, "Unsupported MCP-Protocol-Version" | The client declared a revision this server does not speak. | The message names the three it does. There is nothing to configure, so report the value. |

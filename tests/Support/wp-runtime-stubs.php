@@ -186,3 +186,39 @@ if (!function_exists('sanitize_text_field')) {
         return trim(strip_tags((string) $str));
     }
 }
+
+/**
+ * ADDED FOR SPRINT 7 (header-only credential). wpmcp_extract_token() type-hints
+ * WP_REST_Request and reads exactly one thing from it - the `authorization` header.
+ * PHP resolves the hint at CALL time, so this class only has to exist for a unit
+ * test to hand the function something; it is not a WordPress stand-in and is
+ * deliberately not growing past what is read.
+ */
+if (!class_exists('WP_REST_Request')) {
+    class WP_REST_Request
+    {
+        /** @var array<string, string> header name (lower case) => value */
+        private $headers = array();
+
+        /** @param array<string, string> $headers */
+        public function __construct($headers = array())
+        {
+            foreach ((array) $headers as $name => $value) {
+                $this->headers[strtolower((string) $name)] = (string) $value;
+            }
+        }
+
+        /** Real WP_REST_Request returns null for a header it does not have. */
+        public function get_header($name)
+        {
+            $name = strtolower((string) $name);
+
+            return isset($this->headers[$name]) ? $this->headers[$name] : null;
+        }
+
+        public function get_body()
+        {
+            return '';
+        }
+    }
+}

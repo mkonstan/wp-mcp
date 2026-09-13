@@ -43,7 +43,7 @@ These were considered and left out on purpose: installing plugins from a URL (do
 
 - **The HTTPS gate is only as strong as your proxy.** The endpoint refuses plaintext with 403, deciding with `is_ssl()`, which on a proxied deployment reads a header. A proxy that forwards the client's `X-Forwarded-Proto` instead of setting it lets a client claim HTTPS over a plaintext connection, token in cleartext. Set it at the proxy and never pass the client's value through; `composer test:infra` asks a running host whether you did.
 - **Behind a proxy or CDN**, `REMOTE_ADDR` is the proxy, so IP pinning sees every client as the same address. Read the real client IP via the provided `wpmcp_client_ip` filter, and only trust a forwarded header from a proxy you control.
-- **Path-in-URL tokens land in access logs.** The full request path is written by most web servers. Prefer the `Authorization: Bearer` header, which is not logged by default. (The IP pin still protects a logged path token, but the header avoids the exposure entirely.)
+- **The credential is a request header, never a URL.** `Authorization: Bearer <token>` is the only form accepted; a path that carries a token is a plain `404`. Request paths are written to access logs, proxy logs and browser history by default, and headers are not. If a client cannot send a header, it cannot use this endpoint.
 - **A token holder on the bound IP has that token's full scope.** Mint `read` unless you specifically need writes, and keep code editing off unless you are actively using it.
 
 ## Reporting

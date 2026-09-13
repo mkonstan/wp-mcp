@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: WP MCP
- * Description: Self-hosted MCP server for WordPress with short-lived, admin-minted, IP-pinned session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp/{token}
+ * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
  * Version: 1.0.0
  * Requires at least: 5.5
  * Requires PHP: 8.1
@@ -25,7 +25,10 @@
  *    Requests run as that user, so WordPress capabilities bound reach and scope
  *    narrows on top. Delete the user and the token stops working.
  *  - The endpoint is dormant when no live token exists.
- *  - Token travels in the URL path or an Authorization: Bearer header.
+ *  - Token travels in an Authorization: Bearer header and nowhere else. The URL is
+ *    constant and never carries it. Where Apache under CGI/FastCGI strips the header,
+ *    the value is read from REDIRECT_HTTP_AUTHORIZATION instead - see
+ *    wpmcp_extract_token().
  *  - HTTPS is required: over plaintext the endpoint answers 403 before it reads the
  *    token. It decides with is_ssl(), so the gate is only as strong as the proxy in
  *    front of WordPress - a proxy that FORWARDS the client's X-Forwarded-Proto rather

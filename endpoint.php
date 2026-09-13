@@ -4,9 +4,12 @@
  *
  * WP MCP - DIY MCP-over-HTTP endpoint.
  *
- * Routes:
- *   POST /wp-json/wpmcp/mcp/{token}   (token in the path)
- *   POST /wp-json/wpmcp/mcp           (token in Authorization: Bearer header)
+ * Route:
+ *   POST /wp-json/wpmcp/mcp           - ONE URL, and the credential is the
+ *   `Authorization: Bearer <64 lower-case hex>` header and nothing else. A URL that
+ *   carries a token is written into every access log, proxy log and browser history it
+ *   passes through, and a hosted connector re-uses it for months; so there is no such
+ *   URL any more and a path with a token in it is a plain REST 404.
  * Speaks minimal MCP JSON-RPC 2.0: initialize, notifications/initialized,
  * tools/list, tools/call, ping. Single JSON response per request (no SSE).
  * Handshake: `initialize` echoes a supported protocolVersion and otherwise answers with
@@ -55,17 +58,19 @@ add_action('rest_api_init', function () {
         'callback'            => 'wpmcp_handle',
         'permission_callback' => 'wpmcp_authorize',
     );
-    // Token in the URL path: convenient, but the path lands in server access logs.
-    register_rest_route('wpmcp', '/mcp/(?P<token>[a-f0-9]{64})', $route);
-    // Token in an Authorization: Bearer header against a constant URL: kept out of logs.
+    // ONE route, at a constant URL. The credential is the Authorization header and
+    // nothing else - see wpmcp_extract_token(). A route whose path carried the token
+    // used to be registered here alongside it; it is gone, because the path form put the
+    // credential into every log on the way and a hosted connector cannot be handed a new
+    // URL without being deleted and re-added.
     register_rest_route('wpmcp', '/mcp', $route);
 });
 
 /* ---------------- the verb gate ---------------- */
 
-/** Is this REST route one of ours? Both forms, token or no token. */
+/** Is this REST route ours? There is exactly one. */
 function wpmcp_is_our_route($route) {
-    return (bool) preg_match('#^/wpmcp/mcp(/[a-f0-9]{64})?$#', (string) $route);
+    return (string) $route === '/wpmcp/mcp';
 }
 
 /**
@@ -135,16 +140,40 @@ function wpmcp_request_method(WP_REST_Request $req) {
 }
 
 /**
- * Token from either the URL path segment or an "Authorization: Bearer <token>"
- * header. Path wins if both are present. Empty string if neither (-> dormant 401).
+ * The token from `Authorization: Bearer <token>`, and from nowhere else. Empty string
+ * when there is none, which is the dormant 401 with reason=missing.
+ *
+ * THE FALLBACK IS NOT OPTIONAL ON APACHE. PHP run as CGI or FastCGI never receives the
+ * `Authorization` header: Apache consumes it for its own auth machinery and does not
+ * export it, so $_SERVER['HTTP_AUTHORIZATION'] is absent and
+ * WP_REST_Request::get_header('authorization') is empty. WordPress ships the fix for
+ * its own Application Passwords - the .htaccess block it writes contains
+ *
+ *     RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+ *
+ * and Apache exports an E=-set CGI variable a second time under the REDIRECT_ prefix,
+ * so the value arrives as REDIRECT_HTTP_AUTHORIZATION. Reading that WHEN THE HEADER IS
+ * EMPTY is what keeps a header-only credential working on the commonest shared-hosting
+ * stack there is; without it this endpoint answers 401 reason=missing on such a host
+ * and there is nothing for an operator to look at. The real header always wins when it
+ * is present, so a stale or forged server variable cannot displace what the client
+ * actually sent.
+ *
+ * The scheme is matched case-insensitively - RFC 7235 says it is - and only `Bearer`.
+ * A `Basic <base64>` with its first seven characters cut off is not a credential and
+ * has no business reaching a database lookup.
  */
 function wpmcp_extract_token(WP_REST_Request $req) {
-    $tok = (string) $req['token'];
-    if ($tok !== '') { return $tok; }
     $auth = (string) $req->get_header('authorization');
+
+    if ($auth === '' && isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        $auth = (string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+    }
+
     if ($auth !== '' && stripos($auth, 'bearer ') === 0) {
         return trim(substr($auth, 7));
     }
+
     return '';
 }
 
@@ -292,7 +321,7 @@ function wpmcp_unauthorized() {
  *   2. Origin           present and not ours -> 403; absent -> allowed (non-browser)
  *   3. Content-Type     not application/json -> 415
  *   3b. body size       CONTENT_LENGTH > WPMCP_MAX_BODY                -> 413
- *   4. token shape      64 lower-case hex, from the path or Bearer -> 401
+ *   4. token shape      64 lower-case hex, from Authorization: Bearer -> 401
  *   5. token lookup     by SHA-256 hash                            -> 401
  *   6. user exists      get_userdata(user_id)                      -> 401
  *   7. expiry           expires_at <= now                          -> 401
