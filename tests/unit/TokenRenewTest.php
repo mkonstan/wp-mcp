@@ -161,6 +161,38 @@ final class TokenRenewTest extends TestCase
     }
 
     /**
+     * A row carrying a window LONGER than the ceiling cannot renew past the ceiling.
+     *
+     * Mint clamps and the form clamps, so no row this plugin writes can exceed
+     * WPMCP_MAX_WINDOW - but a row migrated from a hand-extended v2 token can, and the
+     * one on the bare test site carries ninety days. The `min(..., expires_at)` cap
+     * hides it only while the lifetime happens to be near: the day anything moves
+     * expires_at forward, an unclamped Renew hands out a ninety-day active window on a
+     * model whose entire point is a twelve-hour ceiling.
+     *
+     * @group sprint-7
+     */
+    public function testRenewCannotHandOutAWindowLongerThanTheCeiling(): void
+    {
+        $now = time();
+
+        $this->wpdb->row = $this->row($now - self::HOUR, $now + 365 * self::DAY);
+        $this->wpdb->row->window_secs = 90 * self::DAY;
+
+        $until = \wpmcp_renew(77);
+
+        self::assertIsString($until);
+        self::assertEqualsWithDelta(
+            $now + \WPMCP_MAX_WINDOW,
+            strtotime($until . ' UTC'),
+            5,
+            'Renew honoured a window longer than WPMCP_MAX_WINDOW. Every other path into'
+            . ' the model clamps; this one has to as well, or a single hand-edited row'
+            . ' becomes a way around the ceiling.'
+        );
+    }
+
+    /**
      * A dead row is refused, and nothing is written.
      *
      * @group sprint-7

@@ -31,9 +31,9 @@ admin can renew them for thirty days from when they were minted - see below.
   the value `Bearer <token>`.
 - If every request is now refused with `reason=missing` although the client is sending the
   header, the web server is eating it: Apache running PHP as CGI or FastCGI does not pass
-  `Authorization` to PHP. WordPress's own `.htaccess` block re-exports it, and the plugin
-  now reads that re-export (`REDIRECT_HTTP_AUTHORIZATION`). Make sure the block is
-  present.
+  `Authorization` to PHP. WordPress handles that itself, provided its own `.htaccess`
+  block is present to re-export the value - so the thing to check is the block, not the
+  plugin.
 
 ### Breaking: no IP pinning
 

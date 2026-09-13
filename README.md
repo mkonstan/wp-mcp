@@ -117,11 +117,10 @@ header named `authorization` with the value `Bearer YOUR_TOKEN`.
 
 **If every request is refused with `reason=missing` while you are certain the header is
 being sent**, the web server is eating it. Apache running PHP as CGI or FastCGI does not
-pass `Authorization` through to PHP. WordPress's own `.htaccess` block re-exports it, and
-the plugin reads that re-export, so make sure the block is present:
+pass `Authorization` through to PHP. WordPress handles that itself, provided its own
+`.htaccess` block is present - so check for this line rather than looking at the plugin:
 
 ```apache
-RewriteEngine On
 RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 ```
 

@@ -142,11 +142,12 @@ not stop the connector from connecting.
 
 **If the connector will not authenticate and the log says `reason=missing` every time**, the
 web server is eating the header. Apache running PHP as CGI or FastCGI does not pass
-`Authorization` to PHP at all. WordPress's own `.htaccess` block re-exports it as
-`REDIRECT_HTTP_AUTHORIZATION`, which this plugin reads; make sure the block is there:
+`Authorization` to PHP at all. WordPress core handles that case itself - `get_headers()` in
+`wp-includes/rest-api/class-wp-rest-server.php` maps `REDIRECT_HTTP_AUTHORIZATION` back onto
+`AUTHORIZATION` - provided WordPress's own `.htaccess` block is present to do the
+re-export. So the thing to check is the block, not the plugin:
 
 ```apache
-RewriteEngine On
 RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 ```
 

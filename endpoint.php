@@ -139,21 +139,18 @@ function wpmcp_gate_request_method($result, $server, $request) {
  * The token from `Authorization: Bearer <token>`, and from nowhere else. Empty string
  * when there is none, which is the dormant 401 with reason=missing.
  *
- * THE FALLBACK IS NOT OPTIONAL ON APACHE. PHP run as CGI or FastCGI never receives the
- * `Authorization` header: Apache consumes it for its own auth machinery and does not
- * export it, so $_SERVER['HTTP_AUTHORIZATION'] is absent and
- * WP_REST_Request::get_header('authorization') is empty. WordPress ships the fix for
- * its own Application Passwords - the .htaccess block it writes contains
+ * THE APACHE CGI CASE IS CORE'S, NOT OURS - and this function briefly carried a copy of
+ * core's answer to it, which was dead code. PHP run as CGI or FastCGI never receives the
+ * `Authorization` header (Apache consumes it for its own auth machinery and does not
+ * export it), so $_SERVER['HTTP_AUTHORIZATION'] is absent; WordPress's own .htaccess
+ * block re-exports the value as REDIRECT_HTTP_AUTHORIZATION, and
+ * `WP_REST_Server::get_headers()` maps that back onto AUTHORIZATION when, and only when,
+ * HTTP_AUTHORIZATION is empty (wp-includes/rest-api/class-wp-rest-server.php - verified
+ * on WP 7.0 and 7.1). So `get_header('authorization')` is already correct on such a host
+ * and a second read here could never fire.
  *
- *     RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
- *
- * and Apache exports an E=-set CGI variable a second time under the REDIRECT_ prefix,
- * so the value arrives as REDIRECT_HTTP_AUTHORIZATION. Reading that WHEN THE HEADER IS
- * EMPTY is what keeps a header-only credential working on the commonest shared-hosting
- * stack there is; without it this endpoint answers 401 reason=missing on such a host
- * and there is nothing for an operator to look at. The real header always wins when it
- * is present, so a stale or forged server variable cannot displace what the client
- * actually sent.
+ * That matters for where somebody debugs: if a real Apache box answers reason=missing,
+ * the thing to check is the .htaccess block, not this function.
  *
  * The scheme is matched case-insensitively - RFC 7235 says it is - and only `Bearer`.
  * A `Basic <base64>` with its first seven characters cut off is not a credential and
@@ -161,10 +158,6 @@ function wpmcp_gate_request_method($result, $server, $request) {
  */
 function wpmcp_extract_token(WP_REST_Request $req) {
     $auth = (string) $req->get_header('authorization');
-
-    if ($auth === '' && isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
-        $auth = (string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
-    }
 
     if ($auth !== '' && stripos($auth, 'bearer ') === 0) {
         return trim(substr($auth, 7));

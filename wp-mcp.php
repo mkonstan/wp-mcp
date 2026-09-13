@@ -29,9 +29,9 @@
  *    narrows on top. Delete the user and the token stops working.
  *  - The endpoint is dormant when no live token exists.
  *  - Token travels in an Authorization: Bearer header and nowhere else. The URL is
- *    constant and never carries it. Where Apache under CGI/FastCGI strips the header,
- *    the value is read from REDIRECT_HTTP_AUTHORIZATION instead - see
- *    wpmcp_extract_token().
+ *    constant and never carries it. Apache under CGI/FastCGI strips that header, and
+ *    WordPress core restores it from REDIRECT_HTTP_AUTHORIZATION before this plugin sees
+ *    the request - see wpmcp_extract_token().
  *  - HTTPS is required: over plaintext the endpoint answers 403 before it reads the
  *    token. It decides with is_ssl(), so the gate is only as strong as the proxy in
  *    front of WordPress - a proxy that FORWARDS the client's X-Forwarded-Proto rather
@@ -734,6 +734,9 @@ function wpmcp_validate($raw, $ip) {
  * would make expires_at decorative, and a token nobody chose to keep would live forever
  * one press at a time.
  *
+ * AND IT CANNOT HAND OUT A WINDOW LONGER THAN WPMCP_MAX_WINDOW, whatever the row says.
+ * See the comment on the clamp below.
+ *
  * A DEAD ROW IS REFUSED rather than quietly clamped to its own end. Setting
  * active_until = expires_at on a row whose expires_at is in the past would "succeed" and
  * change nothing observable, which is the worst answer available: the admin sees a
@@ -758,7 +761,13 @@ function wpmcp_renew($id) {
         );
     }
 
-    $window   = max(WPMCP_MIN_WINDOW, (int) $row->window_secs);
+    // CLAMPED AT BOTH ENDS, not just the bottom. Mint clamps and the mint form clamps,
+    // so no row this plugin writes can carry a window over the ceiling - but a row
+    // migrated from a hand-extended v2 token can, and one on a real test site carries
+    // ninety days. Without the upper clamp, that single row is a way around the twelve-
+    // hour ceiling the whole model exists to enforce; min(..., $lifetime) below only
+    // hides it while the lifetime happens to be near.
+    $window   = min(WPMCP_MAX_WINDOW, max(WPMCP_MIN_WINDOW, (int) $row->window_secs));
     $lifetime = strtotime($row->expires_at . ' UTC');
     $until    = gmdate('Y-m-d H:i:s', min(time() + $window, $lifetime));
 
