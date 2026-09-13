@@ -165,8 +165,11 @@ list you see is already what the token may do.
 
 Then ask for something that needs a tool. "What WordPress site am I connected to?" should
 call `site-info` and come back with your site's name, URL, WordPress version, active theme
-and plugin count. Watch Uses and Bound IP fill in on the admin page: the token pins to the
-IP of its first tool call, and every later request has to come from there.
+and plugin count. Watch Last used and Uses fill in on the admin page.
+
+The token is not tied to a client address. It cannot be: measured on a public test site on
+2026-09-13, this connector called from `160.79.106.164`, `.185`, `.186` and `.187` inside
+one minute, all four from the same session.
 
 ---
 
@@ -174,9 +177,8 @@ IP of its first tool call, and every later request has to come from there.
 
 Check `wp-content/debug.log` first, with `WP_DEBUG` and `WP_DEBUG_LOG` on. Every refusal
 this endpoint makes writes one line beginning `wp-mcp auth`, and that line names the cause
-the wire deliberately does not: all six token failures are one byte-identical 401. An
-accepted request writes nothing, apart from one `pin_bind` line the first time a token calls
-a tool, so silence after a working connection is normal.
+the wire deliberately does not: all five token failures are one byte-identical 401. An
+accepted request writes nothing at all, so silence after a working connection is normal.
 
 | Log line | What happened | Fix |
 |---|---|---|
@@ -186,7 +188,6 @@ a tool, so silence after a working connection is normal.
 | `content_type_deny content_type=...` | The POST was not `application/json`. | A client bug. Report the value. |
 | `validate_fail reason=missing` | No `Authorization: Bearer` header reached PHP. | Normal once, during a claude.ai *Connect* probe. Every time means the client is not sending it, or Apache under CGI/FastCGI is eating it - see the `.htaccess` block in section 2. |
 | `validate_fail reason=expired` | 12 hours are up. | Mint a new token, then delete and re-add the connector with the new header value. |
-| `validate_fail reason=ip_mismatch` | The token is pinned to a different IP than this request came from. | Mint a fresh token. The pin is per token and permanent. |
 | `validate_fail reason=not_found` | The token is not in the table. | A truncated paste, or the row was revoked. |
 | HTTP 400, `-32600`, "Unsupported MCP-Protocol-Version" | The client declared a revision this server does not speak. | The message names the three it does. There is nothing to configure, so report the value. |
 

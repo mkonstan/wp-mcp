@@ -264,24 +264,22 @@ browser `Origin` that is not one of the site's own is refused with 403; an absen
 add_filter('wpmcp_allowed_origins', fn($o) => array_merge($o, ['https://claude.ai']));
 ```
 
-`wpmcp_client_ip` (filter) supplies the real client IP. Behind a proxy `REMOTE_ADDR` is
-the proxy, which makes the IP pin see every client as the same machine. Only trust a
-forwarded header from a proxy you control.
+`wpmcp_client_ip` (filter) supplies the real client IP, which is written to the auth
+events and decides nothing. Behind a proxy `REMOTE_ADDR` is the proxy, so a log that is
+worth reading needs this filter. Only trust a forwarded header from a proxy you control.
 
-`wpmcp_auth_event` (action) reports what the wire deliberately does not: all six ways a
+`wpmcp_auth_event` (action) reports what the wire deliberately does not: all five ways a
 token can fail are one byte-identical 401, and the reason lives here. It receives the event
 type and a context array, and every context carries `ip`.
 
-There is no success event. A request that is accepted fires nothing, apart from `pin_bind`
-the first time a token calls a tool, so an audit listener that waits for an "ok" waits
-forever. The ten types:
+There is no success event. A request that is accepted fires nothing at all, so an audit
+listener that waits for an "ok" waits forever. The nine types:
 
 | `$type` | Fired when | Context beyond `ip` |
 |---|---|---|
 | `mint` | a token was created | `token_id`, `user_id`, `created_by`, `scope`, `ttl` |
 | `revoke` | a token row was deleted | `token_id`, `user_id` |
 | `validate_fail` | a token was refused | `reason`, sometimes `token_id` and `user_id` |
-| `pin_bind` | a token's IP was pinned by its first tool call | `token_id`, `user_id` |
 | `scope_deny` | a read token asked for a write tool | `token_id`, `user_id`, `tool`, `scope` |
 | `origin_deny` | the `Origin` header was not one of ours | `origin` |
 | `insecure_deny` | the request was not over HTTPS | nothing |
@@ -290,7 +288,7 @@ forever. The ten types:
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
 
 `reason` on `validate_fail` is one of `missing`, `malformed`, `not_found`, `user_missing`,
-`expired`, `ip_mismatch`. A context never contains a token or its hash.
+`expired`. A context never contains a token or its hash.
 
 ```php
 add_action('wpmcp_auth_event', function ($type, $context) {

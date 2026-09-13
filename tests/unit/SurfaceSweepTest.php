@@ -14,12 +14,16 @@
  * THE ALLOW LIST IS SHORT AND EACH ENTRY IS A REASON, not an exemption:
  *
  *   CHANGELOG.md                      history. It has to say what was removed.
- *   wpmcp_migrate_drop_bound_ip()     the migration that drops the column has to
- *                                     name the column. Only that function's source
- *                                     is cut out of wp-mcp.php, not the file.
+ *   wpmcp_migrate_drop_address_column()  the migration that drops the column has to
+ *                                     name the column. Only that function's source is
+ *                                     cut out of wp-mcp.php, not the file - which is
+ *                                     also why the function is not named after it.
  *   this file                         it carries the patterns.
- *   TokenLifetimeMigrationTest.php    it builds a v2-shaped table, bound_ip and all,
- *                                     so the drop has something to drop.
+ *   BoundIpDropMigrationTest.php      it puts the v2 column back so the migration has
+ *                                     something to drop, and then checks it is gone.
+ *   NoAddressBindingTest.php          it hands wpmcp_validate() a row still carrying
+ *                                     the old column, which is the only way that test
+ *                                     can fail against the code it rules out.
  *
  * THIS TEST CAN FAIL. Put the word `bound_ip` in README.md, or `/mcp/<token>` in
  * docs/CONNECT-CLIENTS.md, and it goes red naming the file and line.
@@ -45,7 +49,8 @@ final class SurfaceSweepTest extends TestCase
     private const SKIP_FILES = [
         'CHANGELOG.md',
         'tests/unit/SurfaceSweepTest.php',
-        'tests/integration/TokenLifetimeMigrationTest.php',
+        'tests/integration/BoundIpDropMigrationTest.php',
+        'tests/unit/NoAddressBindingTest.php',
     ];
 
     /**
@@ -167,7 +172,7 @@ final class SurfaceSweepTest extends TestCase
     }
 
     /**
-     * wp-mcp.php with the body of wpmcp_migrate_drop_bound_ip() replaced by blank
+     * wp-mcp.php with the body of wpmcp_migrate_drop_address_column() replaced by blank
      * lines, so line numbers in a hit still point at the real line.
      *
      * Balanced-brace scan from the function's opening brace rather than a regex over
@@ -177,7 +182,7 @@ final class SurfaceSweepTest extends TestCase
      */
     private static function withoutMigration(string $source): string
     {
-        $start = strpos($source, 'function wpmcp_migrate_drop_bound_ip(');
+        $start = strpos($source, 'function wpmcp_migrate_drop_address_column(');
 
         if ($start === false) {
             return $source;

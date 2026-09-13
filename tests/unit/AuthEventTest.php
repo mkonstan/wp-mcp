@@ -128,13 +128,13 @@ final class AuthEventTest extends TestCase
     public function testTheLogLineIsOneSortedStableLine(): void
     {
         $line = \wpmcp_format_auth_event('validate_fail', [
-            'reason'   => 'ip_mismatch',
+            'reason'   => 'user_missing',
             'ip'       => '198.51.100.4',
             'token_id' => 12,
         ]);
 
         self::assertSame(
-            'wp-mcp auth validate_fail ip=198.51.100.4 reason=ip_mismatch token_id=12',
+            'wp-mcp auth validate_fail ip=198.51.100.4 reason=user_missing token_id=12',
             $line
         );
     }

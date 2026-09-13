@@ -324,7 +324,7 @@ final class ToolContractTest extends FixtureIntegrationTestCase
      *
      * THERE IS NO SECOND PAGE TODAY - the page size is larger than the surface on purpose,
      * so `nextCursor` is absent and that absence is asserted rather than assumed. What is
-     * being pinned is that the parameter is READ: a server that ignores `cursor` silently
+     * being asserted is that the parameter is READ: a server that ignores `cursor` silently
      * re-serves page one forever, and a client paginating against it never terminates.
      *
      * @group sprint-5

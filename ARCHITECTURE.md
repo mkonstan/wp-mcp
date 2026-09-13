@@ -71,14 +71,18 @@ one thing.
 2.  Origin           present and not ours -> 403; absent is allowed (non-browser)
 3.  Content-Type     not application/json                      -> 415
 3b. Body size        CONTENT_LENGTH over WPMCP_MAX_BODY (4 MiB) -> 413
-4.  Token shape      64 lower-case hex, from the path or Bearer -> 401
+4.  Token shape      64 lower-case hex, from Authorization: Bearer -> 401
 5.  Token lookup     by SHA-256 hash                            -> 401
 6.  User exists      get_userdata(user_id)                      -> 401
 7.  Expiry           expires_at <= now                          -> 401
-8.  IP pin           bound_ip set and different                 -> 401
-    ... and the pin is CREATED here, by the first tools/call on an unbound token
-9.  Scope            a read token calling a write tool -> 200 with isError
-10. Protocol version an MCP-Protocol-Version we do not speak -> 400 with -32600
+8.  Scope            a read token calling a write tool -> 200 with isError
+9.  Protocol version an MCP-Protocol-Version we do not speak -> 400 with -32600
+
+There is no gate on the caller's address, and its absence is a decision. Measured on a
+public test site on 2026-09-13, an Anthropic-hosted connector calls from a pool of egress
+addresses - 160.79.106.164, .185, .186 and .187 within one minute - so a per-address rule
+refuses everything after the first call. The address is recorded on every auth event and
+enforced nowhere.
 ```
 
 Gates 1 to 3 are properties of the envelope and cost nothing, so they run before the
@@ -144,12 +148,6 @@ It expires within twelve hours, checked on every request rather than by the clea
 and the row is deleted the moment an expired token is presented. What the cap buys is a
 bounded window, and that is all it buys: a token used inside its window has its full scope
 for that window, so the cap is no reason to mint `admin` casually.
-
-It locks to one machine, but only after the first real action. A client's setup handshake
-can come from a different address than its live session, and the first version pinned on
-the handshake and locked the real client out of its own pass. Now the handshake pins
-nothing and the first `tools/call` does. After that every request, handshake included, has
-to match.
 
 With no live token in the table, every request gets 401. Activating the plugin opens
 nothing; deleting the tokens closes it again.

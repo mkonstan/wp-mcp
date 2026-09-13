@@ -91,7 +91,7 @@ function wpmcp_render_admin() {
     ?>
     <div class="wrap">
       <h1>WP MCP</h1>
-      <p>Short-lived, IP-pinned tokens for the MCP endpoint. Read-only by default.</p>
+      <p>Short-lived, admin-minted tokens for the MCP endpoint. Read-only by default.</p>
 
       <?php if (wpmcp_site_is_https()): ?>
         <p>Endpoint URL (constant - it never changes, and never contains the token):
@@ -216,11 +216,11 @@ function wpmcp_render_admin() {
       <table class="widefat striped">
         <thead><tr>
           <th>Label</th><th>Owner</th><th>Scope</th><th>Created (UTC)</th><th>Expires (UTC)</th>
-          <th>Bound IP</th><th>Last used</th><th>Uses</th><th></th>
+          <th>Last used</th><th>Uses</th><th></th>
         </tr></thead>
         <tbody>
         <?php if (!$rows): ?>
-          <tr><td colspan="9"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
+          <tr><td colspan="8"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
         <?php else: foreach ($rows as $r):
             $expired = strtotime($r->expires_at . ' UTC') <= time();
             // A deleted user leaves the id behind; say so rather than printing a bare
@@ -234,7 +234,6 @@ function wpmcp_render_admin() {
             <td><?php echo esc_html($r->scope); ?></td>
             <td><?php echo esc_html($r->created_at); ?></td>
             <td><?php echo esc_html($r->expires_at) . ($expired ? ' (expired)' : ''); ?></td>
-            <td><?php echo esc_html($r->bound_ip ? $r->bound_ip : '- unbound'); ?></td>
             <td><?php echo esc_html($r->last_used_at ? $r->last_used_at : '-'); ?></td>
             <td><?php echo (int) $r->use_count; ?></td>
             <td>

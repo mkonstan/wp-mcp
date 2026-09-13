@@ -9,7 +9,7 @@
  * for everything and the caller gets empty results instead of a refusal.
  *
  * The test proves the token worked FIRST. Without that, a 401 after the deletion
- * could mean the fixture was never valid, the IP pin, an expiry, or a typo.
+ * could mean the fixture was never valid, an expiry, or a typo.
  *
  * Its own fixture user, deliberately: this test destroys the user it is given, and
  * sharing one with another class would make the suite order-dependent.

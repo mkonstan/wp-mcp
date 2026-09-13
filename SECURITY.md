@@ -10,14 +10,15 @@ WP MCP exists to let an AI assistant reach a WordPress site without handing it a
 - **Bound to a WordPress user**, chosen at mint time. The request runs as that user, so that user's capabilities are the ceiling on what the token can reach. Deleting the user stops the token working.
 - **Scope: `read` or `admin`**, narrowing from there. Read tokens are refused every write and code tool, and those tools are not even listed to them. Scope only subtracts; it cannot grant a capability the user does not have.
 
-## IP pinning (TOFU)
+## No address binding, and why not
 
-A token locks to a single IP, trust on first use. Two deliberate refinements:
+A token used to lock to a single client address on its first tool call and refuse every later request from anywhere else. That is removed as of 1.1.0.
 
-1. **Binding waits for the first real tool call.** Discovery requests (the `initialize` / `tools/list` handshake a client runs at setup) do not create the binding. This matters because a client's setup handshake can originate from a different IP than its live session; binding on the handshake would pin the wrong address and lock the real client out.
-2. **Once bound, the pin is universal.** After the first tool call sets it, *every* request, discovery included, must match the bound IP or gets a 403.
+Measured on a public test site on 2026-09-13: an Anthropic-hosted connector (claude.ai on the web, Claude Desktop) reaches a server from a **pool** of egress addresses - `160.79.106.164`, `.185`, `.186` and `.187` were all seen inside one minute. There is no single address to hold a token to, so the lock authenticated the first call of a session and refused the rest of it. No amount of address bookkeeping fixes that.
 
-Net effect: a token copied out of a log or intercepted is useless from any other machine.
+The caller's address is still recorded on every auth event, where an operator can read it. It decides nothing.
+
+**What this costs.** A token copied out of a log or intercepted is usable from anywhere. Two things carry that weight instead: the credential is a request header rather than a URL, so it is not written to access logs in the first place, and expiry is enforced on every request. Mint `read` unless you need writes.
 
 ## Dormant by default
 
@@ -42,9 +43,9 @@ These were considered and left out on purpose: installing plugins from a URL (do
 ## Known limits (read before production)
 
 - **The HTTPS gate is only as strong as your proxy.** The endpoint refuses plaintext with 403, deciding with `is_ssl()`, which on a proxied deployment reads a header. A proxy that forwards the client's `X-Forwarded-Proto` instead of setting it lets a client claim HTTPS over a plaintext connection, token in cleartext. Set it at the proxy and never pass the client's value through; `composer test:infra` asks a running host whether you did.
-- **Behind a proxy or CDN**, `REMOTE_ADDR` is the proxy, so IP pinning sees every client as the same address. Read the real client IP via the provided `wpmcp_client_ip` filter, and only trust a forwarded header from a proxy you control.
+- **Behind a proxy or CDN**, `REMOTE_ADDR` is the proxy, so every auth event names the proxy rather than the caller. Read the real client address via the provided `wpmcp_client_ip` filter, and only trust a forwarded header from a proxy you control. Nothing is enforced from that value; the log is the reason to get it right.
 - **The credential is a request header, never a URL.** `Authorization: Bearer <token>` is the only form accepted; a path that carries a token is a plain `404`. Request paths are written to access logs, proxy logs and browser history by default, and headers are not. If a client cannot send a header, it cannot use this endpoint.
-- **A token holder on the bound IP has that token's full scope.** Mint `read` unless you specifically need writes, and keep code editing off unless you are actively using it.
+- **Anybody holding the token has that token's full scope, from anywhere.** Mint `read` unless you specifically need writes, and keep code editing off unless you are actively using it.
 
 ## Reporting
 

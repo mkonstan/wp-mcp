@@ -224,5 +224,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/wp-mcp.zip \
             --title "${GITHUB_REF_NAME}" \
-            --notes "Automated release of ${GITHUB_REF_NAME}. Self-hosted WordPress MCP server with short-lived, admin-minted, IP-pinned tokens; read/admin scopes; opt-in jailed theme code editing. See CHANGELOG.md." \
+            --notes "Automated release of ${GITHUB_REF_NAME}. Self-hosted WordPress MCP server with short-lived, admin-minted, hashed-at-rest tokens; read/admin scopes; opt-in jailed theme code editing. See CHANGELOG.md." \
             --verify-tag

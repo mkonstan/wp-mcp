@@ -19,7 +19,6 @@
  *  - Admin mints a token in Settings > WP MCP. Token is shown ONCE.
  *  - Token is a 256-bit random value; only its SHA-256 hash is stored.
  *  - Hard expiry, capped at 12h. Enforced on every request (not by cron).
- *  - TOFU IP pinning: token locks on the first tool call, then all requests enforce it.
  *  - Scope: 'read' (default) or 'admin'. Read tokens are refused write tools.
  *  - Identity: every token is bound to a real WordPress user chosen at mint time.
  *    Requests run as that user, so WordPress capabilities bound reach and scope
@@ -37,7 +36,10 @@
  *    WPMCP_ALLOW_INSECURE === true in wp-config.php is the local-dev override.
  *  - A browser Origin must be one of the site's own; absent Origin is allowed, which
  *    is what non-browser clients send. POST must be application/json, or 415.
- *  - Every token refusal is one byte-identical 401. Which of the six it was lives in
+ *  - A token is NOT bound to a client address. An Anthropic-hosted connector calls
+ *    from a pool of egress addresses, so there is nothing single to hold it to; the
+ *    address is recorded on every auth event and decides nothing.
+ *  - Every token refusal is one byte-identical 401. Which of the five it was lives in
  *    the wpmcp_auth_event action, not on the wire.
  */
 
@@ -53,7 +55,10 @@ define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS); // 43200s hard cap
 // it fires on activate, which never happens to a plugin that is updated in place.
 //   1 = 0.3.5 and earlier: no user_id column, requests ran as the minting admin
 //   2 = user-bound tokens: user_id column, backfilled from created_by
-define('WPMCP_DB_VER', 2);
+//   3 = no address binding: the column that held it is DROPPED. dbDelta cannot do
+//       that - it only adds and widens - so the ALTER is issued by hand, in
+//       wpmcp_migrate_drop_address_column().
+define('WPMCP_DB_VER', 3);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
 /* ============================================================
@@ -109,7 +114,6 @@ function wpmcp_install() {
   label varchar(191) NOT NULL DEFAULT '',
   created_at datetime NOT NULL,
   expires_at datetime NOT NULL,
-  bound_ip varchar(45) DEFAULT NULL,
   last_used_at datetime DEFAULT NULL,
   use_count bigint(20) unsigned NOT NULL DEFAULT 0,
   created_by bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -133,6 +137,7 @@ function wpmcp_install() {
     // and RETRYABLE: leave the option behind so the next request tries once more.
     if (!wpmcp_token_column_exists('user_id')) { return false; }
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
+    if (wpmcp_migrate_drop_address_column() === false) { return false; }
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
     return true;
@@ -161,6 +166,34 @@ function wpmcp_migrate_token_user_ids() {
     global $wpdb;
     $table = wpmcp_table();
     return $wpdb->query("UPDATE $table SET user_id = created_by WHERE user_id = 0");
+}
+
+/**
+ * Revision 3: drop the column the address pin lived in.
+ *
+ * WHY THIS IS NOT A LINE DELETED FROM THE CREATE TABLE ABOVE. dbDelta only ever ADDS and
+ * WIDENS. It diffs the SQL it is handed against the live table and issues ALTER TABLE
+ * ADD / CHANGE for what is missing or narrower; a column the table has and the SQL does
+ * not is never mentioned and stays forever. Deleting the line removes the column from a
+ * FRESH install and from nowhere else, so every existing site would keep carrying a
+ * column nothing reads - and keep the value in it, ready for anything that started
+ * reading it again.
+ *
+ * GUARDED BY A COLUMN-EXISTS CHECK, because this runs on every schema bump for the rest
+ * of the plugin's life and DROP COLUMN on a column that is not there is an error, not a
+ * no-op. MySQL gained `DROP COLUMN IF EXISTS` in 8.0.29 and MariaDB has had it longer;
+ * neither is a floor this plugin can assume, so the check is done in PHP.
+ *
+ * Returns the query result, or true when there was nothing to do. false is the
+ * documented failure, and wpmcp_install() refuses to stamp the revision on it - see the
+ * comment there about failing closed and retryable.
+ */
+function wpmcp_migrate_drop_address_column() {
+    global $wpdb;
+
+    if (!wpmcp_token_column_exists('bound_ip')) { return true; }
+
+    return $wpdb->query('ALTER TABLE ' . wpmcp_table() . ' DROP COLUMN bound_ip');
 }
 
 register_deactivation_hook(__FILE__, function () {
@@ -201,7 +234,6 @@ function wpmcp_client_ip() {
  *   mint              a token was created              (token_id, user_id, created_by, scope, ttl)
  *   revoke            a token row was deleted          (token_id, user_id)
  *   validate_fail     a token was refused              (reason, token_id?, user_id?)
- *   pin_bind          a token's TOFU IP was set        (token_id, user_id)
  *   scope_deny        a read token asked for a write   (token_id, user_id, tool, scope)
  *   origin_deny       the Origin header was not ours   (origin)
  *   insecure_deny     the request was not over HTTPS   (-)
@@ -209,9 +241,10 @@ function wpmcp_client_ip() {
  *   body_too_large    CONTENT_LENGTH over the cap      (length)
  *   registry_reject   a filter-added tool was refused  (tool, reason)
  *
- * Every context also carries `ip`. `reason` on validate_fail is the INTERNAL reason -
- * missing, malformed, not_found, user_missing, expired, ip_mismatch - which is
- * deliberately the only place it exists: the wire answer to all six is one byte-
+ * Every context also carries `ip` - which is there to be READ, not enforced: nothing in
+ * this plugin decides anything from the caller's address. `reason` on validate_fail is
+ * the INTERNAL reason - missing, malformed, not_found, user_missing, expired - which is
+ * deliberately the only place it exists: the wire answer to all five is one byte-
  * identical 401, so the log is where an operator finds out which it was.
  *
  * NEVER IN A CONTEXT: the raw token or its hash. Tokens are identified by their ROW
@@ -258,8 +291,8 @@ define('WPMCP_LOG_VALUE_MAX', 200);
  * Redact by key at EVERY depth, and bound every string.
  *
  * Depth matters because a third-party listener's context is not flat. The plugin's own
- * contexts are - row id, user id, scope, ttl, reason, ip, bound_ip, origin,
- * content_type, tool - but a site that adds its own listener and passes
+ * contexts are - row id, user id, scope, ttl, reason, ip, origin, content_type, tool -
+ * but a site that adds its own listener and passes
  * `['request' => ['authorization' => ...]]` would have had that written out verbatim,
  * because the old formatter json_encoded a nested array without looking inside it.
  *
@@ -400,11 +433,10 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
         'label'      => sanitize_text_field((string) $label),
         'created_at' => $now,
         'expires_at' => gmdate('Y-m-d H:i:s', time() + $ttl),
-        'bound_ip'   => null,
         'use_count'  => 0,
         'created_by' => (int) get_current_user_id(),
         'user_id'    => $user_id,
-    ), array('%s','%s','%s','%s','%s','%s','%d','%d','%d'));
+    ), array('%s','%s','%s','%s','%s','%d','%d','%d'));
 
     if (!$ok) { return new WP_Error('wpmcp_insert_failed', 'Could not store token.'); }
 
@@ -425,23 +457,27 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
  * Validate a raw token against the current request.
  *
  * Returns the token row (object) on success, or a WP_Error whose code is the INTERNAL
- * reason: missing | malformed | not_found | user_missing | expired | ip_mismatch.
+ * reason: missing | malformed | not_found | user_missing | expired.
  *
- * THE CALLER MUST NOT PUT THAT REASON ON THE WIRE. All six are one byte-identical 401
+ * THE CALLER MUST NOT PUT THAT REASON ON THE WIRE. All five are one byte-identical 401
  * (see wpmcp_unauthorized() in endpoint.php) and the reason survives only in the
  * validate_fail auth event, which is fired here so that every refusal path fires it -
  * including the deleted-user one, which the Sprint 1 review asked to be sure of.
  *
  * Why one answer: each distinguishable refusal is an oracle. "expired" confirms the
- * token was real and tells an attacker to look for a newer one; "ip_mismatch" confirms
- * it is real AND in use from somewhere else; a 403 instead of a 401 confirms it by the
- * status code alone. None of that is information a caller holding a bad token has any
- * claim to.
+ * token was real and tells an attacker to look for a newer one; a 403 instead of a 401
+ * confirms it by the status code alone. None of that is information a caller holding a
+ * bad token has any claim to.
  *
- * Side effects on success: the use counters. The TOFU pin is NOT created here - see
- * wpmcp_bind_token_ip(), which endpoint.php calls only once the token has passed and
- * only for a tool call. Keeping the bind out of here is what lets wpmcp_authorize()
- * finish the whole credential check before anything reads the request body.
+ * $ip IS FOR THE RECORD, NOT FOR A DECISION. It is passed in so that every refusal fired
+ * from here says where it came from, and no branch below compares it to anything. A
+ * token used to be locked to the address of its first tool call; measured on a public
+ * test site on 2026-09-13, an Anthropic-hosted connector (claude.ai, Claude Desktop)
+ * calls from a pool of egress addresses - 160.79.106.164, .185, .186 and .187 within one
+ * minute - so that lock refused the whole session after the first call. There is no
+ * single address to hold a token to.
+ *
+ * Side effects on success: the use counters, and nothing else.
  */
 function wpmcp_validate($raw, $ip) {
     global $wpdb;
@@ -489,18 +525,6 @@ function wpmcp_validate($raw, $ip) {
         return new WP_Error('expired', 'Token expired - regenerate in Settings > WP MCP.');
     }
 
-    // Once a pin exists it is universal - every method, not only tool calls.
-    if (!empty($row->bound_ip) && !hash_equals((string) $row->bound_ip, (string) $ip)) {
-        wpmcp_auth_event('validate_fail', array(
-            'reason'   => 'ip_mismatch',
-            'token_id' => (int) $row->id,
-            'user_id'  => (int) $row->user_id,
-            'bound_ip' => (string) $row->bound_ip,
-            'ip'       => $ip,
-        ));
-        return new WP_Error('ip_mismatch', 'Token is bound to a different IP.');
-    }
-
     $wpdb->update(
         wpmcp_table(),
         array('last_used_at' => current_time('mysql', true), 'use_count' => (int) $row->use_count + 1),
@@ -508,28 +532,6 @@ function wpmcp_validate($raw, $ip) {
         array('%s','%d'), array('%d')
     );
     return $row;
-}
-
-/**
- * Create the TOFU pin on a token that does not have one yet, and tell the operator.
- *
- * Split out of wpmcp_validate() so the binding can happen AFTER the whole credential
- * check, and only for the request shape that should create it. A no-op on a token
- * that is already bound - wpmcp_validate() has already enforced that pin.
- */
-function wpmcp_bind_token_ip($row, $ip) {
-    global $wpdb;
-
-    if (!empty($row->bound_ip)) { return; }
-
-    $wpdb->update(wpmcp_table(), array('bound_ip' => $ip), array('id' => $row->id), array('%s'), array('%d'));
-    $row->bound_ip = $ip;
-
-    wpmcp_auth_event('pin_bind', array(
-        'token_id' => (int) $row->id,
-        'user_id'  => (int) $row->user_id,
-        'ip'       => $ip,
-    ));
 }
 
 function wpmcp_revoke($id) {

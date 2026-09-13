@@ -356,24 +356,6 @@ final class Fixtures
     }
 
     /**
-     * Pin every token with this label to $ip, so a request from anywhere else takes
-     * the IP-mismatch branch. The TOFU bind is normally made by the first tool call
-     * from the caller's own address, which is the one address a test cannot use.
-     */
-    public static function bindTokensLabelled(string $label, string $ip): void
-    {
-        self::assertPrefixed($label);
-
-        WpCli::evaluate(sprintf(
-            'global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
-            . '"UPDATE " . wpmcp_table() . " SET bound_ip = %%s WHERE label = %%s",'
-            . ' %s, %s));',
-            self::phpString($ip),
-            self::phpString($label)
-        ));
-    }
-
-    /**
      * Delete tokens by label. Via `wp eval` and $wpdb->delete rather than `wp db
      * query`, because the mysql client is not on PATH on every machine that can run
      * this suite - notably not on the one it was written on.

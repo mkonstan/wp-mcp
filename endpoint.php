@@ -19,7 +19,9 @@
  * Transport: HTTPS required, Origin checked against the site's own, POST must be
  *   application/json. All three before the token is read - see wpmcp_authorize(),
  *   whose docblock states the full order of the gates.
- * Auth: the token is validated per request (shape, lookup, user, expiry, TOFU IP).
+ * Auth: the token is validated per request (shape, lookup, user, expiry). It is NOT
+ *   bound to a client address: an Anthropic-hosted connector calls from a pool of
+ *   egress addresses, so there is no single address to hold it to.
  *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
@@ -131,12 +133,6 @@ function wpmcp_gate_request_method($result, $server, $request) {
     $response->header('Allow', 'POST, OPTIONS');
 
     return $response;
-}
-
-/** The JSON-RPC method on this request (read from the POST body), or '' if none. */
-function wpmcp_request_method(WP_REST_Request $req) {
-    $b = json_decode($req->get_body(), true);
-    return (is_array($b) && isset($b['method'])) ? (string) $b['method'] : '';
 }
 
 /**
@@ -325,17 +321,24 @@ function wpmcp_unauthorized() {
  *   5. token lookup     by SHA-256 hash                            -> 401
  *   6. user exists      get_userdata(user_id)                      -> 401
  *   7. expiry           expires_at <= now                          -> 401
- *   8. IP pin           bound_ip set and different                 -> 401
- *      ... then the pin is CREATED here, for a tools/call on an unbound token
- *   9. scope            enforced at dispatch, in wpmcp_handle()
- *  10. protocol version enforced at dispatch, in wpmcp_dispatch()
+ *   8. scope            enforced at dispatch, in wpmcp_handle()
+ *   9. protocol version enforced at dispatch, in wpmcp_dispatch()
+ *
+ * THERE IS NO ADDRESS GATE, and its absence is a decision rather than an omission. A
+ * token used to lock to the address of its first tool call and be refused from anywhere
+ * else. Measured on a public test site on 2026-09-13, an Anthropic-hosted connector
+ * (claude.ai, Claude Desktop) calls from a POOL - 160.79.106.164, .185, .186 and .187
+ * inside one minute - so that lock held the token to whichever came first and refused
+ * the rest of the session. There is no single address to hold a token to, so none is
+ * used; the caller's address is still recorded on every auth event, where it informs an
+ * operator without deciding anything.
  *
  * WHY THIS ORDER. 1-3 are properties of the envelope and cost nothing, so they run
  * before the credential is even read: a request refused for being plaintext must not
  * first have its token looked up in the database, or the refusal becomes a token
- * oracle with a timing side channel. 4-8 narrow from "is this string even a token" to
- * "is it this token, still alive, from the right place", cheapest first and each one a
- * precondition of the next. 6 precedes 7 so a dead token's row is not even touched.
+ * oracle with a timing side channel. 4-7 narrow from "is this string even a token" to
+ * "is it this token, and is it still alive", cheapest first and each one a precondition
+ * of the next. 6 precedes 7 so a dead token's row is not even touched.
  *
  * 3b IS A CAP ON WORK, NOT ON MEMORY, and the difference matters. By the time any of
  * this runs, WordPress core has already read the whole body and json_decode'd it - see
@@ -347,7 +350,8 @@ function wpmcp_unauthorized() {
  * a measurement, which is fine in this direction: a client that understates it gets its
  * body truncated by the server instead.
  *
- * THIS PLUGIN READS NO PART OF THE REQUEST BODY BEFORE 8 - but WordPress does, and the
+ * THIS PLUGIN READS NO PART OF THE REQUEST BODY AT ALL in this function - but WordPress
+ * does, and the
  * earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
  * `$request->has_valid_params()`, which calls `parse_json_params()` for any
  * application/json body, and only then does `respond_to_request()` reach the
@@ -357,20 +361,21 @@ function wpmcp_unauthorized() {
  * That refusal leaks nothing about the token - core never looks at one - but it is not
  * this function's refusal and it is not in this order.
  *
- * What this function changed is the plugin's own read: the TOFU pin needs to know whether
- * this is a tools/call, so wpmcp_request_method() used to json_decode() the body at the
- * TOP of the callback, on every request, valid token or not. It now runs after gate 8.
+ * The plugin's own read of the body is gone from this function entirely. It existed for
+ * one reason - the address pin needed to know whether the request was a tools/call, so a
+ * helper json_decode'd the body on every request, valid token or not - and the pin is
+ * gone with it.
  *
- * 9 AND 10 ARE THE GATES NOT IN THIS FUNCTION, and deliberately - both need the parsed
+ * 8 AND 9 ARE THE GATES NOT IN THIS FUNCTION, and deliberately - both need the parsed
  * body, so neither can run here without reading it, which is the thing this ordering was
  * rearranged to avoid.
  *
- * 9, scope: the decision needs the tool name, which only exists once the body is parsed,
+ * 8, scope: the decision needs the tool name, which only exists once the body is parsed,
  * and its refusal is an MCP tool error (200 with isError) rather than an HTTP status,
  * because a read token calling a write tool is a correctly authenticated request asking
  * for something it may not have. It fires the scope_deny event from wpmcp_handle().
  *
- * 10, MCP-Protocol-Version: the gate needs to know whether the method is `initialize`,
+ * 9, MCP-Protocol-Version: the gate needs to know whether the method is `initialize`,
  * which is exempt, and its refusal is a JSON-RPC -32600 body on HTTP 400 - a shape this
  * function cannot produce at all, since a permission_callback's WP_Error becomes WP's own
  * `{"code","message","data"}` REST error and never a JSON-RPC envelope. That is what
@@ -463,18 +468,11 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
         );
     }
 
-    // 4-8.
+    // 4-7.
     $row = wpmcp_validate(wpmcp_extract_token($req), $ip);
     if (is_wp_error($row)) {
         // The reason is already in the validate_fail event. One answer on the wire.
         return wpmcp_unauthorized();
-    }
-
-    // The TOFU pin, now that the token has passed: only a tool call creates it, so
-    // discovery and the handshake can happen from anywhere. This is the first thing
-    // on the request path that looks at the body.
-    if (wpmcp_request_method($req) === 'tools/call') {
-        wpmcp_bind_token_ip($row, $ip);
     }
 
     // Identity: run as the user the token was minted for, so every capability check
@@ -1129,7 +1127,7 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             if (!isset($tools[$name])) {
                 return wpmcp_rpc_err($id, -32602, 'Unknown tool: ' . $name);
             }
-            // Scope gate - gate 9 of wpmcp_authorize()'s sequence, enforced here
+            // Scope gate - gate 8 of wpmcp_authorize()'s sequence, enforced here
             // because it is the first point at which the tool name exists.
             $session = $GLOBALS['wpmcp_session'];
             if (!empty($tools[$name]['write']) && (!$session || $session->scope !== 'admin')) {

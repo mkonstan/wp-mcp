@@ -179,6 +179,10 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
     /**
      * Insert a token row directly, the shape 0.3.5 wrote (plus the new column), and
      * return its id. A random token_hash keeps the UNIQUE index happy across re-runs.
+     *
+     * The v2 address column is NOT written here any more - revision 3 drops it, so an
+     * insert naming it would fail on a migrated table. The migration under test is the
+     * user_id backfill, which never touched that column.
      */
     private function insertTokenRow(int $userId, int $createdBy): int
     {
@@ -189,11 +193,10 @@ final class TokenUserIdMigrationTest extends FixtureIntegrationTestCase
             . '"label" => %s,'
             . '"created_at" => current_time("mysql", true),'
             . '"expires_at" => gmdate("Y-m-d H:i:s", time() + 600),'
-            . '"bound_ip" => null,'
             . '"use_count" => 0,'
             . '"created_by" => %d,'
             . '"user_id" => %d'
-            . '), array("%%s","%%s","%%s","%%s","%%s","%%s","%%d","%%d","%%d"));'
+            . '), array("%%s","%%s","%%s","%%s","%%s","%%d","%%d","%%d"));'
             . ' echo (int) $wpdb->insert_id;',
             "'" . self::label() . "'",
             $createdBy,
