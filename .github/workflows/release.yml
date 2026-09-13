@@ -173,10 +173,21 @@ jobs:
         # src/ arrived after this step was written, and a zip without them installs a
         # plugin that fatals on its first request. The gate below compares the extracted
         # copy against this list, so anything missing here is missing silently.
+        #
+        # The documentation ships too, all of it, because README.md links to SECURITY.md,
+        # ARCHITECTURE.md, CHANGELOG.md, BUILD-NOTES.md and four files under docs/. A zip
+        # carrying only README.md gives a reader six dead links.
+        #
+        # `cp src/*.php` is flat on purpose, and correct today: both classes sit directly
+        # in src/. The autoloader maps WpMcp\A\B to src/A/B.php, so the first nested
+        # namespace needs this to become `cp -r src dist/wp-mcp/` and the gate's file list
+        # to become a find. There is no nested class to justify that yet.
         run: |
-          mkdir -p dist/wp-mcp/src
-          cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php              LICENSE README.md CHANGELOG.md dist/wp-mcp/
+          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs
+          cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php dist/wp-mcp/
+          cp LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md BUILD-NOTES.md dist/wp-mcp/
           cp src/*.php dist/wp-mcp/src/
+          cp docs/*.md dist/wp-mcp/docs/
 
       - name: Build wp-mcp.zip (top-level wp-mcp/ folder)
         run: |
@@ -190,7 +201,8 @@ jobs:
           unzip -q dist/wp-mcp.zip -d verify
           fail=0
           files="wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php"
-          files="$files LICENSE README.md CHANGELOG.md $(ls src/*.php)"
+          files="$files LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md"
+          files="$files BUILD-NOTES.md $(ls src/*.php) $(ls docs/*.md)"
           for f in $files; do
             if ! cmp -s "$f" "verify/wp-mcp/$f"; then
               echo "MISMATCH: $f differs from the zipped copy"; fail=1
