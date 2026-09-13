@@ -31,12 +31,15 @@
     <!--
       infra-trust is excluded from every default run, and from CI.
 
-      It asks a question about the DEPLOYMENT, not about the code: does the proxy in
-      front of WordPress overwrite X-Forwarded-Proto, or forward the client's? The
-      answer is red on Local by Flywheel and on wp-env, and no change to this
-      repository can make it green - only a change to somebody's proxy config can. A
-      test like that must not be able to turn `composer test` red, and it must not be
-      quietly skipped either, because a skip is green and the fact would vanish.
+      Both tests in it need a host with real TLS: one asserts that a valid token over
+      plain http is refused, the other that a forwarded X-Forwarded-Proto cannot talk
+      its way past that refusal. Neither question exists on a host published over plain
+      http with WPMCP_ALLOW_INSECURE set, which is what `composer test` and CI run
+      against. The second one is also about the DEPLOYMENT rather than the code - it is
+      red on Local by Flywheel and on wp-env, and only a change to somebody's proxy
+      config can make it green. Tests like that must not be able to turn `composer test`
+      red, and must not be quietly skipped either, because a skip is green and the fact
+      would vanish.
 
       So it lives behind its own command, `composer test:infra`, to be run against the
       host you actually serve from. A group named on the command line overrides this

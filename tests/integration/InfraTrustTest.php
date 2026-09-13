@@ -1,10 +1,18 @@
 <?php
 /**
- * Does the deployment in front of WordPress actually tell the truth about TLS?
+ * The two properties that only a host with real TLS can be asked about.
  *
- * THIS TEST IS EXPECTED TO FAIL ON Local by Flywheel, AND THAT IS THE POINT. It is not
- * in the sprint-2 group, it is excluded from `composer test` and from CI, and it has its
- * own command:
+ * Both are about the HTTPS gate, and neither can be asked of a container published on
+ * plain http with WPMCP_ALLOW_INSECURE set, which is what the rest of the integration
+ * tier runs against in CI. So they live here, behind their own command, and a host that
+ * cannot answer them FAILS rather than skips. A skip would read as a pass.
+ *
+ *   1. A valid token over plain http is refused 403 before the token is read.
+ *   2. The same request carrying `X-Forwarded-Proto: https` is still refused.
+ *
+ * The first is the gate working. The second is whether your proxy lets a client lie
+ * about it, and it is EXPECTED TO FAIL ON Local by Flywheel, which is the point. Both
+ * are excluded from `composer test` and from CI, and they have their own command:
  *
  *     source bin/local-env.sh && composer test:infra
  *
@@ -21,7 +29,7 @@
  *
  * VERIFIED ON THE SITE THIS WAS DEVELOPED AGAINST, which is why it exists:
  *
- *     POST http://jaygroup.local/wp-json/wpmcp/mcp  + Bearer + JSON        -> 403
+ *     POST http://example.local/wp-json/wpmcp/mcp  + Bearer + JSON         -> 403
  *     ... the same request plus `X-Forwarded-Proto: https`                 -> 200
  *
  * Local's router maps the client's header through
@@ -44,6 +52,7 @@ namespace WpMcp\Tests\Integration;
 
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\TestRecorder;
 
 final class InfraTrustTest extends FixtureIntegrationTestCase
 {
@@ -65,6 +74,10 @@ final class InfraTrustTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        // After purge(), which removes this run's mu-plugins. The plaintext test below
+        // asserts on the events the refusal fired, not only on the status code.
+        TestRecorder::install();
+
         self::$userId = Fixtures::createUser(self::login(), 'author');
         self::$token  = Fixtures::mintToken('read', self::label(), self::$userId);
     }
@@ -78,9 +91,65 @@ final class InfraTrustTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        TestRecorder::uninstall();
         Fixtures::deleteUser(self::$userId);
         Fixtures::deleteTokensLabelled(self::label());
         Fixtures::purge();
+    }
+
+    /**
+     * The gate itself: a valid token over plain http is refused 403, before the token is
+     * read, with a body that says nothing about it.
+     *
+     * HERE RATHER THAN WITH THE OTHER TRANSPORT GATES because it needs a host that has
+     * TLS. `insecureBaseUrl()` is the test URL with its scheme swapped, so on a host that
+     * is already http there is no downgrade to attempt and nothing to prove. That used to
+     * be a skip in the sprint-2 group, which made the CI gate red for a reason that had
+     * nothing to do with the code: the gate step counts a skipped test as a gate that did
+     * not run, correctly. A failure on a host that cannot answer is the honest version.
+     *
+     * @group infra-trust
+     */
+    public function testAValidTokenOverPlainHttpIsRefused(): void
+    {
+        $insecure = $this->insecureBaseUrl();
+
+        if ($insecure === '') {
+            self::fail(
+                'WPMCP_TEST_URL is not https, so this host cannot be asked whether the'
+                . ' HTTPS gate refuses plaintext: there is no TLS endpoint to downgrade'
+                . ' from. Point WPMCP_TEST_URL at the https host you serve from.'
+            );
+        }
+
+        TestRecorder::reset();
+
+        $response = $this->mcp(self::$token, $insecure)->post('tools/list');
+
+        self::assertSame(
+            403,
+            $response->getStatusCode(),
+            'A valid token over plain HTTP was not refused with 403. Body: '
+            . (string) $response->getBody()
+        );
+        self::assertSame(
+            '{"code":"wpmcp_https_required","message":"HTTPS required.","data":{"status":403}}',
+            (string) $response->getBody(),
+            'The plaintext refusal body is not the fixed generic one.'
+        );
+
+        // The token was never looked up, so nothing about it is in the event either.
+        self::assertSame(
+            1,
+            TestRecorder::countOf(TestRecorder::AUTH . 'insecure_deny'),
+            'The plaintext refusal did not fire exactly one insecure_deny event.'
+        );
+        self::assertSame(
+            0,
+            TestRecorder::countOf(TestRecorder::AUTH . 'validate_fail'),
+            'The plaintext request reached token validation. The point of putting the'
+            . ' HTTPS gate first is that the credential is never read.'
+        );
     }
 
     /**

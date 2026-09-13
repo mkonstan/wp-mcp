@@ -97,11 +97,13 @@ jobs:
         # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
         # plain HTTP on port 8888, and the endpoint refuses every non-HTTPS request
         # before it reads the token. Without the constant the whole integration tier
-        # would answer 403 and every sprint-1 and sprint-2 test would fail for a reason
-        # that has nothing to do with the code. The HTTPS gate itself is covered by
-        # TransportGatesTest (which skips its plaintext case when WPMCP_TEST_URL is not
-        # https) and by the infra-trust suite, which is deliberately not run here - see
-        # phpunit.xml.dist.
+        # would answer 403 and every identity and transport test would fail for a reason
+        # that has nothing to do with the code.
+        #
+        # Which is also why the HTTPS gate's own two properties are NOT in this tier:
+        # a host with no TLS and the gate switched off cannot be asked about either.
+        # They live in the infra-trust suite, which fails rather than skips on such a
+        # host and is run by hand against production - see phpunit.xml.dist.
         run: npx --yes @wordpress/env start --debug
 
       - name: Enable pretty permalinks

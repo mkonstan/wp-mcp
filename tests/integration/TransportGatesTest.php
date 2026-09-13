@@ -15,6 +15,15 @@
  *     between. A refusal that happens AFTER the token is looked up has already put the
  *     credential in the hands of whoever was listening, so the gate has to be first.
  *
+ *     THE PLAINTEXT REFUSAL ITSELF IS NOT IN THIS CLASS. It needs a host that has TLS,
+ *     so that a downgrade to http is a different scheme on the same site, and it needs
+ *     the gate to be on. A container published on plain http with WPMCP_ALLOW_INSECURE
+ *     set, which is what this suite runs against in CI, has neither, and the question
+ *     cannot be asked there rather than answered wrongly. It lives in InfraTrustTest
+ *     alongside the X-Forwarded-Proto property, where a host without TLS FAILS the test
+ *     instead of skipping it. Only the control below, that the same token works, stays
+ *     here.
+ *
  *   Origin - WordPress REST inherits cookie+nonce assumptions and never looks at
  *     Origin. The MCP specification says MUST validate it and MUST reject with 403.
  *     An absent Origin is allowed on purpose: it is what curl, an MCP server and a CLI
@@ -82,64 +91,21 @@ final class TransportGatesTest extends FixtureIntegrationTestCase
      * The control. Everything below sends the same valid token, so this establishes
      * that the token itself is fine and that a refusal is the gate talking.
      *
+     * NOT named "over https": the scheme is whatever WPMCP_TEST_URL is, which in CI is
+     * plain http with WPMCP_ALLOW_INSECURE set. What it proves either way is that the
+     * token is accepted, so a 403 below came from the gate.
+     *
      * @group sprint-2
      */
-    public function testTheSameTokenWorksOverHttps(): void
+    public function testTheFixtureTokenIsAccepted(): void
     {
         $response = $this->mcp(self::$token)->post('tools/list');
 
         self::assertSame(
             200,
             $response->getStatusCode(),
-            'The fixture token does not work over HTTPS, so every refusal below would'
+            'The fixture token is not accepted at all, so every refusal below would'
             . ' prove nothing. Body: ' . (string) $response->getBody()
-        );
-    }
-
-    /**
-     * Item 2. The same token over plain HTTP is refused 403, with a body that says
-     * nothing about the token.
-     *
-     * @group sprint-2
-     */
-    public function testAValidTokenOverPlainHttpIsRefused(): void
-    {
-        $insecure = $this->insecureBaseUrl();
-
-        if ($insecure === '') {
-            self::markTestSkipped(
-                'WPMCP_TEST_URL is not https, so there is no plaintext request to make'
-                . ' that the HTTPS gate would refuse.'
-            );
-        }
-
-        TestRecorder::reset();
-
-        $response = $this->mcp(self::$token, $insecure)->post('tools/list');
-
-        self::assertSame(
-            403,
-            $response->getStatusCode(),
-            'A valid token over plain HTTP was not refused with 403. Body: '
-            . (string) $response->getBody()
-        );
-        self::assertSame(
-            '{"code":"wpmcp_https_required","message":"HTTPS required.","data":{"status":403}}',
-            (string) $response->getBody(),
-            'The plaintext refusal body is not the fixed generic one.'
-        );
-
-        // The token was never looked up, so nothing about it is in the event either.
-        self::assertSame(
-            1,
-            TestRecorder::countOf(TestRecorder::AUTH . 'insecure_deny'),
-            'The plaintext refusal did not fire exactly one insecure_deny event.'
-        );
-        self::assertSame(
-            0,
-            TestRecorder::countOf(TestRecorder::AUTH . 'validate_fail'),
-            'The plaintext request reached token validation. The point of putting the'
-            . ' HTTPS gate first is that the credential is never read.'
         );
     }
 
