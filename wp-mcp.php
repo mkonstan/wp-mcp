@@ -198,14 +198,9 @@ function wpmcp_install() {
     //
     // So: stamp, and say so once per attempt in the log, because a silent unexplained
     // leftover is how the next person loses an afternoon.
-    if (wpmcp_migrate_drop_address_column() === false) {
-        error_log(
-            'wp-mcp: could not drop the legacy bound_ip column from ' . wpmcp_table()
-            . '. The plugin is fully upgraded and works correctly; the column is unused'
-            . ' and can be dropped by hand. This usually means the database user has no'
-            . ' DROP privilege.'
-        );
-    }
+    // The function logs its own failure; the column's name belongs inside it. See the
+    // allow list in tests/unit/SurfaceSweepTest.php for why that matters.
+    wpmcp_migrate_drop_address_column();
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
     return true;
@@ -263,7 +258,20 @@ function wpmcp_migrate_drop_address_column() {
 
     if (!wpmcp_token_column_exists('bound_ip')) { return true; }
 
-    return $wpdb->query('ALTER TABLE ' . wpmcp_table() . ' DROP COLUMN bound_ip');
+    $dropped = $wpdb->query('ALTER TABLE ' . wpmcp_table() . ' DROP COLUMN bound_ip');
+
+    // SAID ONCE, HERE, rather than by the caller - because the message has to name the
+    // column, and this function is the one place in the plugin allowed to.
+    if ($dropped === false) {
+        error_log(
+            'wp-mcp: could not drop the unused legacy bound_ip column from '
+            . wpmcp_table() . '. The plugin is fully upgraded and works correctly; the'
+            . ' column is read by nothing and can be dropped by hand. The usual cause is'
+            . ' a database user with no DROP privilege.'
+        );
+    }
+
+    return $dropped;
 }
 
 /**
