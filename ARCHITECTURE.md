@@ -74,7 +74,8 @@ one thing.
 4.  Token shape      64 lower-case hex, from Authorization: Bearer -> 401
 5.  Token lookup     by SHA-256 hash                            -> 401
 6.  User exists      get_userdata(user_id)                      -> 401
-7.  Expiry           expires_at <= now                          -> 401
+7.  Timers           window closed -> 401 (dormant, renewable)
+                     lifetime over -> 401 (dead)               -> 401
 8.  Scope            a read token calling a write tool -> 200 with isError
 9.  Protocol version an MCP-Protocol-Version we do not speak -> 400 with -32600
 

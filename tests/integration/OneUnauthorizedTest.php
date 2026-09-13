@@ -76,8 +76,8 @@ final class OneUnauthorizedTest extends FixtureIntegrationTestCase
         self::$expiredToken = Fixtures::mintToken('read', self::expiredLabel(), self::$userId);
         self::$doomedToken  = Fixtures::mintToken('read', self::doomedLabel(), self::$doomedUserId);
 
-        // A real row, written by the real mint, with exactly one column moved.
-        Fixtures::expireTokensLabelled(self::expiredLabel());
+        // A real row, written by the real mint, with only its timers moved.
+        Fixtures::makeTokensDeadLabelled(self::expiredLabel());
 
         // And the one whose user stops existing.
         Fixtures::deleteUser(self::$doomedUserId);

@@ -2,6 +2,116 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.1.0
+
+**Unreleased.** The auth surface, rebuilt around what hosted MCP clients actually do.
+Three breaking changes, all in how a token is presented and how long it lives. The tools,
+the protocol negotiation and the wire format are untouched.
+
+Upgrading is one database migration (schema revision 3) that runs on the first request
+after the plugin files change. Existing tokens keep working exactly as they did until
+their old expiry, at which point they go dormant instead of vanishing - see below.
+
+### Breaking: the token travels in a header, and only in a header
+
+- The route whose path carried the token, `/wp-json/wpmcp/mcp/<token>`, **is gone**. A URL
+  with a token in it is now a plain REST `404`. Every client must send
+  `Authorization: Bearer <64 lowercase hex>` against the constant URL
+  `/wp-json/wpmcp/mcp`.
+- **Why.** A URL is written into every access log, proxy log and browser history it passes
+  through, and a hosted connector re-sends the same one for months. The path form existed
+  because Claude Desktop and claude.ai were believed to have no field for a request
+  header. Measured on a public test site on 2026-09-13, they do: the custom-connector
+  *Request headers* setting delivers `authorization: Bearer <token>` intact.
+- **What to change.** In a `.mcp.json`, move the token out of `url` and into a `headers`
+  map. With the Claude Code CLI, `claude mcp add --transport http wpmcp <url> --header
+  "Authorization: Bearer <token>"`. In claude.ai or Claude Desktop, *Add custom connector*
+  → the URL → Authentication *No sign-in* → a request header named `authorization` with
+  the value `Bearer <token>`.
+- If every request is now refused with `reason=missing` although the client is sending the
+  header, the web server is eating it: Apache running PHP as CGI or FastCGI does not pass
+  `Authorization` to PHP. WordPress's own `.htaccess` block re-exports it, and the plugin
+  now reads that re-export (`REDIRECT_HTTP_AUTHORIZATION`). Make sure the block is
+  present.
+
+### Breaking: no IP pinning
+
+- A token no longer locks to the address of its first tool call, and is no longer refused
+  from anywhere else. The `bound_ip` column, the `pin_bind` and `ip_mismatch` events and
+  the *Bound IP* admin column are all removed.
+- **Why.** On a public test site on 2026-09-13 an Anthropic-hosted connector was observed
+  calling from four egress addresses inside one minute - `160.79.106.164`, `.185`, `.186`,
+  `.187`. The pin bound the token to whichever arrived first and answered `401` to the
+  rest of the session. There is no single address to hold a token to.
+- The caller's address is still recorded on every auth event. It decides nothing. Behind a
+  proxy, use the `wpmcp_client_ip` filter so the log is worth reading.
+- **What this costs**, stated plainly: a token copied out of a log is now usable from
+  anywhere. The credential being a header rather than a URL, and the short active window
+  below, are what carry that weight instead.
+
+### Breaking: two timers per token, and Renew
+
+- A token now has an **active window** and a **lifetime**, and the old single expiry is
+  neither of them on its own.
+  - *Active window*: 6 hours by default, 12 at most. While it is open the token answers.
+    When it closes the token is **dormant** - refused exactly like any other bad
+    credential, but its row survives and **Renew** restarts the window. The token itself
+    does not change, so nothing holding it has to be edited.
+  - *Lifetime*: 30 days by default, 365 at most. Past it the token is **dead**: Renew is
+    refused and the hourly cleanup removes the row.
+- **Why.** One expiry had to be short enough to bound a leak and long enough that a
+  connector was not re-added twice a day, and claude.ai cannot edit a connector's header
+  after the fact - so a new token means a new connector. Splitting the two lets the short
+  number stay short.
+- `wpmcp_mint()` takes two durations instead of one:
+  `wpmcp_mint($scope, $label, $window_secs, $lifetime_secs, $user_id = 0)`. Any code
+  calling it must be updated. `WPMCP_MAX_TTL` is replaced by `WPMCP_MAX_WINDOW` (12 h) and
+  `WPMCP_MAX_LIFETIME` (365 d).
+- `wpmcp_renew(int $id)` restarts a token's window. It works on an active or a dormant
+  row, is refused on a dead one, and can never push the window past the lifetime.
+- A refused token's row is **no longer deleted** when it is presented. That deletion is
+  what made Renew impossible: by the time an admin saw the `401` there was nothing left to
+  renew. Dead rows are removed by the hourly `wpmcp_flush_expired` cron, which leaves
+  dormant rows alone.
+- The auth events gain `renew` (`token_id`, `user_id`, `actor`, `window`); `mint` now
+  carries `window` and `lifetime` instead of `ttl`; `validate_fail` gains the reason
+  `dormant`. The full reason list is `missing`, `malformed`, `not_found`, `user_missing`,
+  `dormant`, `expired` - all six are still one byte-identical `401` on the wire.
+
+### Schema revision 3
+
+Run automatically on the first request after the update, and idempotent.
+
+- Adds `active_until` and `window_secs`; `expires_at` keeps its name and now means the
+  hard lifetime.
+- Backfills every existing row so it behaves exactly as it did: `active_until` becomes the
+  old `expires_at`, and `window_secs` becomes however long the token was originally
+  granted. A token minted for twelve hours still answers for those twelve hours - it then
+  goes dormant rather than being deleted, and can be renewed.
+- Drops `bound_ip`, with an explicit `ALTER TABLE` guarded by a column-exists check,
+  because `dbDelta()` only ever adds and widens and cannot drop a column.
+- The revision is recorded only once every column exists and every backfill has succeeded,
+  so a failed migration is retried on the next request rather than stamped and forgotten.
+
+### Admin page
+
+- The mint form asks for an active window in hours and a lifetime in days.
+- The token is shown once, with the constant URL, the `Authorization` header line, a
+  three-step recipe for a claude.ai or Claude Desktop custom connector, and the equivalent
+  `claude mcp add` line.
+- The table gains **Status** (active / dormant / dead), *Active until* and *Lifetime
+  ends*, and a **Renew** button beside Revoke on every row that is not dead.
+
+### Docs and tooling
+
+- `docs/CONNECT-CLIENTS.md` carries the connector recipe, the measured claude.ai
+  behaviour (the header arrives intact, it cannot be edited afterwards, and *Connect*
+  probes the URL with no credential at all - one `reason=missing` line at connect time is
+  normal), the Apache `.htaccess` fix, and the renew workflow.
+- `bin/claude-code-smoke.sh` uses the header form.
+- README, SECURITY, ARCHITECTURE, CONFORMANCE and the knowledge base are updated
+  throughout.
+
 ## 1.0.0
 
 First release with a stable tool contract. Requires WordPress 5.5 and PHP 8.1.

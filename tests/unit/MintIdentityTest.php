@@ -16,6 +16,11 @@
  * back, so the assertion is on the row that would be written - which is where the
  * identity actually lives.
  *
+ * The two timer arguments (Sprint 7) are passed but never asserted here: this class is
+ * about WHO a token runs as, and the window and lifetime have their own class in
+ * TokenLifetimeTest. They are spelled out rather than defaulted so that a future change
+ * to either default cannot silently change what these tests mint.
+ *
  * @group sprint-1
  */
 
@@ -49,7 +54,7 @@ final class MintIdentityTest extends TestCase
     {
         WordPressRuntime::logInAs(7, 'wpmcp-unit-admin');
 
-        $minted = \wpmcp_mint('read', 'default owner', 3600);
+        $minted = \wpmcp_mint('read', 'default owner', 3600, 30 * 86400);
 
         self::assertIsArray($minted, 'Minting for the current user should succeed.');
 
@@ -71,7 +76,7 @@ final class MintIdentityTest extends TestCase
         WordPressRuntime::addUser(9, 'wpmcp-unit-editor');
         WordPressRuntime::allowCap('edit_user:9');
 
-        $minted = \wpmcp_mint('read', 'for the editor', 3600, 9);
+        $minted = \wpmcp_mint('read', 'for the editor', 3600, 30 * 86400, 9);
 
         self::assertIsArray($minted, 'Minting for another existing user should succeed.');
 
@@ -90,7 +95,7 @@ final class MintIdentityTest extends TestCase
     {
         WordPressRuntime::logInAs(1, 'wpmcp-unit-admin');
 
-        $result = \wpmcp_mint('read', 'ghost', 3600, 4242);
+        $result = \wpmcp_mint('read', 'ghost', 3600, 30 * 86400, 4242);
 
         self::assertTrue(\is_wp_error($result), 'Minting for user 4242 should be a WP_Error.');
         self::assertSame('wpmcp_no_such_user', $result->get_error_code());
@@ -119,7 +124,7 @@ final class MintIdentityTest extends TestCase
         WordPressRuntime::addUser(9, 'wpmcp-unit-superadmin');
         // No edit_user granted.
 
-        $result = \wpmcp_mint('read', 'escalation attempt', 3600, 9);
+        $result = \wpmcp_mint('read', 'escalation attempt', 3600, 30 * 86400, 9);
 
         self::assertTrue(\is_wp_error($result), 'Minting for user 9 should be a WP_Error.');
         self::assertSame('wpmcp_not_allowed', $result->get_error_code());
@@ -142,7 +147,7 @@ final class MintIdentityTest extends TestCase
         WordPressRuntime::logInAs(7, 'wpmcp-unit-author');
         // No caps at all.
 
-        $explicit = \wpmcp_mint('read', 'own, by id', 3600, 7);
+        $explicit = \wpmcp_mint('read', 'own, by id', 3600, 30 * 86400, 7);
         self::assertIsArray($explicit, 'Minting for oneself by id was refused.');
         self::assertSame(7, $this->wpdb->lastInsertData()['user_id']);
     }
@@ -157,7 +162,7 @@ final class MintIdentityTest extends TestCase
     {
         WordPressRuntime::setCurrentUserId(0);
 
-        $result = \wpmcp_mint('read', 'nobody', 3600);
+        $result = \wpmcp_mint('read', 'nobody', 3600, 30 * 86400);
 
         self::assertTrue(\is_wp_error($result), 'Minting with no current user should be a WP_Error.');
         self::assertSame('wpmcp_no_such_user', $result->get_error_code());

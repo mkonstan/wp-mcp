@@ -320,7 +320,8 @@ function wpmcp_unauthorized() {
  *   4. token shape      64 lower-case hex, from Authorization: Bearer -> 401
  *   5. token lookup     by SHA-256 hash                            -> 401
  *   6. user exists      get_userdata(user_id)                      -> 401
- *   7. expiry           expires_at <= now                          -> 401
+ *   7. lifetime timers  window closed -> 401 (dormant); past the hard
+ *                       end -> 401 (dead). Same 401 either way.     -> 401
  *   8. scope            enforced at dispatch, in wpmcp_handle()
  *   9. protocol version enforced at dispatch, in wpmcp_dispatch()
  *

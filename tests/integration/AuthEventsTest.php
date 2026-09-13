@@ -99,8 +99,8 @@ final class AuthEventsTest extends FixtureIntegrationTestCase
             . ' add_action("wpmcp_auth_event", function ($type, $context) use (&$seen) {'
             . '  $seen[] = array("type" => $type, "context" => $context);'
             . ' }, 10, 2);'
-            . ' $minted = wpmcp_mint("read", ' . self::phpString(self::mintLabel()) . ', 3600, '
-            . (int) self::$userId . ');'
+            . ' $minted = wpmcp_mint("read", ' . self::phpString(self::mintLabel())
+            . ', 3600, 30 * DAY_IN_SECONDS, ' . (int) self::$userId . ');'
             . ' if (is_wp_error($minted)) { echo wp_json_encode(array("error" => $minted->get_error_message())); return; }'
             . ' $revoked = wpmcp_revoke($minted["id"]);'
             . ' echo wp_json_encode(array('

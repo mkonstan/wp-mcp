@@ -6,7 +6,11 @@ WP MCP exists to let an AI assistant reach a WordPress site without handing it a
 
 - **256 bits of randomness** (`random_bytes(32)`), so guessing or brute force is not a threat.
 - **Stored as a SHA-256 hash, never in plaintext.** The raw token is shown once at mint and never again. A read-only database compromise (a SQL-injection elsewhere, a leaked backup) exposes zero usable tokens.
-- **Hard expiry, capped at 12 hours**, enforced on every request, not just by a cleanup cron. An expired token is deleted the moment it is presented.
+- **Two timers, both enforced on every request** rather than by a cleanup cron.
+  - The **active window** (6 h by default, 12 h maximum) is how long the token answers. When it elapses the token is **dormant**: refused like any other bad credential, its row kept, and an admin's **Renew** restarts the window without changing the token. This is the number that bounds the damage of a leak, and it stays short precisely because Renew exists.
+  - The **lifetime** (30 days by default, 365 maximum) is the hard end. Past it the token is **dead**: not renewable, and removed by the hourly cleanup.
+  - Both are the same anonymous `401` to the caller. Which one ran out appears only in the auth log, as `reason=dormant` or `reason=expired`.
+  - Renew can never push the window past the lifetime, so a short window renewed indefinitely cannot outlive the hard end.
 - **Bound to a WordPress user**, chosen at mint time. The request runs as that user, so that user's capabilities are the ceiling on what the token can reach. Deleting the user stops the token working.
 - **Scope: `read` or `admin`**, narrowing from there. Read tokens are refused every write and code tool, and those tools are not even listed to them. Scope only subtracts; it cannot grant a capability the user does not have.
 
@@ -18,7 +22,7 @@ Measured on a public test site on 2026-09-13: an Anthropic-hosted connector (cla
 
 The caller's address is still recorded on every auth event, where an operator can read it. It decides nothing.
 
-**What this costs.** A token copied out of a log or intercepted is usable from anywhere. Two things carry that weight instead: the credential is a request header rather than a URL, so it is not written to access logs in the first place, and expiry is enforced on every request. Mint `read` unless you need writes.
+**What this costs.** A token copied out of a log or intercepted is usable from anywhere. Two things carry that weight instead: the credential is a request header rather than a URL, so it is not written to access logs in the first place, and the active window - short, because Renew makes a short one practical - is enforced on every request. Mint `read` unless you need writes.
 
 ## Dormant by default
 

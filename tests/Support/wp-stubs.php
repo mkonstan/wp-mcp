@@ -18,8 +18,13 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('HOUR_IN_SECONDS')) {
-    // Needed at load time by define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS).
+    // Needed at load time by define('WPMCP_MAX_WINDOW', 12 * HOUR_IN_SECONDS).
     define('HOUR_IN_SECONDS', 3600);
+}
+
+if (!defined('DAY_IN_SECONDS')) {
+    // Sprint 7: define('WPMCP_MAX_LIFETIME', 365 * DAY_IN_SECONDS).
+    define('DAY_IN_SECONDS', 86400);
 }
 
 if (!function_exists('register_activation_hook')) {

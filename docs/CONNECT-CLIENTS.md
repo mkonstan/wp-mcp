@@ -93,9 +93,15 @@ active on it.
 3. Runs as: the WordPress user the token authenticates as. That user's capabilities are the
    ceiling on everything the connector can see or do.
 4. Label: something you will recognise in the token table.
-5. Expires in (hours): 12 is a hard cap with no override. Claude cannot edit a connector's
-   header after the connector is added, so when the token expires you mint another and
-   delete and re-add the connector.
+5. Active window (hours): 6 by default, 12 at most. This is how long the token answers
+   before it goes **dormant** - refused, but renewable in one click, with the token itself
+   unchanged. Lifetime (days): 30 by default, 365 at most; that is the hard end, past which
+   the token is **dead** and only a new mint helps.
+
+   For a connector, take the defaults or raise the lifetime. Claude cannot edit a
+   connector's request header once the connector has been added, so a new *token* means
+   deleting and re-adding the connector - while a Renew costs one click and the connector
+   never notices. Short window, long lifetime, Renew when it goes dormant.
 6. Generate token. The green notice shows it once, with the URL, the header line and the
    recipe below already filled in. The site stores only a SHA-256 hash and cannot show the
    token again.
@@ -187,7 +193,8 @@ accepted request writes nothing at all, so silence after a working connection is
 | `insecure_deny` | The request arrived as plain HTTP. | The URL must be `https://`. |
 | `content_type_deny content_type=...` | The POST was not `application/json`. | A client bug. Report the value. |
 | `validate_fail reason=missing` | No `Authorization: Bearer` header reached PHP. | Normal once, during a claude.ai *Connect* probe. Every time means the client is not sending it, or Apache under CGI/FastCGI is eating it - see the `.htaccess` block in section 2. |
-| `validate_fail reason=expired` | 12 hours are up. | Mint a new token, then delete and re-add the connector with the new header value. |
+| `validate_fail reason=dormant` | The active window has closed. | Press **Renew** on that row in Settings > WP MCP. The token does not change, so the connector needs no edit. |
+| `validate_fail reason=expired` | The token is past its hard lifetime. | Mint a new token, then delete and re-add the connector with the new header value. |
 | `validate_fail reason=not_found` | The token is not in the table. | A truncated paste, or the row was revoked. |
 | HTTP 400, `-32600`, "Unsupported MCP-Protocol-Version" | The client declared a revision this server does not speak. | The message names the three it does. There is nothing to configure, so report the value. |
 
@@ -195,6 +202,6 @@ accepted request writes nothing at all, so silence after a working connection is
 
 ## 4. Afterwards
 
-Revoke the token in Settings > WP MCP, with the revoke button on that row. It would expire
-within 12 hours anyway, but a connector you are done with is a credential nobody is
-watching.
+Revoke the token in Settings > WP MCP, with the revoke button on that row. Its active
+window would close within hours anyway, but a dormant token is a renewable one, and a
+connector you are done with is a credential nobody is watching.

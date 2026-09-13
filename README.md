@@ -53,14 +53,32 @@ else: the write tools are not listed to it, and are refused if it calls one anyw
 code editing is switched on. Scope only subtracts. It cannot hand a token a capability its
 user does not have.
 
-**Expires in** is capped at 12 hours with no override. The client stops working when the
-token expires; you mint another and paste it again.
+**Active window** and **Lifetime** are two separate timers, and the split is what lets a
+token be both short-lived and long-lived at once.
+
+The *active window* - 6 hours by default, 12 at most - is how long the token answers.
+When it elapses the token goes **dormant**: refused with the same anonymous `401` as any
+other bad credential, but its row stays in the table and **Renew** restarts the window.
+The token itself never changes, so whatever is holding it needs no edit.
+
+The *lifetime* - 30 days by default, 365 at most - is the hard end. Past it the token is
+**dead**: Renew is not offered, the hourly cleanup removes the row, and the only way on is
+a new token.
+
+That is the shape the clients need. claude.ai and Claude Desktop cannot edit a connector's
+request header once the connector has been added, so replacing a token means deleting and
+re-adding the connector; with one timer, a cap short enough to matter made that a
+twice-daily chore. Renew moves the window without touching the credential.
 
 **Label** is for you, so the active-tokens table means something a day later.
 
 The token is shown once. Only its SHA-256 hash is stored, so the page cannot show it
-again. The table below it lists what is live, the user each token runs as, the IP it bound
-to and its last use, with a revoke button per row.
+again. The table below it lists what is live, the user each token runs as, each token's
+state (active / dormant / dead), when its window and its lifetime end, and its last use,
+with **Renew** and **Revoke** buttons per row.
+
+When a client starts getting `401`, the table is where you find out which timer ran out:
+dormant needs Renew and nothing else, dead needs a new token and one edit of the client.
 
 ## Connect a client
 
@@ -273,12 +291,13 @@ token can fail are one byte-identical 401, and the reason lives here. It receive
 type and a context array, and every context carries `ip`.
 
 There is no success event. A request that is accepted fires nothing at all, so an audit
-listener that waits for an "ok" waits forever. The nine types:
+listener that waits for an "ok" waits forever. The ten types:
 
 | `$type` | Fired when | Context beyond `ip` |
 |---|---|---|
-| `mint` | a token was created | `token_id`, `user_id`, `created_by`, `scope`, `ttl` |
+| `mint` | a token was created | `token_id`, `user_id`, `created_by`, `scope`, `window`, `lifetime` |
 | `revoke` | a token row was deleted | `token_id`, `user_id` |
+| `renew` | a token's active window was restarted | `token_id`, `user_id`, `actor`, `window` |
 | `validate_fail` | a token was refused | `reason`, sometimes `token_id` and `user_id` |
 | `scope_deny` | a read token asked for a write tool | `token_id`, `user_id`, `tool`, `scope` |
 | `origin_deny` | the `Origin` header was not one of ours | `origin` |
@@ -288,7 +307,9 @@ listener that waits for an "ok" waits forever. The nine types:
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
 
 `reason` on `validate_fail` is one of `missing`, `malformed`, `not_found`, `user_missing`,
-`expired`. A context never contains a token or its hash.
+`dormant`, `expired`. The last two are the same `401` on the wire and different advice to
+the operator: `dormant` means press Renew, `expired` means mint. A context never contains a
+token or its hash.
 
 ```php
 add_action('wpmcp_auth_event', function ($type, $context) {

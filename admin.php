@@ -39,6 +39,67 @@ function wpmcp_endpoint_url() {
     return set_url_scheme(rest_url('wpmcp/mcp'), 'https');
 }
 
+/**
+ * The mint form's "Active window (hours)" field, in seconds.
+ *
+ * SEPARATE FROM wpmcp_mint()'s OWN CLAMP, and not a duplicate of it. This one speaks the
+ * form's units (hours, halves) and has to answer for a field that is empty, absent or
+ * nonsense, which is a question the API has no view on. wpmcp_mint() clamps again;
+ * defence in depth costs one max() and means a caller that never touches the form cannot
+ * write an out-of-range window either.
+ *
+ * SIX HOURS IS THE DEFAULT because that is the normal case: a token on somebody's laptop
+ * that should stop answering by the end of the working day. Twelve is the ceiling, and
+ * the way to keep a connector alive past it is Renew, not a longer window.
+ */
+function wpmcp_form_window_secs($hours) {
+    if ($hours === null || $hours === '' || !is_numeric($hours)) {
+        return 6 * HOUR_IN_SECONDS;
+    }
+
+    $hours = min(12.0, max(0.5, (float) $hours));
+
+    return (int) round($hours * HOUR_IN_SECONDS);
+}
+
+/**
+ * The mint form's "Lifetime (days)" field, in seconds.
+ *
+ * THIRTY DAYS IS THE DEFAULT because the field exists for connectors, and a connector
+ * that has to be deleted and re-added more often than monthly is a connector nobody
+ * keeps. A year is the ceiling: past that a credential nobody has looked at is not a
+ * credential anybody is managing.
+ */
+function wpmcp_form_lifetime_secs($days) {
+    if ($days === null || $days === '' || !is_numeric($days)) {
+        return 30 * DAY_IN_SECONDS;
+    }
+
+    $days = min(365, max(1, (int) $days));
+
+    return $days * DAY_IN_SECONDS;
+}
+
+/**
+ * A duration as something a human reads in a table cell: "6 h", "30 d", "45 m".
+ *
+ * Whole units only, largest that fits. The table is a glance, not an audit; the exact
+ * timestamps are in the two datetime columns beside it.
+ */
+function wpmcp_format_duration($seconds) {
+    $seconds = (int) $seconds;
+
+    if ($seconds >= DAY_IN_SECONDS && $seconds % DAY_IN_SECONDS === 0) {
+        return (int) ($seconds / DAY_IN_SECONDS) . ' d';
+    }
+
+    if ($seconds >= HOUR_IN_SECONDS) {
+        return rtrim(rtrim(number_format($seconds / HOUR_IN_SECONDS, 1, '.', ''), '0'), '.') . ' h';
+    }
+
+    return max(1, (int) round($seconds / MINUTE_IN_SECONDS)) . ' m';
+}
+
 function wpmcp_render_admin() {
     if (!current_user_can('manage_options')) { wp_die('Insufficient permissions.'); }
 
@@ -49,12 +110,12 @@ function wpmcp_render_admin() {
     if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'mint') {
         check_admin_referer('wpmcp_mint');
         $scope = (isset($_POST['scope']) && $_POST['scope'] === 'admin') ? 'admin' : 'read';
-        $label = isset($_POST['label']) ? wp_unslash($_POST['label']) : '';
-        $hours = isset($_POST['hours']) ? (float) $_POST['hours'] : 12;
-        $ttl   = (int) round(min(12, max(0.0167, $hours)) * HOUR_IN_SECONDS); // up to 12h
+        $label    = isset($_POST['label']) ? wp_unslash($_POST['label']) : '';
+        $window   = wpmcp_form_window_secs($_POST['window_hours'] ?? null);
+        $lifetime = wpmcp_form_lifetime_secs($_POST['lifetime_days'] ?? null);
         // 0 -> the minting admin. wpmcp_mint() rejects an ID with no user behind it.
         $owner = isset($_POST['wpmcp_user_id']) ? (int) $_POST['wpmcp_user_id'] : 0;
-        $res   = wpmcp_mint($scope, $label, $ttl, $owner);
+        $res   = wpmcp_mint($scope, $label, $window, $lifetime, $owner);
         if (is_wp_error($res)) {
             $notice = 'Error: ' . esc_html($res->get_error_message());
         } else {
@@ -63,7 +124,8 @@ function wpmcp_render_admin() {
                 'url'      => wpmcp_endpoint_url(),
                 'raw'      => $res['raw'],
                 'scope'    => $scope,
-                'hours'    => $hours,
+                'window'   => wpmcp_format_duration($window),
+                'lifetime' => wpmcp_format_duration($lifetime),
                 'owner'    => $owner_user ? $owner_user->user_login : '',
             );
         }
@@ -74,6 +136,16 @@ function wpmcp_render_admin() {
         check_admin_referer('wpmcp_revoke');
         wpmcp_revoke((int) $_POST['id']);
         $notice = 'Token revoked.';
+    }
+
+    // Handle renew. Its own nonce, so a revoke form cannot be replayed as a renew.
+    if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'renew' && isset($_POST['id'])) {
+        check_admin_referer('wpmcp_renew');
+        $renewed = wpmcp_renew((int) $_POST['id']);
+        $notice  = is_wp_error($renewed)
+            ? 'Could not renew: ' . $renewed->get_error_message()
+            : 'Token renewed - its active window runs again until ' . $renewed . ' UTC.'
+              . ' The token itself did not change, so the client needs no edit.';
     }
 
     // Handle code-editing settings save
@@ -163,9 +235,20 @@ function wpmcp_render_admin() {
             <td><input name="label" id="wpmcp-label" type="text" class="regular-text" placeholder="e.g. claude code"></td>
           </tr>
           <tr>
-            <th scope="row"><label for="wpmcp-hours">Expires in (hours)</label></th>
-            <td><input name="hours" id="wpmcp-hours" type="number" min="0.5" max="12" step="0.5" value="12">
-              <p class="description">Hard cap 12h.</p></td>
+            <th scope="row"><label for="wpmcp-window">Active window (hours)</label></th>
+            <td><input name="window_hours" id="wpmcp-window" type="number" min="0.5" max="12" step="0.5" value="6">
+              <p class="description">How long the token answers before it goes
+                 <strong>dormant</strong>. A dormant token is refused like any other bad
+                 credential, but its row stays here and <strong>Renew</strong> restarts
+                 the window &mdash; the token itself never changes, so the client does not
+                 have to be touched. Hard cap 12 h.</p></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="wpmcp-lifetime">Lifetime (days)</label></th>
+            <td><input name="lifetime_days" id="wpmcp-lifetime" type="number" min="1" max="365" step="1" value="30">
+              <p class="description">The hard end. Past it the token is <strong>dead</strong>:
+                 Renew is not offered and the row is cleaned up within the hour. Hard cap
+                 365 days.</p></td>
           </tr>
         </table>
         <?php submit_button('Generate token'); ?>
@@ -182,7 +265,12 @@ function wpmcp_render_admin() {
           </p>
           <p>Runs as: <strong><?php echo esc_html($minted['owner']); ?></strong> &middot;
              Scope: <strong><?php echo esc_html($minted['scope']); ?></strong> &middot;
-             Expires in <strong><?php echo esc_html((string) $minted['hours']); ?>h</strong></p>
+             Active window: <strong><?php echo esc_html($minted['window']); ?></strong> &middot;
+             Lifetime: <strong><?php echo esc_html($minted['lifetime']); ?></strong></p>
+          <p class="description">When a client starts getting <code>401</code>, look at
+             the Status column below before assuming anything is broken:
+             <strong>dormant</strong> needs Renew and nothing else,
+             <strong>dead</strong> needs a new token and one edit of the client.</p>
 
           <?php if (wpmcp_site_is_https()): ?>
             <p style="margin-top:14px"><strong>The two things a client needs</strong> &mdash;
@@ -199,8 +287,9 @@ function wpmcp_render_admin() {
                   <code>Bearer <?php echo esc_html($minted['raw']); ?></code></li>
             </ol>
             <p class="description">Claude cannot edit that header after the connector is
-               added: changing the token means deleting the connector and adding it
-               again.</p>
+               added, so give a connector a long lifetime and use <strong>Renew</strong>
+               below when it goes dormant. Changing the <em>token</em> means deleting the
+               connector and adding it again.</p>
 
             <p style="margin-top:14px"><strong>Claude Code</strong>:</p>
             <p><code>claude mcp add --transport http wpmcp <?php echo esc_html($minted['url']); ?> --header "Authorization: Bearer <?php echo esc_html($minted['raw']); ?>"</code></p>
@@ -215,29 +304,43 @@ function wpmcp_render_admin() {
       <h2>Active &amp; recent tokens</h2>
       <table class="widefat striped">
         <thead><tr>
-          <th>Label</th><th>Owner</th><th>Scope</th><th>Created (UTC)</th><th>Expires (UTC)</th>
+          <th>Label</th><th>Owner</th><th>Scope</th><th>Status</th>
+          <th>Active until (UTC)</th><th>Lifetime ends (UTC)</th>
           <th>Last used</th><th>Uses</th><th></th>
         </tr></thead>
         <tbody>
         <?php if (!$rows): ?>
-          <tr><td colspan="8"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
+          <tr><td colspan="9"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
         <?php else: foreach ($rows as $r):
-            $expired = strtotime($r->expires_at . ' UTC') <= time();
+            $state = wpmcp_token_state($r);
             // A deleted user leaves the id behind; say so rather than printing a bare
             // number, because such a token is dead and the admin needs to know why.
             $owner = get_userdata((int) $r->user_id); ?>
-          <tr<?php echo $expired ? ' style="opacity:.5"' : ''; ?>>
+          <tr<?php echo $state === 'dead' ? ' style="opacity:.5"' : ''; ?>>
             <td><?php echo esc_html($r->label); ?></td>
             <td><?php echo $owner
                 ? esc_html($owner->user_login)
                 : '<em>' . esc_html('deleted user #' . (int) $r->user_id) . '</em>'; ?></td>
             <td><?php echo esc_html($r->scope); ?></td>
-            <td><?php echo esc_html($r->created_at); ?></td>
-            <td><?php echo esc_html($r->expires_at) . ($expired ? ' (expired)' : ''); ?></td>
+            <td><?php echo esc_html($state); ?></td>
+            <td><?php echo esc_html($r->active_until); ?>
+                <span class="description">(<?php echo esc_html(wpmcp_format_duration($r->window_secs)); ?>)</span></td>
+            <td><?php echo esc_html($r->expires_at); ?></td>
             <td><?php echo esc_html($r->last_used_at ? $r->last_used_at : '-'); ?></td>
             <td><?php echo (int) $r->use_count; ?></td>
-            <td>
-              <form method="post" style="margin:0">
+            <td style="white-space:nowrap">
+              <?php // RENEW IS OFFERED ONLY WHERE IT CAN WORK. A dead row has nothing
+                    // left to extend - wpmcp_renew() refuses one - so showing the button
+                    // would be offering an action that answers with an error. ?>
+              <?php if ($state !== 'dead'): ?>
+                <form method="post" style="display:inline;margin:0">
+                  <?php wp_nonce_field('wpmcp_renew'); ?>
+                  <input type="hidden" name="wpmcp_action" value="renew">
+                  <input type="hidden" name="id" value="<?php echo (int) $r->id; ?>">
+                  <button class="button button-small button-primary">Renew</button>
+                </form>
+              <?php endif; ?>
+              <form method="post" style="display:inline;margin:0">
                 <?php wp_nonce_field('wpmcp_revoke'); ?>
                 <input type="hidden" name="wpmcp_action" value="revoke">
                 <input type="hidden" name="id" value="<?php echo (int) $r->id; ?>">

@@ -118,7 +118,12 @@ echo "smoke: expecting the tool to report site name '${BLOGNAME}' and WordPress 
 # A READ-SCOPE token, minted for user 1 exactly as Settings > WP MCP would. Read scope is
 # the point: this gate is about the handshake and the tool surface, and a write token would
 # put a destructive tool in a live agent's hands for no extra assurance.
-TOKEN="$(wp eval "\$r = wpmcp_mint('read', '${LABEL}', 900, 1); echo is_wp_error(\$r) ? 'MINT-ERROR: ' . \$r->get_error_message() : \$r['raw'];" --user=1 | tr -d '\r')"
+# A FIFTEEN-MINUTE ACTIVE WINDOW INSIDE A ONE-DAY LIFETIME. The window is what the gate
+# needs - one run takes seconds - and the lifetime is the shortest the model allows, so a
+# token this script somehow fails to revoke is rubbish within the day rather than within
+# the year. The two arguments are the sprint-7 shape: wpmcp_mint(scope, label, window,
+# lifetime, user).
+TOKEN="$(wp eval "\$r = wpmcp_mint('read', '${LABEL}', 900, DAY_IN_SECONDS, 1); echo is_wp_error(\$r) ? 'MINT-ERROR: ' . \$r->get_error_message() : \$r['raw'];" --user=1 | tr -d '\r')"
 
 case "$TOKEN" in
     [0-9a-f][0-9a-f]*) ;;
@@ -130,7 +135,7 @@ if [ ${#TOKEN} -ne 64 ]; then
     exit 1
 fi
 
-echo "smoke: token minted (read scope, 15 min, label ${LABEL})."
+echo "smoke: token minted (read scope, 15 min window, 1 day lifetime, label ${LABEL})."
 
 # ---------------------------------------------------------------- the client's config
 #

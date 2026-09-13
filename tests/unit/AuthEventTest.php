@@ -50,7 +50,7 @@ final class AuthEventTest extends TestCase
     {
         WordPressRuntime::logInAs(7, 'wpmcp-unit-admin');
 
-        $minted = \wpmcp_mint('admin', 'unit mint event', 3600);
+        $minted = \wpmcp_mint('admin', 'unit mint event', 3600, 30 * 86400);
         self::assertIsArray($minted, 'Minting for the current user should succeed.');
 
         $fired = WordPressRuntime::firedActions('wpmcp_auth_event');

@@ -291,6 +291,12 @@ final class Fixtures
      * eval` echoes it on stdout; there is no other way to get one without
      * reimplementing the hash.
      *
+     * A ONE-HOUR ACTIVE WINDOW INSIDE A THIRTY-DAY LIFETIME. Both are spelled out
+     * rather than left to the admin form's defaults, so a change to either default
+     * cannot silently change what every integration fixture mints. The tests that care
+     * about a closed window or a finished lifetime move the row afterwards - see
+     * makeTokensDormantLabelled() and makeTokensDeadLabelled().
+     *
      * AS USER 1. wpmcp_mint() requires edit_user over the target when minting for
      * somebody else, and wp-cli has no current user at all - so an unattributed
      * `wp eval` is refused, correctly. User 1 is the site's original administrator,
@@ -304,7 +310,8 @@ final class Fixtures
 
         $raw = WpCli::evaluate(
             sprintf(
-                '$r = wpmcp_mint(%s, %s, 3600, %d); echo is_wp_error($r) ? "MINT-ERROR: " . $r->get_error_message() : $r["raw"];',
+                '$r = wpmcp_mint(%s, %s, 3600, 30 * DAY_IN_SECONDS, %d);'
+                . ' echo is_wp_error($r) ? "MINT-ERROR: " . $r->get_error_message() : $r["raw"];',
                 self::phpString($scope),
                 self::phpString($label),
                 $userId
@@ -336,21 +343,74 @@ final class Fixtures
     }
 
     /**
-     * Backdate every token with this label so it is expired on the next request.
+     * Close the active window of every token with this label: DORMANT, with its hard
+     * lifetime still ahead of it.
      *
-     * wpmcp_mint() clamps the TTL to at least 60 seconds, so an already-expired token
-     * cannot be minted - and waiting a minute in a test is not an option. The row is
-     * written by the real mint and only its expires_at is moved, so the request under
-     * test takes the genuine expiry branch.
+     * wpmcp_mint() clamps the window to at least 60 seconds, so a token that is dormant
+     * on arrival cannot be minted - and waiting a minute in a test is not an option. The
+     * row is written by the real mint and only active_until is moved, so the request
+     * under test takes the genuine dormant branch and the row stays renewable.
      */
-    public static function expireTokensLabelled(string $label): void
+    public static function makeTokensDormantLabelled(string $label): void
     {
         self::assertPrefixed($label);
 
         WpCli::evaluate(sprintf(
             'global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
-            . '"UPDATE " . wpmcp_table() . " SET expires_at = %%s WHERE label = %%s",'
+            . '"UPDATE " . wpmcp_table() . " SET active_until = %%s WHERE label = %%s",'
             . ' gmdate("Y-m-d H:i:s", time() - 3600), %s));',
+            self::phpString($label)
+        ));
+    }
+
+    /**
+     * Move every token with this label past its hard lifetime: DEAD. Both timers are
+     * moved, because a row whose lifetime has passed and whose window has not is a shape
+     * the plugin never writes, and a fixture should not invent one.
+     *
+     * @param int $secondsAgo how long ago the lifetime ended. The cron's own tests pass
+     *                        different values on either side of nothing in particular -
+     *                        dead is dead - but a test that wants a row clearly in the
+     *                        past rather than at this exact second can say so.
+     */
+    public static function makeTokensDeadLabelled(string $label, int $secondsAgo = 3600): void
+    {
+        self::assertPrefixed($label);
+
+        WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
+            . '"UPDATE " . wpmcp_table()'
+            . ' . " SET active_until = %%s, expires_at = %%s WHERE label = %%s",'
+            . ' gmdate("Y-m-d H:i:s", time() - %d), gmdate("Y-m-d H:i:s", time() - %d), %s));',
+            $secondsAgo,
+            $secondsAgo,
+            self::phpString($label)
+        ));
+    }
+
+    /**
+     * How many rows carry this label. The renew and purge tests assert on row SURVIVAL,
+     * which is the property that separates dormant from dead.
+     */
+    public static function countTokensLabelled(string $label): int
+    {
+        self::assertPrefixed($label);
+
+        return (int) WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare('
+            . '"SELECT COUNT(*) FROM " . wpmcp_table() . " WHERE label = %%s", %s));',
+            self::phpString($label)
+        ));
+    }
+
+    /** The id of the (single) token carrying this label, or 0. */
+    public static function tokenIdLabelled(string $label): int
+    {
+        self::assertPrefixed($label);
+
+        return (int) WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare('
+            . '"SELECT id FROM " . wpmcp_table() . " WHERE label = %%s ORDER BY id DESC LIMIT 1", %s));',
             self::phpString($label)
         ));
     }

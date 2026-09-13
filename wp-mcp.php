@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
- * Version: 1.0.0
+ * Version: 1.1.0
  * Requires at least: 5.5
  * Requires PHP: 8.1
  * Author: Max Konstantinovski
@@ -18,7 +18,11 @@
  * Auth model (by design):
  *  - Admin mints a token in Settings > WP MCP. Token is shown ONCE.
  *  - Token is a 256-bit random value; only its SHA-256 hash is stored.
- *  - Hard expiry, capped at 12h. Enforced on every request (not by cron).
+ *  - TWO TIMERS. An active window (6h by default, 12h at most) after which the token
+ *    goes DORMANT: refused, row kept, and an admin's Renew restarts the window without
+ *    changing the token. A hard lifetime (30 days by default, 365 at most) after which
+ *    it is DEAD: refused, not renewable, removed by the hourly cron. Both enforced on
+ *    every request.
  *  - Scope: 'read' (default) or 'admin'. Read tokens are refused write tools.
  *  - Identity: every token is bound to a real WordPress user chosen at mint time.
  *    Requests run as that user, so WordPress capabilities bound reach and scope
@@ -39,15 +43,36 @@
  *  - A token is NOT bound to a client address. An Anthropic-hosted connector calls
  *    from a pool of egress addresses, so there is nothing single to hold it to; the
  *    address is recorded on every auth event and decides nothing.
- *  - Every token refusal is one byte-identical 401. Which of the five it was lives in
+ *  - Every token refusal is one byte-identical 401. Which of the six it was lives in
  *    the wpmcp_auth_event action, not on the wire.
  */
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '1.0.0');
+define('WPMCP_VER', '1.1.0');
 define('WPMCP_TABLE', 'wpmcp_tokens');
-define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS); // 43200s hard cap
+/**
+ * The two caps, because a token carries two timers.
+ *
+ * WPMCP_MAX_WINDOW is the ACTIVE WINDOW: how long a token answers before it goes
+ * dormant and has to be renewed by an admin. Short, because this is the window in which
+ * a leaked token is useful.
+ *
+ * WPMCP_MAX_LIFETIME is the hard end. Past it the token is dead and Renew is not
+ * offered; the only way on is a new token, which for a hosted connector also means one
+ * edit of the connector.
+ *
+ * ONE CAP COULD NOT DO BOTH, which is why WPMCP_MAX_TTL is gone rather than renamed. It
+ * had to be short so a leaked token died quickly AND long so a claude.ai connector was
+ * not deleted and re-added twice a day - claude.ai cannot edit a connector's request
+ * header after the connector exists, so a new token means a new connector. Splitting the
+ * two lets the short number stay short.
+ */
+define('WPMCP_MAX_WINDOW', 12 * HOUR_IN_SECONDS);   // 43200s
+define('WPMCP_MAX_LIFETIME', 365 * DAY_IN_SECONDS); // 31536000s
+
+/** The shortest active window that can be minted. Below this, nothing could use it. */
+define('WPMCP_MIN_WINDOW', 60);
 
 // Token-table schema revision. Bump it whenever the CREATE TABLE below changes:
 // wpmcp_maybe_upgrade() compares it against the wpmcp_db_ver option on every load and
@@ -55,9 +80,12 @@ define('WPMCP_MAX_TTL', 12 * HOUR_IN_SECONDS); // 43200s hard cap
 // it fires on activate, which never happens to a plugin that is updated in place.
 //   1 = 0.3.5 and earlier: no user_id column, requests ran as the minting admin
 //   2 = user-bound tokens: user_id column, backfilled from created_by
-//   3 = no address binding: the column that held it is DROPPED. dbDelta cannot do
-//       that - it only adds and widens - so the ALTER is issued by hand, in
-//       wpmcp_migrate_drop_address_column().
+//   3 = two timers and no address binding. Adds active_until and window_secs (the
+//       active window; see WPMCP_MAX_WINDOW), re-reads expires_at as the hard lifetime,
+//       and DROPS the column the address binding lived in. dbDelta does the two adds;
+//       it cannot drop, so the drop is an explicit ALTER in
+//       wpmcp_migrate_drop_address_column(). Existing rows are backfilled by
+//       wpmcp_migrate_token_lifetimes() so that they behave exactly as they did.
 define('WPMCP_DB_VER', 3);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
@@ -113,6 +141,8 @@ function wpmcp_install() {
   scope varchar(16) NOT NULL DEFAULT 'read',
   label varchar(191) NOT NULL DEFAULT '',
   created_at datetime NOT NULL,
+  active_until datetime NOT NULL DEFAULT '1970-01-01 00:00:00',
+  window_secs int(10) unsigned NOT NULL DEFAULT 0,
   expires_at datetime NOT NULL,
   last_used_at datetime DEFAULT NULL,
   use_count bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -120,7 +150,8 @@ function wpmcp_install() {
   user_id bigint(20) unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY  (id),
   UNIQUE KEY token_hash (token_hash),
-  KEY expires_at (expires_at)
+  KEY expires_at (expires_at),
+  KEY active_until (active_until)
 ) $charset;";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -136,7 +167,10 @@ function wpmcp_install() {
     // 401 - and wpmcp_maybe_upgrade() would never run again to fix it. Fail closed
     // and RETRYABLE: leave the option behind so the next request tries once more.
     if (!wpmcp_token_column_exists('user_id')) { return false; }
+    if (!wpmcp_token_column_exists('active_until')) { return false; }
+    if (!wpmcp_token_column_exists('window_secs')) { return false; }
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
+    if (wpmcp_migrate_token_lifetimes() === false) { return false; }
     if (wpmcp_migrate_drop_address_column() === false) { return false; }
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
@@ -196,6 +230,41 @@ function wpmcp_migrate_drop_address_column() {
     return $wpdb->query('ALTER TABLE ' . wpmcp_table() . ' DROP COLUMN bound_ip');
 }
 
+/**
+ * Revision 3: give every pre-existing row the two timers, without changing what it does.
+ *
+ * A v2 row had one expiry. The rule that keeps an already-issued token behaving exactly
+ * as it did is: its old expires_at becomes BOTH the end of its first active window and
+ * its hard lifetime, and the window length is however long it was originally granted.
+ * So a token minted for 12 hours still answers for those 12 hours and then stops - the
+ * difference being that it now stops DORMANT rather than deleted, and an admin can
+ * renew it instead of re-issuing it.
+ *
+ * window_secs = 0 IS THE SENTINEL, and it is a sound one: wpmcp_mint() clamps the window
+ * to at least WPMCP_MIN_WINDOW, so no row this plugin ever wrote can carry 0. That makes
+ * the UPDATE idempotent - it runs on every schema bump for the rest of the plugin's life
+ * and touches a row exactly once.
+ *
+ * GREATEST(..., 60) on the computed window, because a row whose created_at and
+ * expires_at are equal (a hand-edited fixture, a clock that moved) would otherwise get a
+ * zero-length window - which is both the sentinel and a token that is dormant the
+ * instant it is renewed.
+ *
+ * Returns the number of rows changed, or false if the query failed.
+ */
+function wpmcp_migrate_token_lifetimes() {
+    global $wpdb;
+    $table = wpmcp_table();
+
+    return $wpdb->query(
+        "UPDATE $table SET"
+        . ' active_until = expires_at,'
+        . ' window_secs = GREATEST(TIMESTAMPDIFF(SECOND, created_at, expires_at), '
+        . (int) WPMCP_MIN_WINDOW . ')'
+        . ' WHERE window_secs = 0'
+    );
+}
+
 register_deactivation_hook(__FILE__, function () {
     $ts = wp_next_scheduled('wpmcp_flush_expired');
     if ($ts) { wp_unschedule_event($ts, 'wpmcp_flush_expired'); }
@@ -231,8 +300,9 @@ function wpmcp_client_ip() {
 /**
  * The event types this plugin fires, and what each one means.
  *
- *   mint              a token was created              (token_id, user_id, created_by, scope, ttl)
+ *   mint              a token was created              (token_id, user_id, created_by, scope, window, lifetime)
  *   revoke            a token row was deleted          (token_id, user_id)
+ *   renew             a token's window was restarted   (token_id, user_id, actor, window)
  *   validate_fail     a token was refused              (reason, token_id?, user_id?)
  *   scope_deny        a read token asked for a write   (token_id, user_id, tool, scope)
  *   origin_deny       the Origin header was not ours   (origin)
@@ -243,9 +313,10 @@ function wpmcp_client_ip() {
  *
  * Every context also carries `ip` - which is there to be READ, not enforced: nothing in
  * this plugin decides anything from the caller's address. `reason` on validate_fail is
- * the INTERNAL reason - missing, malformed, not_found, user_missing, expired - which is
- * deliberately the only place it exists: the wire answer to all five is one byte-
- * identical 401, so the log is where an operator finds out which it was.
+ * the INTERNAL reason - missing, malformed, not_found, user_missing, dormant, expired -
+ * which is deliberately the only place it exists: the wire answer to all six is one
+ * byte-identical 401, so the log is where an operator finds out which it was, and in
+ * particular whether the answer is Renew (dormant) or a new token (expired).
  *
  * NEVER IN A CONTEXT: the raw token or its hash. Tokens are identified by their ROW
  * ID, which is already visible in the admin table and is useless to anybody who
@@ -291,8 +362,8 @@ define('WPMCP_LOG_VALUE_MAX', 200);
  * Redact by key at EVERY depth, and bound every string.
  *
  * Depth matters because a third-party listener's context is not flat. The plugin's own
- * contexts are - row id, user id, scope, ttl, reason, ip, origin, content_type, tool -
- * but a site that adds its own listener and passes
+ * contexts are - row id, user id, scope, window, lifetime, reason, ip, origin,
+ * content_type, tool - but a site that adds its own listener and passes
  * `['request' => ['authorization' => ...]]` would have had that written out verbatim,
  * because the old formatter json_encoded a nested array without looking inside it.
  *
@@ -395,7 +466,20 @@ function wpmcp_attach_default_auth_log() {
 
 /**
  * Mint a token. Returns array('raw'=>..., 'id'=>...) or WP_Error.
- * $ttl is clamped to [60s, 12h].
+ *
+ * TWO TIMERS, BOTH IN SECONDS.
+ *
+ *   $window_secs    how long the token answers before going DORMANT. Clamped to
+ *                   [WPMCP_MIN_WINDOW, WPMCP_MAX_WINDOW]. A dormant token is refused
+ *                   like any other bad credential and its row is kept, so an admin can
+ *                   press Renew and the client never has to be touched.
+ *   $lifetime_secs  the hard end. Clamped to [$window_secs, WPMCP_MAX_LIFETIME]. Past
+ *                   it the token is DEAD and only a new mint helps.
+ *
+ * THE LIFETIME'S LOWER BOUND IS THE WINDOW, not a fixed minimum. A lifetime shorter than
+ * the window would put active_until past expires_at - a row that is inside its window
+ * and past its end at the same time, which is not a state anything downstream can
+ * describe. Clamping up is the only answer that keeps the two timers consistent.
  *
  * $user_id is the WordPress user the token authenticates as. 0 means the current
  * user, which is both the historical behaviour and the right default for an admin
@@ -403,11 +487,12 @@ function wpmcp_attach_default_auth_log() {
  * nobody, every capability check inside the tools would fail, and the failure would
  * surface as a confusing empty result instead of a refusal. Refuse at mint instead.
  */
-function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
+function wpmcp_mint($scope, $label, $window_secs, $lifetime_secs, $user_id = 0) {
     global $wpdb;
-    $scope   = ($scope === 'admin') ? 'admin' : 'read';
-    $ttl     = max(60, min(WPMCP_MAX_TTL, (int) $ttl));
-    $user_id = (int) $user_id;
+    $scope       = ($scope === 'admin') ? 'admin' : 'read';
+    $window_secs = max(WPMCP_MIN_WINDOW, min(WPMCP_MAX_WINDOW, (int) $window_secs));
+    $lifetime_secs = max($window_secs, min(WPMCP_MAX_LIFETIME, (int) $lifetime_secs));
+    $user_id     = (int) $user_id;
     if ($user_id === 0) { $user_id = (int) get_current_user_id(); }
     if (!get_userdata($user_id)) {
         return new WP_Error('wpmcp_no_such_user', 'No WordPress user with ID ' . $user_id . '.');
@@ -428,15 +513,17 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
     $now = current_time('mysql', true); // UTC
 
     $ok = $wpdb->insert(wpmcp_table(), array(
-        'token_hash' => wpmcp_hash($raw),
-        'scope'      => $scope,
-        'label'      => sanitize_text_field((string) $label),
-        'created_at' => $now,
-        'expires_at' => gmdate('Y-m-d H:i:s', time() + $ttl),
-        'use_count'  => 0,
-        'created_by' => (int) get_current_user_id(),
-        'user_id'    => $user_id,
-    ), array('%s','%s','%s','%s','%s','%d','%d','%d'));
+        'token_hash'   => wpmcp_hash($raw),
+        'scope'        => $scope,
+        'label'        => sanitize_text_field((string) $label),
+        'created_at'   => $now,
+        'active_until' => gmdate('Y-m-d H:i:s', time() + $window_secs),
+        'window_secs'  => $window_secs,
+        'expires_at'   => gmdate('Y-m-d H:i:s', time() + $lifetime_secs),
+        'use_count'    => 0,
+        'created_by'   => (int) get_current_user_id(),
+        'user_id'      => $user_id,
+    ), array('%s','%s','%s','%s','%s','%d','%s','%d','%d','%d'));
 
     if (!$ok) { return new WP_Error('wpmcp_insert_failed', 'Could not store token.'); }
 
@@ -447,19 +534,50 @@ function wpmcp_mint($scope, $label, $ttl, $user_id = 0) {
         'user_id'    => $user_id,
         'created_by' => (int) get_current_user_id(),
         'scope'      => $scope,
-        'ttl'        => $ttl,
+        'window'     => $window_secs,
+        'lifetime'   => $lifetime_secs,
     ));
 
     return array('raw' => $raw, 'id' => $id);
 }
 
 /**
+ * Which of the three states a token row is in, right now.
+ *
+ *   active   inside its window - the only state that answers
+ *   dormant  the window has closed, the lifetime has not. Refused, row kept, renewable.
+ *   dead     past its lifetime. Refused, not renewable, removed by the hourly cron.
+ *
+ * BOTH BOUNDARIES REFUSE. A window that ended exactly now is dormant and a lifetime that
+ * ended exactly now is dead, so there is no instant in which a token is neither one
+ * thing nor the other.
+ *
+ * A row whose lifetime has passed is DEAD whatever its window says: renewing a window
+ * cannot reach past the hard end, so a row in that shape is a bug elsewhere and dead is
+ * the safe reading of it.
+ */
+function wpmcp_token_state($row) {
+    $now = time();
+
+    if (strtotime($row->expires_at . ' UTC') <= $now)   { return 'dead'; }
+    if (strtotime($row->active_until . ' UTC') <= $now) { return 'dormant'; }
+
+    return 'active';
+}
+
+/**
  * Validate a raw token against the current request.
  *
  * Returns the token row (object) on success, or a WP_Error whose code is the INTERNAL
- * reason: missing | malformed | not_found | user_missing | expired.
+ * reason: missing | malformed | not_found | user_missing | dormant | expired.
  *
- * THE CALLER MUST NOT PUT THAT REASON ON THE WIRE. All five are one byte-identical 401
+ * dormant AND expired ARE THE SAME ANSWER TO THE CALLER and different answers to the
+ * operator. A dormant token's window has closed and an admin can press Renew, which
+ * restarts it without changing the token, so the client never has to be touched; an
+ * expired one is past its hard lifetime and needs a new mint. Telling those two apart on
+ * the wire would tell a caller holding a stolen token whether it is worth keeping.
+ *
+ * THE CALLER MUST NOT PUT THAT REASON ON THE WIRE. All six are one byte-identical 401
  * (see wpmcp_unauthorized() in endpoint.php) and the reason survives only in the
  * validate_fail auth event, which is fired here so that every refusal path fires it -
  * including the deleted-user one, which the Sprint 1 review asked to be sure of.
@@ -513,16 +631,31 @@ function wpmcp_validate($raw, $ip) {
         return new WP_Error('user_missing', 'Token not found.');
     }
 
-    // Expiry enforced on use (cron flush is only housekeeping).
-    if (strtotime($row->expires_at . ' UTC') <= time()) {
-        $wpdb->delete(wpmcp_table(), array('id' => $row->id), array('%d'));
+    // Both timers, enforced on use. The cron flush is only housekeeping.
+    //
+    // NOTHING IS DELETED HERE, and that changed in Sprint 7. A refused token's row used
+    // to be deleted on the spot, which made Renew impossible: by the time an admin saw
+    // the 401 there was nothing left to renew, and a hosted connector had to be deleted
+    // and re-added rather than reactivated. Dead rows are removed by the hourly cron
+    // instead, which is where database housekeeping belongs.
+    $state = wpmcp_token_state($row);
+
+    if ($state !== 'active') {
+        $reason = ($state === 'dormant') ? 'dormant' : 'expired';
+
         wpmcp_auth_event('validate_fail', array(
-            'reason'   => 'expired',
+            'reason'   => $reason,
             'token_id' => (int) $row->id,
             'user_id'  => (int) $row->user_id,
             'ip'       => $ip,
         ));
-        return new WP_Error('expired', 'Token expired - regenerate in Settings > WP MCP.');
+
+        return new WP_Error(
+            $reason,
+            $reason === 'dormant'
+                ? 'Token is dormant - press Renew in Settings > WP MCP.'
+                : 'Token has reached the end of its lifetime - mint a new one.'
+        );
     }
 
     $wpdb->update(
@@ -532,6 +665,71 @@ function wpmcp_validate($raw, $ip) {
         array('%s','%d'), array('%d')
     );
     return $row;
+}
+
+/**
+ * Restart a token's active window. Returns the new active_until (UTC string) or WP_Error.
+ *
+ * THIS IS THE POINT OF THE WHOLE TWO-TIMER MODEL. A hosted connector - claude.ai, Claude
+ * Desktop - carries its credential in a request header that cannot be edited once the
+ * connector has been added, so replacing a token means deleting and re-adding the
+ * connector. Renew moves the window and leaves the token alone, so the thing the client
+ * holds never changes and the client never notices.
+ *
+ * IT WORKS ON A DORMANT ROW, and that is the case it exists for: the admin presses this
+ * BECAUSE the client started getting 401s. That is also why wpmcp_validate() no longer
+ * deletes a refused row - by the time anyone looked, there would be nothing left to
+ * renew. It works on an ACTIVE row too, which is the "I know I will be away tomorrow"
+ * case; there is no reason to make somebody wait for a failure first.
+ *
+ * IT CANNOT REACH PAST THE HARD LIFETIME. min(now + window, expires_at) is what keeps
+ * the second timer meaningful: without it, a window of six hours renewed every six hours
+ * would make expires_at decorative, and a token nobody chose to keep would live forever
+ * one press at a time.
+ *
+ * A DEAD ROW IS REFUSED rather than quietly clamped to its own end. Setting
+ * active_until = expires_at on a row whose expires_at is in the past would "succeed" and
+ * change nothing observable, which is the worst answer available: the admin sees a
+ * success notice and the client keeps failing.
+ */
+function wpmcp_renew($id) {
+    global $wpdb;
+    $id = (int) $id;
+
+    $row = $wpdb->get_row($wpdb->prepare(
+        'SELECT * FROM ' . wpmcp_table() . ' WHERE id = %d', $id
+    ));
+
+    if (!$row) {
+        return new WP_Error('not_found', 'No such token.');
+    }
+
+    if (wpmcp_token_state($row) === 'dead') {
+        return new WP_Error(
+            'dead',
+            'That token has reached the end of its lifetime. Mint a new one.'
+        );
+    }
+
+    $window   = max(WPMCP_MIN_WINDOW, (int) $row->window_secs);
+    $lifetime = strtotime($row->expires_at . ' UTC');
+    $until    = gmdate('Y-m-d H:i:s', min(time() + $window, $lifetime));
+
+    $wpdb->update(
+        wpmcp_table(),
+        array('active_until' => $until),
+        array('id' => $id),
+        array('%s'), array('%d')
+    );
+
+    wpmcp_auth_event('renew', array(
+        'token_id' => $id,
+        'user_id'  => (int) $row->user_id,
+        'actor'    => (int) get_current_user_id(),
+        'window'   => $window,
+    ));
+
+    return $until;
 }
 
 function wpmcp_revoke($id) {
@@ -558,13 +756,24 @@ function wpmcp_revoke($id) {
     return $deleted;
 }
 
+/** How many tokens are ACTIVE - inside their window, and therefore answering. */
 function wpmcp_active_count() {
     global $wpdb;
     return (int) $wpdb->get_var(
-        'SELECT COUNT(*) FROM ' . wpmcp_table() . " WHERE expires_at > UTC_TIMESTAMP()"
+        'SELECT COUNT(*) FROM ' . wpmcp_table()
+        . ' WHERE active_until > UTC_TIMESTAMP() AND expires_at > UTC_TIMESTAMP()'
     );
 }
 
+/**
+ * The hourly flush: DEAD rows only.
+ *
+ * A dormant row is NOT deleted, and that is the one thing this function has to get
+ * right. Its window has closed but its lifetime has not, so it is exactly the row an
+ * admin is about to press Renew on; deleting it would turn every renewable token into a
+ * re-mint the next time the cron happened to run first. Past the hard lifetime there is
+ * nothing left to renew, so the row is only then rubbish.
+ */
 add_action('wpmcp_flush_expired', 'wpmcp_flush_expired_cb');
 function wpmcp_flush_expired_cb() {
     global $wpdb;
