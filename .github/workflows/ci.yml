@@ -1,9 +1,11 @@
 name: CI
 
-# Continuous safety net: lint every push and PR so broken PHP never reaches main.
+# Continuous safety net: lint every push and PR so broken PHP never reaches main,
+# then run the two test tiers. release.yml gates on the two test jobs by name
+# (`lint`, `phpunit-unit`, `integration`) - renaming a job here breaks the gate.
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
   pull_request:
     branches: [main]
 
@@ -23,7 +25,7 @@ jobs:
       - name: php -l all plugin files
         run: |
           status=0
-          for f in wp-mcp.php endpoint.php admin.php tools.php; do
+          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php src/*.php; do
             echo "::group::php -l $f"
             php -l "$f" || status=1
             echo "::endgroup::"
@@ -35,3 +37,146 @@ jobs:
           count=$(grep -c "wpmcp_bak_ok" tools.php)
           echo "wpmcp_bak_ok occurrences: $count (expected 3)"
           test "$count" -eq 3
+
+  phpunit-unit:
+    # Pure PHP, no WordPress, no Docker. The matrix is the declared support floor
+    # (Requires PHP: 8.1) through the current release, so a syntax or behaviour
+    # difference across versions shows up here rather than on a user's host.
+    name: PHPUnit unit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dev dependencies
+        # Dev-only manifest; the plugin itself has no runtime dependencies.
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Unit suite
+        # WPMCP_TEST_URL is deliberately absent: this job must pass with no site.
+        run: composer test:unit
+
+  integration:
+    # Black-box HTTP against a real WordPress. rest_do_request() would skip TLS,
+    # Origin, Content-Type and the path-URL route, which is precisely where the
+    # transport work lives - so this tier uses a real container over real HTTP.
+    name: PHPUnit integration (wp-env)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Set up Node (for @wordpress/env)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Start WordPress (Docker, plugin mapped in and activated)
+        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it.
+        # ubuntu-latest runners ship Docker, so nothing else is needed.
+        #
+        # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
+        # plain HTTP on port 8888, and the endpoint refuses every non-HTTPS request
+        # before it reads the token. Without the constant the whole integration tier
+        # would answer 403 and every identity and transport test would fail for a reason
+        # that has nothing to do with the code.
+        #
+        # Which is also why the HTTPS gate's own two properties are NOT in this tier:
+        # a host with no TLS and the gate switched off cannot be asked about either.
+        # They live in the infra-trust suite, which fails rather than skips on such a
+        # host and is run by hand against production - see phpunit.xml.dist.
+        run: npx --yes @wordpress/env start --debug
+
+      - name: Enable pretty permalinks
+        # /wp-json/ is a rewrite rule. With WordPress's default "plain" permalinks
+        # the REST index is only reachable as /?rest_route=/, and the integration
+        # tests (like every real MCP client) request /wp-json/.
+        run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
+
+      - name: Confirm the plugin is active
+        run: npx --yes @wordpress/env run cli wp plugin list --status=active
+
+      - name: Integration suite
+        env:
+          # @wordpress/env publishes the development instance on port 8888 by
+          # default; it is plain HTTP, so TLS verification stays off.
+          WPMCP_TEST_URL: http://localhost:8888
+          # WordPress is inside a Docker container, so a host-side wp-cli.phar
+          # --path= cannot see its filesystem. This routes the fixture harness
+          # through `npx @wordpress/env run cli wp` instead. Without it every
+          # fixture-bearing test skips - and a skip is green.
+          WPMCP_WP_ENV: '1'
+        run: composer test:integration
+
+      - name: Sprint gates actually executed (a skipped gate is not a gate)
+        env:
+          WPMCP_TEST_URL: http://localhost:8888
+          WPMCP_WP_ENV: '1'
+        # The build plan defines a gate as `phpunit --group sprint-N` green in CI.
+        # Green is not enough: PHPUnit reports a wholly skipped group as green too,
+        # and that is exactly what happened to sprint-1 before WPMCP_WP_ENV existed.
+        #
+        # A class that skipped emits a <testsuite> carrying tests="0" (or no counts at
+        # all) and no <testcase> children, so the check is: at least one <testcase> in
+        # the log, and no WpMcp test class that contributed none.
+        run: |
+          status=0
+          # Every sprint that has closed. sprint-3, sprint-4 and sprint-5 were added in
+          # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
+          # were never asserted in CI at all. A new sprint adds its group here on the day
+          # its gate closes, and the commit that adds it watches this job.
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
+            echo "::group::$group"
+            log="junit-$group.xml"
+            rm -f "$log"
+            vendor/bin/phpunit --group "$group" --log-junit "$log" || status=1
+            if [ ! -f "$log" ]; then
+              echo "::error::$group produced no JUnit log."
+              status=1
+              echo "::endgroup::"
+              continue
+            fi
+            cases=$(grep -c '<testcase ' "$log" || true)
+            empty=$(grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -cv 'tests="[1-9]' || true)
+            # Per-TEST skips too: a class whose every method calls markTestSkipped
+            # still reports tests="N", so the class-level check above misses it. Those
+            # emit a <skipped/> child per testcase.
+            skipped=$(grep -c '<skipped' "$log" || true)
+            echo "$group: testcases=$cases classes-that-ran-nothing=$empty skipped-tests=$skipped"
+            if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+              echo "::error::$group did not execute every one of its tests. A gate that skips is not a gate."
+              grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -v 'tests="[1-9]' || true
+              grep -o '<testcase name="[^"]*"[^>]*>[[:space:]]*<skipped' "$log" || true
+              status=1
+            fi
+            rm -f "$log"
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: WordPress logs (on failure)
+        if: failure()
+        run: npx --yes @wordpress/env logs all || true
+
+      - name: Stop WordPress
+        if: always()
+        run: npx --yes @wordpress/env stop || true

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Strict by policy: a risky test, a warning, or stray output is a failure, not a note.
+  Two suites, one command each (see composer scripts):
+    unit        - pure PHP, no WordPress, no Docker, seconds.
+    integration - black-box HTTP against WPMCP_TEST_URL; self-skips when that is unset,
+                  so a CI job without a site still reports the unit suite honestly.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         cacheDirectory=".phpunit.cache"
+         colors="true"
+         executionOrder="depends,defects"
+         beStrictAboutOutputDuringTests="true"
+         beStrictAboutTestsThatDoNotTestAnything="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnNotice="true"
+         failOnDeprecation="true">
+
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/integration</directory>
+        </testsuite>
+    </testsuites>
+
+    <!--
+      infra-trust is excluded from every default run, and from CI.
+
+      Both tests in it need a host with real TLS: one asserts that a valid token over
+      plain http is refused, the other that a forwarded X-Forwarded-Proto cannot talk
+      its way past that refusal. Neither question exists on a host published over plain
+      http with WPMCP_ALLOW_INSECURE set, which is what `composer test` and CI run
+      against. The second one is also about the DEPLOYMENT rather than the code - it is
+      red on Local by Flywheel and on wp-env, and only a change to somebody's proxy
+      config can make it green. Tests like that must not be able to turn `composer test`
+      red, and must not be quietly skipped either, because a skip is green and the fact
+      would vanish.
+
+      So it lives behind its own command, `composer test:infra`, to be run against the
+      host you actually serve from. A group named on the command line overrides this
+      exclusion, which is exactly how that command reaches it.
+    -->
+    <groups>
+        <exclude>
+            <group>infra-trust</group>
+        </exclude>
+    </groups>
+
+    <php>
+        <!--
+          Read from the real environment. Do NOT hardcode a URL here: an unset
+          WPMCP_TEST_URL is the signal that no site is available, and the integration
+          tests skip themselves with a message naming the variable.
+        -->
+        <env name="WPMCP_TEST_URL" value="" force="false"/>
+    </php>
+
+    <source restrictNotices="true" restrictWarnings="true">
+        <include>
+            <file>wp-mcp.php</file>
+            <file>endpoint.php</file>
+            <file>tools.php</file>
+            <file>admin.php</file>
+            <!-- The src/ tree the four flat files are being split into, sprint by sprint. -->
+            <directory suffix=".php">src</directory>
+        </include>
+    </source>
+</phpunit>
