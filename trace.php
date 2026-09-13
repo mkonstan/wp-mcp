@@ -39,8 +39,16 @@ if (!defined('ABSPATH')) { exit; }
 /** Option holding this site's trace-log file name. See wpmcp_trace_file_name(). */
 define('WPMCP_TRACE_NAME_OPTION', 'wpmcp_trace_log_name');
 
-/** Option set when the self-check found the trace log readable over HTTP. */
+/**
+ * Option holding the last self-check's outcome: array('state', 'reason', 'checked_at').
+ * The name is historical - it now holds three answers, not a boolean.
+ */
 define('WPMCP_TRACE_EXPOSED_OPTION', 'wpmcp_trace_log_readable');
+
+/** The three self-check outcomes. See wpmcp_trace_selfcheck(). */
+define('WPMCP_TRACE_READABLE', 'readable');
+define('WPMCP_TRACE_NOT_READABLE', 'not_readable');
+define('WPMCP_TRACE_UNVERIFIED', 'unverified');
 
 /** Option set when a trace could not be written to the log and went to error_log(). */
 define('WPMCP_TRACE_UNWRITABLE_OPTION', 'wpmcp_trace_log_unwritable');
@@ -316,7 +324,7 @@ function wpmcp_trace_field($value) {
 /* ---------------- is the log actually private? ---------------- */
 
 /**
- * Ask this host whether it serves the trace log, and remember the answer.
+ * Ask this host whether it serves the trace log, and remember which of THREE answers it gave.
  *
  * STILL WORTH ASKING NOW THAT THE NAME IS SECRET, for one case: a directory listing. If
  * `wp-content/wpmcp/` is indexable the name stops being secret, and this probe - which
@@ -324,19 +332,35 @@ function wpmcp_trace_field($value) {
  * A 200 here means the log is reachable by someone who knows the name, which after a
  * listing is everyone.
  *
- * 200 -> set the option, and every admin screen carries the warning. Anything else ->
- * delete it. A transport failure is INCONCLUSIVE and leaves the option exactly as it was:
- * a DNS hiccup must not silently retract a real warning, and must not raise one.
+ * THREE OUTCOMES, NAMED, BECAUSE "COULD NOT TELL" IS NOT "FINE". The first version returned
+ * true/false/null and treated null as "leave the option alone", which is silent - and silent
+ * is the one thing the rule this file implements forbids. CI found the case: inside a
+ * @wordpress/env container the site's own URL (`http://localhost:8888/...`) is a Docker port
+ * mapping that does not exist from within, so wp_remote_get returns a WP_Error and the plugin
+ * knew nothing about its own log while saying nothing about it either. Managed hosts block
+ * loopback the same way, so this is a production shape, not a CI artifact.
+ *
+ *   readable      200, and the body IS the log. Someone who knows the name can read it.
+ *   not_readable  403, 404, anything else - the server refuses it. What we want.
+ *   unverified    wp_remote_get failed, OR a 200 whose body is not the log (a captive
+ *                 portal, a proxy error page, a WP 404 template served with 200). The
+ *                 question is unanswered and the admin notice says so, with the reason.
+ *
+ * WHY THE BODY IS COMPARED AND NOT JUST THE STATUS. A 200 from something that is not this
+ * file proves nothing in either direction: calling it `readable` raises a false alarm the
+ * operator cannot act on, and calling it `not_readable` clears a warning that may be real.
+ * The comparison is against the head of the file on disk - and an EMPTY log demands an empty
+ * body, because a zero-length prefix matches everything.
  *
  * sslverify IS OFF, deliberately. This is a request to ourselves asking for a status code,
  * carrying no credential and trusting no content, and a development site's certificate is
  * self-signed - with verification on, the one host where the answer is "yes, it is
- * readable" would answer "inconclusive" instead.
+ * readable" would answer `unverified` instead.
  *
  * NOT ON A REST REQUEST. It is wired to admin_init, so an MCP call never pays for an
  * outbound HTTP request, and the answer is computed where it is displayed.
  *
- * Returns true (readable), false (not readable) or null (could not tell).
+ * Returns the state string it stored.
  */
 function wpmcp_trace_selfcheck() {
     wpmcp_trace_ensure_dir();
@@ -347,22 +371,104 @@ function wpmcp_trace_selfcheck() {
         'redirection' => 0,
     ));
 
-    if (is_wp_error($response)) { return null; }
-
-    $readable = ((int) wp_remote_retrieve_response_code($response) === 200);
-
-    if ($readable) {
-        update_option(WPMCP_TRACE_EXPOSED_OPTION, 1);
-    } else {
-        delete_option(WPMCP_TRACE_EXPOSED_OPTION);
+    if (is_wp_error($response)) {
+        return wpmcp_trace_store_selfcheck(
+            WPMCP_TRACE_UNVERIFIED,
+            $response->get_error_message()
+        );
     }
 
-    return $readable;
+    if ((int) wp_remote_retrieve_response_code($response) !== 200) {
+        return wpmcp_trace_store_selfcheck(WPMCP_TRACE_NOT_READABLE, '');
+    }
+
+    if (!wpmcp_trace_body_is_the_log((string) wp_remote_retrieve_body($response))) {
+        return wpmcp_trace_store_selfcheck(
+            WPMCP_TRACE_UNVERIFIED,
+            'the URL answered 200 with something that is not the log file'
+        );
+    }
+
+    return wpmcp_trace_store_selfcheck(WPMCP_TRACE_READABLE, '');
+}
+
+/**
+ * Is this response body the log file?
+ *
+ * Compared against the head of the file rather than all of it, because the log is unbounded
+ * and this runs on an admin page load. An empty log is the case a prefix check gets wrong -
+ * every string starts with '' - so it is required to be exactly empty.
+ */
+function wpmcp_trace_body_is_the_log($body) {
+    $path = wpmcp_trace_path();
+
+    if (!is_file($path)) { return false; }
+
+    $head = (string) @file_get_contents($path, false, null, 0, 1024);
+
+    return $head === '' ? $body === '' : strncmp($body, $head, strlen($head)) === 0;
+}
+
+/**
+ * Write the outcome to the option the admin notices read. Returns the state.
+ *
+ * The reason is flattened and BOUNDED before it is stored: it comes from a WP_Error the
+ * HTTP layer produced, it is printed on every admin screen, and a cURL error carrying a
+ * whole response body would otherwise become the page. Not wpmcp_trace_field(), which
+ * writes an empty value as `""` for the log's key=value shape - here empty means empty.
+ */
+function wpmcp_trace_store_selfcheck($state, $reason) {
+    $reason = str_replace(array("\r", "\n"), ' ', (string) $reason);
+
+    if (strlen($reason) > 300) { $reason = substr($reason, 0, 300) . '...'; }
+
+    update_option(WPMCP_TRACE_EXPOSED_OPTION, array(
+        'state'      => (string) $state,
+        'reason'     => $reason,
+        'checked_at' => gmdate('c'),
+    ));
+
+    return (string) $state;
+}
+
+/**
+ * The last self-check's outcome: one of the three states, or '' if it has never run.
+ *
+ * A SCALAR VALUE IN THE OPTION IS THE OLD SHAPE, and a site upgrading from it has `1`
+ * sitting there meaning "readable". Read it rather than discarding it: dropping the value
+ * would silently clear a real warning on exactly the sites that had one.
+ */
+function wpmcp_trace_selfcheck_state() {
+    $stored = get_option(WPMCP_TRACE_EXPOSED_OPTION, '');
+
+    if (is_array($stored)) {
+        $state = isset($stored['state']) ? (string) $stored['state'] : '';
+
+        return in_array($state, array(
+            WPMCP_TRACE_READABLE,
+            WPMCP_TRACE_NOT_READABLE,
+            WPMCP_TRACE_UNVERIFIED,
+        ), true) ? $state : '';
+    }
+
+    return ((int) $stored === 1) ? WPMCP_TRACE_READABLE : '';
+}
+
+/** Why the last self-check could not answer, or '' when it could. */
+function wpmcp_trace_selfcheck_reason() {
+    $stored = get_option(WPMCP_TRACE_EXPOSED_OPTION, '');
+
+    return (is_array($stored) && isset($stored['reason'])) ? (string) $stored['reason'] : '';
 }
 
 /** Is the trace log known to be readable from the web? */
 function wpmcp_trace_log_is_exposed() {
-    return (int) get_option(WPMCP_TRACE_EXPOSED_OPTION, 0) === 1;
+    return wpmcp_trace_selfcheck_state() === WPMCP_TRACE_READABLE;
+}
+
+/** Did the self-check fail to get an answer at all? */
+function wpmcp_trace_log_is_unverified() {
+    return wpmcp_trace_selfcheck_state() === WPMCP_TRACE_UNVERIFIED;
 }
 
 /** Did a trace have to go to error_log() because the log file could not be written? */
@@ -407,6 +513,27 @@ function wpmcp_trace_admin_notices() {
             . ' likeliest cause is directory listing being on. Deny'
             . ' <code>/wp-content/wpmcp/</code> in your server config &mdash; nginx:'
             . ' <code>location ^~ /wp-content/wpmcp/ { deny all; }</code></p></div>';
+    }
+
+    // UNVERIFIED IS NOT SILENT. The plugin does not know whether its log is public, and the
+    // operator is the only one who can find out. A warning rather than an error: nothing is
+    // known to be wrong, but nothing is known to be right either.
+    if (wpmcp_trace_log_is_unverified()) {
+        $reason = wpmcp_trace_selfcheck_reason();
+
+        echo '<div class="notice notice-warning"><p><strong>WP MCP: could not check whether'
+            . ' the trace log is readable from the web.</strong></p><p>The plugin tried to'
+            . ' fetch its own log file over HTTP and got no usable answer'
+            . ($reason === '' ? '' : ' &mdash; <code>' . esc_html($reason) . '</code>')
+            . '. A host that blocks requests from itself to itself (a container, or a'
+            . ' managed host with loopback closed) does this, and it is not in itself a'
+            . ' problem &mdash; but it means the check below is yours to make.</p>'
+            . '<p><strong>Check manually:</strong> open'
+            . ' <code>' . esc_html(wpmcp_trace_url()) . '</code> in a browser. It must NOT'
+            . ' return the file. If it does, deny <code>/wp-content/wpmcp/</code> in your'
+            . ' server config &mdash; nginx:'
+            . ' <code>location ^~ /wp-content/wpmcp/ { deny all; }</code>, Apache:'
+            . ' the <code>.htaccess</code> beside the log already does it.</p></div>';
     }
 
     if (wpmcp_trace_log_is_unwritable()) {

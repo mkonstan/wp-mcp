@@ -80,13 +80,29 @@ final class TraceLog
         return WpCli::evaluate('echo wpmcp_trace_url();');
     }
 
-    /** Run the plugin's own self-check. '1' readable, '0' not readable, 'null' unknown. */
+    /** The three outcomes wpmcp_trace_selfcheck() can store, as the plugin names them. */
+    public const READABLE     = 'readable';
+    public const NOT_READABLE = 'not_readable';
+    public const UNVERIFIED   = 'unverified';
+
+    /** Run the plugin's own self-check and return the state it stored. */
     public static function selfCheck(): string
     {
-        return WpCli::evaluate(
-            '$r = wpmcp_trace_selfcheck();'
-            . ' echo $r === null ? "null" : ($r ? "1" : "0");'
-        );
+        return WpCli::evaluate('echo wpmcp_trace_selfcheck();');
+    }
+
+    /** The state the last self-check stored, without re-running it. */
+    public static function selfCheckState(): string
+    {
+        return WpCli::evaluate('echo wpmcp_trace_selfcheck_state();');
+    }
+
+    /** Why the last self-check could not answer, or '' when it could. */
+    public static function selfCheckReason(): string
+    {
+        $encoded = WpCli::evaluate('echo base64_encode(wpmcp_trace_selfcheck_reason());');
+
+        return trim($encoded) === '' ? '' : (string) base64_decode(trim($encoded), true);
     }
 
     /** Does the site-wide red "readable from the web" warning stand? */

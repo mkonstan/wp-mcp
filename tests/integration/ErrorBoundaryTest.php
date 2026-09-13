@@ -412,6 +412,14 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
      * a directory listing, which hands the name to everybody. A 200 on the real URL
      * therefore still has to raise the site-wide warning.
      *
+     * AND `unverified` IS A PASS ONLY BECAUSE IT IS LOUD. CI found the third case: inside a
+     * @wordpress/env container the site's own URL is a Docker port mapping that does not
+     * resolve from within, wp_remote_get fails, and the plugin cannot answer its own
+     * question - which managed hosts with loopback closed reproduce exactly. The test
+     * therefore accepts that state only when the plugin has recorded it AS that state and
+     * carries a reason for the admin notice to print. It is not a skip, and where the fetch
+     * does work - Local, both sites - the strict agreement assertion still runs.
+     *
      * S9: `Deny from all` on its own is an unknown directive on an Apache 2.4 without
      * mod_access_compat, and an unknown directive in an .htaccess turns the directory into
      * a 500 - "not readable", but by breaking the server. Each spelling sits behind the
@@ -421,25 +429,46 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
      */
     public function testTheRemainingGuardsAreInPlace(): void
     {
-        $selfCheck = TraceLog::selfCheck();
+        $state = TraceLog::selfCheck();
 
-        self::assertNotSame(
-            'null',
-            $selfCheck,
-            'The plugin could not fetch its own log URL at all, so it cannot tell whether a'
-            . ' directory listing has exposed the name. wp_remote_get to ' . TraceLog::url()
-            . ' failed.'
+        self::assertContains(
+            $state,
+            [TraceLog::READABLE, TraceLog::NOT_READABLE, TraceLog::UNVERIFIED],
+            'The self-check stored "' . $state . '", which is not one of its three states.'
+            . ' A fourth answer - or none - is how "could not tell" goes silent again.'
         );
+        self::assertSame(
+            $state,
+            TraceLog::selfCheckState(),
+            'The state the self-check returned is not the state it stored, so the admin'
+            . ' notices are reading something else.'
+        );
+
+        if ($state === TraceLog::UNVERIFIED) {
+            self::assertNotSame(
+                '',
+                TraceLog::selfCheckReason(),
+                'The self-check could not answer and recorded no reason, so the admin notice'
+                . ' can only say "something went wrong". The operator has to be told what to'
+                . ' check by hand: wp_remote_get to ' . TraceLog::url() . ' failed.'
+            );
+
+            return;
+        }
 
         $status = $this->client()->get('wp-content/wpmcp/' . TraceLog::fileName())->getStatusCode();
 
         self::assertSame(
+            $status === 200 ? TraceLog::READABLE : TraceLog::NOT_READABLE,
+            $state,
+            'The self-check and reality disagree: the real log URL answered ' . $status
+            . ' and the plugin recorded "' . $state . '". Either a readable log is silent,'
+            . ' or the admin screens cry wolf.'
+        );
+        self::assertSame(
             $status === 200,
             TraceLog::exposedOptionIsSet(),
-            'The self-check and reality disagree: the real log URL answered ' . $status
-            . ' and the site-wide warning is '
-            . (TraceLog::exposedOptionIsSet() ? 'raised' : 'down')
-            . '. Either a readable log is silent, or the admin screens cry wolf.'
+            'wpmcp_trace_log_is_exposed() disagrees with the stored state.'
         );
 
         // 0600, WHERE THE FILESYSTEM CAN SAY SO. MEASURED on the development site: it is
