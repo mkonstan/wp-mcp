@@ -25,7 +25,7 @@ jobs:
       - name: php -l all plugin files
         run: |
           status=0
-          for f in wp-mcp.php endpoint.php admin.php tools.php; do
+          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php src/*.php; do
             echo "::group::php -l $f"
             php -l "$f" || status=1
             echo "::endgroup::"
@@ -138,11 +138,11 @@ jobs:
         # the log, and no WpMcp test class that contributed none.
         run: |
           status=0
-          # sprint-3 and sprint-4 are NOT in this list, and that is a gap rather than a
-          # decision: they were never added when those sprints closed. Adding them is a
-          # one-word change, but it has to be made while watching the result in CI, so it
-          # belongs to whoever does it rather than to Sprint 5.
-          for group in sprint-0 sprint-1 sprint-2 sprint-5; do
+          # Every sprint that has closed. sprint-3, sprint-4 and sprint-5 were added in
+          # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
+          # were never asserted in CI at all. A new sprint adds its group here on the day
+          # its gate closes, and the commit that adds it watches this job.
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
