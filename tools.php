@@ -230,7 +230,7 @@ function wpmcp_bak_ok($bak) {
 function wpmcp_php_parse_ok($code) {
     if (!defined('TOKEN_PARSE')) { return true; } // can't check on this runtime
     try {
-        // Intentional: TOKEN_PARSE makes the tokenizer THROW on invalid PHP; the catch below drives code-write's auto-revert. Do not "simplify" — the return value is unused on purpose.
+        // Intentional: TOKEN_PARSE makes the tokenizer THROW on invalid PHP; the catch below drives code-write's auto-revert. Do not "simplify" it; the return value is unused on purpose.
         token_get_all($code, TOKEN_PARSE); // @phpstan-ignore-line
         return true;
     } catch (ParseError $e) {

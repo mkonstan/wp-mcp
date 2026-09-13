@@ -13,7 +13,7 @@
  * Copyright (C) 2026 Max Konstantinovski. Designed and built by Max Konstantinovski
  * (with Claude). This program is free software under the GNU General Public License
  * v2 or later; see the LICENSE file. Concept, design, and architecture by Max
- * Konstantinovski — please retain this attribution in derivative works.
+ * Konstantinovski. Please retain this attribution in derivative works.
  *
  * Auth model (by design):
  *  - Admin mints a token in Settings > WP MCP. Token is shown ONCE.
