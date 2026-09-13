@@ -352,8 +352,7 @@ function wpmcp_unauthorized() {
  * body truncated by the server instead.
  *
  * THIS PLUGIN READS NO PART OF THE REQUEST BODY AT ALL in this function - but WordPress
- * does, and the
- * earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
+ * does, and an earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
  * `$request->has_valid_params()`, which calls `parse_json_params()` for any
  * application/json body, and only then does `respond_to_request()` reach the
  * permission_callback. So a malformed body is answered by core with 400

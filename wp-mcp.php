@@ -618,9 +618,9 @@ function wpmcp_validate($raw, $ip) {
         return new WP_Error('not_found', 'Token not found.');
     }
 
-    // Identity BEFORE any side effect, and before expiry, so a token whose user was
-    // deleted cannot pin an IP, cannot bump use_count, and cannot show as recently
-    // used in the admin table: activity a refused request has no business recording.
+    // Identity BEFORE any side effect, and before the timers, so a token whose user was
+    // deleted cannot bump use_count and cannot show as recently used in the admin
+    // table: activity a refused request has no business recording.
     if (!get_userdata((int) $row->user_id)) {
         wpmcp_auth_event('validate_fail', array(
             'reason'   => 'user_missing',
