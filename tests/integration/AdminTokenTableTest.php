@@ -33,14 +33,17 @@ final class AdminTokenTableTest extends FixtureIntegrationTestCase
     private static function activeLabel(): string { return Fixtures::name('table-active'); }
     private static function dormantLabel(): string { return Fixtures::name('table-dormant'); }
     private static function deadLabel(): string { return Fixtures::name('table-dead'); }
+    private static function orphanLabel(): string { return Fixtures::name('table-orphan'); }
     private static function login(): string { return Fixtures::name('table-author'); }
+    private static function doomedLogin(): string { return Fixtures::name('table-doomed-author'); }
 
     private static int $userId = 0;
+    private static int $doomedUserId = 0;
     private static string $html = '';
 
     private static function labels(): array
     {
-        return [self::activeLabel(), self::dormantLabel(), self::deadLabel()];
+        return [self::activeLabel(), self::dormantLabel(), self::deadLabel(), self::orphanLabel()];
     }
 
     public static function setUpBeforeClass(): void
@@ -55,14 +58,22 @@ final class AdminTokenTableTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
-        self::$userId = Fixtures::createUser(self::login(), 'administrator');
+        self::$userId       = Fixtures::createUser(self::login(), 'administrator');
+        self::$doomedUserId = Fixtures::createUser(self::doomedLogin(), 'administrator');
 
-        foreach (self::labels() as $label) {
+        foreach ([self::activeLabel(), self::dormantLabel(), self::deadLabel()] as $label) {
             Fixtures::mintToken('read', $label, self::$userId);
         }
 
+        // A live token whose OWNER is about to stop existing. Its timers will read
+        // `active` indefinitely; the endpoint refuses it on every request.
+        Fixtures::mintToken('read', self::orphanLabel(), self::$doomedUserId);
+
         Fixtures::makeTokensDormantLabelled(self::dormantLabel());
         Fixtures::makeTokensDeadLabelled(self::deadLabel());
+
+        Fixtures::deleteUser(self::$doomedUserId);
+        self::$doomedUserId = 0;
 
         self::$html = self::render();
     }
@@ -77,6 +88,7 @@ final class AdminTokenTableTest extends FixtureIntegrationTestCase
     private static function destroy(): void
     {
         Fixtures::deleteUser(self::$userId);
+        Fixtures::deleteUser(self::$doomedUserId);
 
         foreach (self::labels() as $label) {
             Fixtures::deleteTokensLabelled($label);
@@ -115,6 +127,7 @@ final class AdminTokenTableTest extends FixtureIntegrationTestCase
             self::activeLabel()  => 'active',
             self::dormantLabel() => 'dormant',
             self::deadLabel()    => 'dead',
+            self::orphanLabel()  => 'owner missing',
         ];
 
         foreach ($expected as $label => $state) {
@@ -153,6 +166,36 @@ final class AdminTokenTableTest extends FixtureIntegrationTestCase
             self::rowFor(self::deadLabel()),
             'A dead row offers Renew. wpmcp_renew() refuses one, so the button can only'
             . ' ever produce an error notice.'
+        );
+
+        self::assertStringNotContainsString(
+            'value="renew"',
+            self::rowFor(self::orphanLabel()),
+            'A row whose owner was deleted offers Renew. Its timers say active and every'
+            . ' request is refused with reason=user_missing, so pressing it used to post'
+            . ' a green "the client needs no edit" notice about a token that does not'
+            . ' work.'
+        );
+    }
+
+    /**
+     * And `wpmcp_renew()` refuses that row, rather than the button merely being hidden.
+     * The button is a courtesy; the function is the guard.
+     *
+     * @group sprint-7
+     */
+    public function testRenewRefusesARowWhoseOwnerIsGone(): void
+    {
+        $id = Fixtures::tokenIdLabelled(self::orphanLabel());
+
+        self::assertGreaterThan(0, $id, 'The orphaned fixture row is gone.');
+
+        self::assertSame(
+            'ERROR: user_missing',
+            WpCli::evaluate(sprintf(
+                '$r = wpmcp_renew(%d); echo is_wp_error($r) ? "ERROR: " . $r->get_error_code() : $r;',
+                $id
+            ), 1)
         );
     }
 

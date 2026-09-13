@@ -613,6 +613,33 @@ function wpmcp_token_state($row) {
 }
 
 /**
+ * What to SHOW an operator about a row: its timer state, or the fact that its owner is
+ * gone.
+ *
+ * SEPARATE FROM wpmcp_token_state(), which is about the two timers and nothing else and
+ * is called on every request. This one asks WordPress a question - does this user still
+ * exist - and is for the admin table and for wpmcp_renew(), both of which happen by hand.
+ *
+ * WHY IT EXISTS. A token whose bound user has been deleted is refused on every request
+ * with reason=user_missing (see wpmcp_validate), and yet its timers can say `active`
+ * indefinitely. The admin table showed exactly that: `active`, a Renew button, and a
+ * green "Token renewed - the client needs no edit" notice for a token the endpoint
+ * refuses every time. A status column that says a token is fine when it is not is worse
+ * than no status column.
+ *
+ * DEAD WINS over owner_missing, because a dead row is dead either way and the cron is
+ * about to remove it; there is nothing an operator can do about either fact.
+ */
+function wpmcp_token_status($row) {
+    $state = wpmcp_token_state($row);
+
+    if ($state === 'dead') { return 'dead'; }
+    if (!get_userdata((int) $row->user_id)) { return 'owner_missing'; }
+
+    return $state;
+}
+
+/**
  * Validate a raw token against the current request.
  *
  * Returns the token row (object) on success, or a WP_Error whose code is the INTERNAL
@@ -758,6 +785,19 @@ function wpmcp_renew($id) {
         return new WP_Error(
             'dead',
             'That token has reached the end of its lifetime. Mint a new one.'
+        );
+    }
+
+    // A token whose user was deleted is refused on every request, whatever its timers
+    // say. Renewing it would move a window nothing will ever look at and hand the
+    // operator a success notice for a token that does not work - the same false green
+    // the admin table used to show. Refuse, and say which of the two it is.
+    if (!get_userdata((int) $row->user_id)) {
+        return new WP_Error(
+            'user_missing',
+            'That token runs as WordPress user ' . (int) $row->user_id
+            . ', who no longer exists. Renewing it would not make it work; revoke it and'
+            . ' mint a new one for a user who does.'
         );
     }
 

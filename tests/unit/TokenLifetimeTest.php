@@ -185,6 +185,74 @@ final class TokenLifetimeTest extends TestCase
         self::assertSame('dead', \wpmcp_token_state($this->row($now - self::HOUR, $now)));
     }
 
+    /**
+     * wpmcp_token_status() is the timer state PLUS the one fact the timers cannot see:
+     * whether the user the token runs as still exists.
+     *
+     * A token whose owner was deleted is refused on every request with
+     * reason=user_missing, and yet its timers can say `active` for a year. The admin
+     * table showed exactly that - `active`, with a Renew button - which is a status
+     * column telling an operator a broken token is fine.
+     *
+     * @group sprint-7
+     */
+    public function testTheDisplayStatusReportsAMissingOwner(): void
+    {
+        $now = time();
+
+        // Nobody is registered, so user 12 does not exist.
+        self::assertSame(
+            'owner_missing',
+            \wpmcp_token_status($this->row($now + self::HOUR, $now + 30 * self::DAY)),
+            'A token running as a deleted user still reads as usable.'
+        );
+        self::assertSame(
+            'owner_missing',
+            \wpmcp_token_status($this->row($now - self::HOUR, $now + 30 * self::DAY))
+        );
+
+        WordPressRuntime::addUser(12, 'wpmcp-unit-owner');
+
+        self::assertSame('active', \wpmcp_token_status($this->row($now + self::HOUR, $now + 30 * self::DAY)));
+        self::assertSame('dormant', \wpmcp_token_status($this->row($now - self::HOUR, $now + 30 * self::DAY)));
+    }
+
+    /**
+     * Dead wins over a missing owner: the row is dead either way and the cron is about to
+     * remove it, so there is nothing an operator can do about either fact - and the
+     * dimming and the withheld Renew button are the same for both.
+     *
+     * @group sprint-7
+     */
+    public function testDeadOutranksAMissingOwner(): void
+    {
+        $now = time();
+
+        self::assertSame(
+            'dead',
+            \wpmcp_token_status($this->row($now - 30 * self::DAY, $now - self::HOUR))
+        );
+    }
+
+    /**
+     * And the timer function itself stays about the timers. It runs on every request and
+     * must not start asking WordPress whether a user exists - wpmcp_validate() already
+     * checks that, earlier and for a different reason.
+     *
+     * @group sprint-7
+     */
+    public function testTheTimerStateDoesNotAskAboutTheOwner(): void
+    {
+        $now = time();
+
+        self::assertSame(
+            'active',
+            \wpmcp_token_state($this->row($now + self::HOUR, $now + 30 * self::DAY)),
+            'wpmcp_token_state() changed its answer because of the owner. That is'
+            . ' wpmcp_token_status()\'s job; this one is called on every request.'
+        );
+    }
+
     /* ---------------------------------------------------------------- validation */
 
     /**

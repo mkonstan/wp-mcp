@@ -216,6 +216,37 @@ final class TokenRenewTest extends TestCase
     }
 
     /**
+     * A token whose owner was deleted cannot be renewed, and the refusal says which
+     * problem it is.
+     *
+     * The failure this closes is a green notice: the row's timers can read `active` for a
+     * year while every request is refused with reason=user_missing, so Renew "succeeded"
+     * and told the operator "the client needs no edit" about a token that does not work.
+     *
+     * @group sprint-7
+     */
+    public function testRenewingATokenWhoseOwnerIsGoneIsRefused(): void
+    {
+        $now = time();
+
+        $this->wpdb->row = $this->row($now - self::HOUR, $now + 30 * self::DAY);
+        $this->wpdb->row->user_id = 4242; // not registered in the runtime stubs
+
+        $result = \wpmcp_renew(77);
+
+        self::assertTrue(\is_wp_error($result), 'A token with no owner was renewed.');
+        self::assertSame('user_missing', $result->get_error_code());
+        self::assertStringContainsString(
+            '4242',
+            $result->get_error_message(),
+            'The message does not name the missing user, so an admin cannot tell what to'
+            . ' do about it.'
+        );
+        self::assertSame([], $this->wpdb->updates, 'A refused renew still wrote to the row.');
+        self::assertSame([], WordPressRuntime::firedActions('wpmcp_auth_event'));
+    }
+
+    /**
      * A row that is not there is refused too, with its own code - the admin table and
      * the POST that renews from it are two separate requests, so a row can be revoked
      * in between.

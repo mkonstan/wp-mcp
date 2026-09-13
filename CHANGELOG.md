@@ -108,8 +108,11 @@ Run automatically on the first request after the update, and idempotent.
 - The token is shown once, with the constant URL, the `Authorization` header line, a
   three-step recipe for a claude.ai or Claude Desktop custom connector, and the equivalent
   `claude mcp add` line.
-- The table gains **Status** (active / dormant / dead), *Active until* and *Lifetime
-  ends*, and a **Renew** button beside Revoke on every row that is not dead.
+- The table gains **Status** (active / dormant / dead, or *owner missing* when the
+  WordPress user the token runs as has been deleted), *Active until* and *Lifetime ends*,
+  and a **Renew** button beside Revoke - offered only on rows where renewing can actually
+  work, so not on a dead row and not on one whose owner is gone. `wpmcp_renew()` refuses
+  both, naming which.
 
 ### Docs and tooling
 

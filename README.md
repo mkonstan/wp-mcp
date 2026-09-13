@@ -74,8 +74,10 @@ twice-daily chore. Renew moves the window without touching the credential.
 
 The token is shown once. Only its SHA-256 hash is stored, so the page cannot show it
 again. The table below it lists what is live, the user each token runs as, each token's
-state (active / dormant / dead), when its window and its lifetime end, and its last use,
-with **Renew** and **Revoke** buttons per row.
+state (active / dormant / dead, or **owner missing** when the WordPress user it runs as
+has been deleted), when its window and its lifetime end, and its last use, with **Renew**
+and **Revoke** buttons per row. Renew is offered only where it can work: not on a dead row,
+and not on one whose owner is gone.
 
 When a client starts getting `401`, the table is where you find out which timer ran out:
 dormant needs Renew and nothing else, dead needs a new token and one edit of the client.

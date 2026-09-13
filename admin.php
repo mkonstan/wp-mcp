@@ -314,17 +314,17 @@ function wpmcp_render_admin() {
         <?php if (!$rows): ?>
           <tr><td colspan="9"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
         <?php else: foreach ($rows as $r):
-            $state = wpmcp_token_state($r);
+            $status = wpmcp_token_status($r);
             // A deleted user leaves the id behind; say so rather than printing a bare
             // number, because such a token is dead and the admin needs to know why.
             $owner = get_userdata((int) $r->user_id); ?>
-          <tr<?php echo $state === 'dead' ? ' style="opacity:.5"' : ''; ?>>
+          <tr<?php echo $status === 'dead' ? ' style="opacity:.5"' : ''; ?>>
             <td><?php echo esc_html($r->label); ?></td>
             <td><?php echo $owner
                 ? esc_html($owner->user_login)
                 : '<em>' . esc_html('deleted user #' . (int) $r->user_id) . '</em>'; ?></td>
             <td><?php echo esc_html($r->scope); ?></td>
-            <td><?php echo esc_html($state); ?></td>
+            <td><?php echo esc_html(str_replace('_', ' ', $status)); ?></td>
             <td><?php echo esc_html($r->active_until); ?>
                 <span class="description">(<?php echo esc_html(wpmcp_format_duration($r->window_secs)); ?>)</span></td>
             <td><?php echo esc_html($r->expires_at); ?></td>
@@ -332,9 +332,12 @@ function wpmcp_render_admin() {
             <td><?php echo (int) $r->use_count; ?></td>
             <td style="white-space:nowrap">
               <?php // RENEW IS OFFERED ONLY WHERE IT CAN WORK. A dead row has nothing
-                    // left to extend - wpmcp_renew() refuses one - so showing the button
-                    // would be offering an action that answers with an error. ?>
-              <?php if ($state !== 'dead'): ?>
+                    // left to extend, and a row whose owner was deleted is refused on
+                    // every request whatever its timers say - wpmcp_renew() refuses both
+                    // - so showing the button would be offering an action that answers
+                    // with an error, or worse, a green notice for a token that does not
+                    // work. ?>
+              <?php if ($status === 'active' || $status === 'dormant'): ?>
                 <form method="post" style="display:inline;margin:0">
                   <?php wp_nonce_field('wpmcp_renew'); ?>
                   <input type="hidden" name="wpmcp_action" value="renew">
