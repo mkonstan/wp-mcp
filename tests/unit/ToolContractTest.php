@@ -339,7 +339,13 @@ final class ToolContractTest extends TestCase
 
         foreach (WireSerializationTest::catalog() as $name => $tool) {
             $description = $tool['description'];
-            $sentenceEnd = strpos($description, '.');
+
+            // A PERIOD FOLLOWED BY A SPACE OR THE END OF THE STRING, not any period.
+            // The first version of this test looked for any '.' and code-delete passed on
+            // the dot in `.bak` at index 44 while its real first sentence ran to 63.
+            $sentenceEnd = preg_match('/\.(\s|$)/', $description, $match, PREG_OFFSET_CAPTURE) === 1
+                ? $match[0][1]
+                : false;
 
             self::assertNotFalse(
                 $sentenceEnd,

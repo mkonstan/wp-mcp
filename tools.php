@@ -1399,7 +1399,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a file in the active theme (moved to .bak, not unlinked). Args: path (required).',
+        'description' => 'Delete a file in the theme. Active theme only; the file is moved to .bak rather than unlinked. Args: path (required).',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
