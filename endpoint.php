@@ -226,8 +226,8 @@ function wpmcp_origin_of($url) {
  *
  * WORTH KNOWING: get_home_url() returns the option's URL with its scheme REPLACED by
  * https whenever is_ssl() is true (wp-includes/link-template.php). On the site under
- * test the `home` option is `http://jaygroup.local` and home_url() still answers
- * `https://jaygroup.local` over TLS - verified. Since wpmcp_request_is_secure() runs
+ * test the `home` option is `http://example.local` and home_url() still answers
+ * `https://example.local` over TLS - verified. Since wpmcp_request_is_secure() runs
  * before this, the allowlist is therefore built from https origins on any request that
  * gets this far, which is exactly what a browser will have sent.
  */

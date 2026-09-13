@@ -37,7 +37,7 @@ abstract class FixtureIntegrationTestCase extends IntegrationTestCase
         if ($url === '') {
             self::markTestSkipped(
                 'Fixture-bearing integration tests skipped: WPMCP_TEST_URL is not set.'
-                . ' e.g. WPMCP_TEST_URL=https://jaygroup.local composer test:integration'
+                . ' e.g. WPMCP_TEST_URL=https://example.local composer test:integration'
             );
         }
 

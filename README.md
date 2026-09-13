@@ -15,9 +15,11 @@ PHP files, a token table, and one REST route that stays dormant until a live tok
 | WordPress | 5.5 or newer |
 | HTTPS | required; the endpoint refuses plaintext with 403 before it reads the token |
 
-The WordPress floor is set by `wp_new_comment()`, which `reply-comment` uses: the
-`comment_type` argument it passes arrived in 5.5.0. Everything else the plugin calls is
-older.
+The WordPress floor is `wp_new_comment()`, the function `reply-comment` hands its comment
+to. Core's history for it reads `@since 5.5.0 Introduced the comment_type argument`: from
+5.5 that key in the data you pass is an input the function reads, defaulting to `comment`
+when it is empty. `reply-comment` passes it, so on anything older it is passing an argument
+the function did not take. Everything else the plugin calls is older than 5.5.
 
 HTTPS is not optional, and behind a proxy it needs one line of configuration. Read
 [HTTPS enforcement depends on your proxy](#https-enforcement-depends-on-your-proxy)
@@ -162,8 +164,9 @@ proxy_set_header X-Forwarded-Proto $scheme;
 A proxy, CDN or development stack that forwards the client's value makes this gate
 advisory. A client can then POST over plain HTTP with `X-Forwarded-Proto: https` and be
 accepted, with the token in cleartext. `composer test:infra` asks a running host whether
-that is the case; it is expected to fail on Local by Flywheel, whose router forwards the
-client's header.
+that is the case, and it is expected to fail on Local by Flywheel, whose router forwards
+the client's header. That pair of tests is the only part of the suite that needs a host
+with TLS, which is why it has its own command rather than living in the main run.
 
 For a development site with no certificate, and nowhere else,
 `define('WPMCP_ALLOW_INSECURE', true);` in `wp-config.php` turns the gate off.
@@ -250,13 +253,33 @@ add_filter('wpmcp_allowed_origins', fn($o) => array_merge($o, ['https://claude.a
 the proxy, which makes the IP pin see every client as the same machine. Only trust a
 forwarded header from a proxy you control.
 
-`wpmcp_auth_event` (action) fires once per request with the authorization decision and its
-reason, which is the thing the wire deliberately does not carry: all six token failures
-are one byte-identical 401. It receives the event type and a context array.
+`wpmcp_auth_event` (action) reports what the wire deliberately does not: all six ways a
+token can fail are one byte-identical 401, and the reason lives here. It receives the event
+type and a context array, and every context carries `ip`.
+
+There is no success event. A request that is accepted fires nothing, apart from `pin_bind`
+the first time a token calls a tool, so an audit listener that waits for an "ok" waits
+forever. The ten types:
+
+| `$type` | Fired when | Context beyond `ip` |
+|---|---|---|
+| `mint` | a token was created | `token_id`, `user_id`, `created_by`, `scope`, `ttl` |
+| `revoke` | a token row was deleted | `token_id`, `user_id` |
+| `validate_fail` | a token was refused | `reason`, sometimes `token_id` and `user_id` |
+| `pin_bind` | a token's IP was pinned by its first tool call | `token_id`, `user_id` |
+| `scope_deny` | a read token asked for a write tool | `token_id`, `user_id`, `tool`, `scope` |
+| `origin_deny` | the `Origin` header was not one of ours | `origin` |
+| `insecure_deny` | the request was not over HTTPS | nothing |
+| `content_type_deny` | the POST was not `application/json` | `content_type` |
+| `body_too_large` | `Content-Length` over the cap | `length` |
+| `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
+
+`reason` on `validate_fail` is one of `missing`, `malformed`, `not_found`, `user_missing`,
+`expired`, `ip_mismatch`. A context never contains a token or its hash.
 
 ```php
 add_action('wpmcp_auth_event', function ($type, $context) {
-    // $type: insecure_deny, origin_deny, content_type_deny, validate_fail, scope_deny, ok
+    if ($type === 'validate_fail') { /* $context['reason'], $context['ip'] */ }
 }, 10, 2);
 ```
 
@@ -273,7 +296,7 @@ install`, then:
 | `composer test` | Both tiers below. | Nothing, though integration self-skips without a site. |
 | `composer test:unit` | Pure PHP: framing, the schema validator, serialization, version negotiation, cursors, the version invariant. | PHP 8.1+. Seconds. |
 | `composer test:integration` | Black-box HTTP against a real site: real users, real roles, real capability checks, real TLS, both token forms. | `WPMCP_TEST_URL`, and `wp` on PATH to seed fixtures. Minutes. |
-| `composer test:infra` | One test, about your deployment rather than the code: whether the HTTPS gate is real on this host. | A running host at `WPMCP_TEST_URL`. Out of `composer test` and out of CI. |
+| `composer test:infra` | Two tests that only a host with real TLS can answer: that a valid token over plain HTTP is refused, and that a forwarded `X-Forwarded-Proto` cannot talk its way past that refusal. | An `https://` host at `WPMCP_TEST_URL`. Fails rather than skips on a host without TLS. Out of `composer test` and out of CI. |
 | `composer test:client` | A real MCP client (the Claude Code CLI) handshakes with your site, lists its tools, calls one, and the answer is checked against your database. | `claude` on PATH, and one Claude API call. Out of `composer test` and out of CI. |
 
 `test:client` is the only test here that is not our own client asserting our own beliefs.

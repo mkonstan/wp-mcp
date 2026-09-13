@@ -36,7 +36,7 @@ abstract class IntegrationTestCase extends TestCase
             self::markTestSkipped(
                 'Integration tier skipped: WPMCP_TEST_URL is not set. Point it at a running'
                 . ' WordPress with the plugin active, e.g.'
-                . ' WPMCP_TEST_URL=https://jaygroup.local composer test:integration'
+                . ' WPMCP_TEST_URL=https://example.local composer test:integration'
             );
         }
 

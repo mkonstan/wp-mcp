@@ -28,8 +28,11 @@ admin who minted them.
 - Upgrading adds a `user_id` column to the token table and backfills it from the minting
   admin. The check runs on load, not on activation, because activation does not fire for a
   plugin updated in place.
-- Every accept and refusal fires a `wpmcp_auth_event` action once, carrying the reason the
-  wire deliberately does not. Values are redacted at every depth before the action fires.
+- Ten `wpmcp_auth_event` actions report what the wire deliberately does not: which of the
+  six token failures it was, a refused scope, a refused origin, a tool refused at
+  registration, a mint, a revoke, an IP pin. There is no success event, so a listener
+  waiting for one waits forever. Values are redacted at every depth before the action
+  fires, and a context never carries a token or its hash. README.md lists the ten.
 
 ### Transport
 
@@ -62,8 +65,8 @@ admin who minted them.
 
 ### JSON-RPC framing
 
-- An array body is refused with `-32600` and the message "batch not supported" rather than
-  being half-processed.
+- An array body is refused with `-32600` and the message "Batch requests are not
+  supported" rather than being half-processed.
 - A notification (no `id`) is answered with 202 and an empty body. A request that carries
   an `id` is answered even when its method name looks like a notification.
 - A body whose `Content-Length` exceeds 4 MiB is refused with 413 before the token is
@@ -94,8 +97,8 @@ admin who minted them.
   reach the model and nothing would say so.
 - Every built-in description now opens with a verb-first summary that ends inside the
   first 50 characters, which is roughly all a client shows the model until the tool is
-  fully loaded. `site-info`, `list-comments` and `code-write` were reworded; the detail
-  after the first sentence is unchanged.
+  fully loaded. `site-info`, `list-comments`, `code-write` and `code-delete` were
+  reworded; the detail after the first sentence is unchanged.
 
 ### Uninstall
 
@@ -109,11 +112,13 @@ admin who minted them.
 - `composer test:client` runs a real MCP client (the Claude Code CLI) against your site
   and checks the answer against your database. It is out of `composer test` and out of CI
   because it costs an API call.
-- `composer test:infra` asks your deployment, not the code, whether HTTPS enforcement is
-  real.
+- `composer test:infra` holds the two checks that only a host with real TLS can answer:
+  that a valid token over plain HTTP is refused, and that a forwarded `X-Forwarded-Proto`
+  cannot talk its way past that refusal. It fails rather than skips on a host without
+  TLS.
 - CI runs the unit suite on PHP 8.1 through 8.4 and the integration suite against a
-  `wp-env` container, and asserts that each sprint gate actually executed rather than
-  skipped. The release workflow cannot publish while any of it is red.
+  `wp-env` container, and checks that every test in it actually ran rather than skipped.
+  The release workflow cannot publish while any of it is red.
 
 
 ## 0.3.5

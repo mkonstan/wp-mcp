@@ -12,7 +12,7 @@ git tag v1.0.0 && git push origin v1 --tags
 
 The tag push triggers `.github/workflows/release.yml`. It lints every PHP file, runs the
 unit suite on PHP 8.1 through 8.4, runs the integration suite against a `wp-env`
-container, and asserts each sprint gate executed rather than skipped. Only then does the
+container, and checks that every test in it ran rather than skipped. Only then does the
 `release` job build `wp-mcp.zip`, unzip it, compare every file against the source, lint
 the extracted copies, and publish a GitHub Release with the zip attached.
 

@@ -4,14 +4,14 @@ Two paths, and which one you can use is decided by **where the client dials from
 
 | Client | Dials from | Works against |
 |---|---|---|
-| **Claude Code CLI** | your own machine | any site your machine can reach — **including a Local site** like `jaygroup.local` |
+| **Claude Code CLI** | your own machine | any site your machine can reach — **including a Local site** like `example.local` |
 | **Claude Desktop / claude.ai custom connector** | Anthropic's infrastructure | only a **publicly reachable HTTPS site** with a publicly valid certificate |
 
 **A `.local` site cannot be used with a Claude Desktop or claude.ai custom connector at all:**
 the request is made from Anthropic's servers, which cannot resolve the hostname or route to
 your machine, and no amount of local certificate trust changes that.
 
-So the Sprint 4 client gate is automated against the Claude Code CLI (§1), and the
+So the automated client check runs against the Claude Code CLI (§1), and the
 Desktop/claude.ai walkthrough (§2) is for a real site.
 
 ---
@@ -34,17 +34,17 @@ composer test:client          # or: bash bin/claude-code-smoke.sh
    a tool that actually ran.
 5. Revokes the token and removes the temp directory on **any** exit, via a trap.
 
-Real output, `jaygroup.local`, 2026-09-12:
+Real output, against a Local site, 2026-09-12:
 
 ```
 smoke: claude 2.1.266 (Claude Code)
-smoke: site   https://jaygroup.local
-smoke: NODE_EXTRA_CA_CERTS=C:\Users\vbwiz\AppData\Roaming\Local\run\router\nginx\certs\jaygroup.local.crt
-smoke: expecting the tool to report site name 'JG' and WordPress 7.1
+smoke: site   https://example.local
+smoke: NODE_EXTRA_CA_CERTS=%APPDATA%\Local\run\router\nginx\certs\example.local.crt
+smoke: expecting the tool to report site name 'Example' and WordPress 7.1
 smoke: token minted (read scope, 15 min, label wpmcp-test-claude-code-...).
 smoke: running the client...
-{"name":"JG","url":"https:\/\/jaygroup.local","wp_version":"7.1","active_theme":"JayGroup 2.00","active_plugins":18}
-smoke: PASS - the client reported 'JG' on WordPress 7.1, both read from the database ...
+{"name":"Example","url":"https:\/\/example.local","wp_version":"7.1","active_theme":"Example Theme","active_plugins":18}
+smoke: PASS - the client reported 'Example' on WordPress 7.1, both read from the database ...
 smoke: token revoked.
 ```
 
