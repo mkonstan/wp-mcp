@@ -41,13 +41,21 @@ if ($reason !== '') {
     exit(2);
 }
 
-$report = Fixtures::foreignDebris();
+// TWO KINDS, and the second one has no name to match on: an opt-in switch is a shared
+// value, so "did a run leave it on" cannot be answered by the run prefix. See
+// Fixtures::switchesLeftOn().
+$report   = Fixtures::foreignDebris();
+$switches = Fixtures::switchesLeftOn();
 
-if ($report === '') {
+if ($report === '' && $switches === '') {
     echo "debris-check: clean - no wpmcp-test-* users, posts, terms, tokens, mu-plugins,"
-        . " transients, theme files or file-version rows.\n";
+        . " transients, theme files or file-version rows, and no opt-in switch left on.\n";
     exit(0);
 }
 
 echo $report;
+
+if ($report !== '' && $switches !== '') { echo "\n"; }
+
+echo $switches;
 exit(1);

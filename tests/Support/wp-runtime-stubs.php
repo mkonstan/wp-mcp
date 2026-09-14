@@ -48,6 +48,14 @@ if (!isset($GLOBALS['wpmcp_test_wp'])) {
     $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array(), 'caps' => array(), 'actions' => array());
 }
 
+// ADDED FOR SPRINT 9. `$wpdb->get_results($sql, ARRAY_N)` is the first call in this
+// plugin to name one of wpdb's output constants, and without it the call raises an
+// "Undefined constant" Error that sql-select's own catch swallows into a trace - so the
+// unit tier reported every green path as a server failure. Core defines it in
+// wp-includes/wp-db.php; the value is core's.
+if (!defined('ARRAY_N')) { define('ARRAY_N', 'ARRAY_N'); }
+if (!defined('ARRAY_A')) { define('ARRAY_A', 'ARRAY_A'); }
+
 if (!class_exists('WP_Error')) {
     /**
      * The subset of WP_Error the plugin uses: a code, a message, and the $data array

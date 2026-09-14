@@ -46,6 +46,67 @@ final class FakeWpdb
     /** Every delete() call, in order: ['table' => ..., 'where' => ...]. */
     public array $deletes = [];
 
+    /* --------------------------------------------------------------------
+     * Sprint 9: the slice sql-select touches.
+     *
+     * It is a READ path, so none of this records a write - what it records is the ORDER
+     * of the session statements, which is the whole of sql-select's safety argument:
+     * caps, then START TRANSACTION READ ONLY, then the wrapped statement, then ROLLBACK,
+     * and ROLLBACK last WHATEVER HAPPENED. `query()` already keeps them in $queries.
+     * ------------------------------------------------------------------ */
+
+    /** What get_results() answers with: a list of positional rows. */
+    public array $results = [];
+
+    /** Column names get_col_info('name') answers with. */
+    public array $columnNames = [];
+
+    /** Set by get_results() from $errorOnGetResults; read by the code under test. */
+    public string $last_error = '';
+
+    /** The message get_results() should leave in last_error, or '' for success. */
+    public string $errorOnGetResults = '';
+
+    /** A throwable get_results() should throw instead of answering. */
+    public ?\Throwable $throwOnGetResults = null;
+
+    /** What db_server_info() reports. Put 'MariaDB' in it to take the other branch. */
+    public string $serverInfo = '8.4.0';
+
+    /** Current suppress_errors state; the setter returns the PREVIOUS one, as wpdb does. */
+    public bool $suppressErrors = false;
+
+    public function get_results($query, $output = null)
+    {
+        $this->queries[] = $query;
+
+        if ($this->throwOnGetResults !== null) {
+            throw $this->throwOnGetResults;
+        }
+
+        $this->last_error = $this->errorOnGetResults;
+
+        return $this->errorOnGetResults === '' ? $this->results : null;
+    }
+
+    public function get_col_info($info = 'name', $col_offset = -1)
+    {
+        return $this->columnNames;
+    }
+
+    public function suppress_errors($suppress = true)
+    {
+        $previous             = $this->suppressErrors;
+        $this->suppressErrors = (bool) $suppress;
+
+        return $previous;
+    }
+
+    public function db_server_info()
+    {
+        return $this->serverInfo;
+    }
+
     public function insert($table, $data, $format = null)
     {
         $this->inserts[] = ['table' => $table, 'data' => $data, 'format' => $format];

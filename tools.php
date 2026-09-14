@@ -1764,27 +1764,73 @@ function wpmcp_sql_enabled() {
 }
 
 /**
- * Is the server MariaDB? Asked once per request, because it is a property of the
- * connection and the answer costs a round trip on some drivers.
+ * May the current user read the database? Null when yes, a WP_Error when no.
  *
- * The two flavours spell the statement timeout differently and neither knows the
- * other's name: `SET SESSION max_statement_time = 5` is 1193 "Unknown system variable"
- * on MySQL 8.4 (measured), and MySQL's MAX_EXECUTION_TIME does not exist on MariaDB.
- * mysqli reports MariaDB as something like `5.5.5-10.6.12-MariaDB`, so the name is in
- * the string either way.
+ * NOT IN SPRINT 9'S BRIEF, AND ADDED ANYWAY, because this plugin has already paid for
+ * the lesson once. The brief's gates are the switch plus admin scope, and admin SCOPE is
+ * not an administrator: wpmcp_mint() takes an owner, so an administrator can mint an
+ * admin-scope token that "Runs as" an Editor, and that is exactly the shape sprint 8
+ * found in front of the code tools - they were gated on scope and the option alone, so
+ * an Editor-bound admin token could read and rewrite the active theme. See
+ * wpmcp_code_forbidden(), whose docblock is the same paragraph.
+ *
+ * The capability is `manage_options`, which is the one wp-admin requires to reach the
+ * settings page this tool's own switch lives on. A caller who may not look at the
+ * plugin's settings has no business reading every row of every table it can see -
+ * wp_users and its password hashes included.
+ *
+ * PER-CALLER, AND SO IT IS NOT A LISTING CONDITION. wpmcp_tools() lists the tool on the
+ * site-wide switch and this refuses per token, the same split the code tools make: the
+ * registry is built once per request but the switch is the same answer for everybody,
+ * while `manage_options` is not.
  */
-function wpmcp_sql_is_mariadb() {
-    static $answer = null;
-
-    if ($answer === null) {
-        global $wpdb;
-        $info   = is_object($wpdb) && method_exists($wpdb, 'db_server_info')
-            ? (string) $wpdb->db_server_info()
-            : '';
-        $answer = (stripos($info, 'mariadb') !== false);
+function wpmcp_sql_forbidden() {
+    if (!current_user_can('manage_options')) {
+        return wpmcp_cannot('read this site\'s database');
     }
 
-    return $answer;
+    return null;
+}
+
+/**
+ * What the server calls itself. Asked once per request - it is a property of the
+ * connection, it cannot change under us, and on some drivers it costs a round trip.
+ */
+function wpmcp_sql_server_info() {
+    static $info = null;
+
+    if ($info === null) {
+        global $wpdb;
+        $info = is_object($wpdb) && method_exists($wpdb, 'db_server_info')
+            ? (string) $wpdb->db_server_info()
+            : '';
+    }
+
+    return $info;
+}
+
+/**
+ * The session statement-timeout statement for a server that describes itself this way.
+ *
+ * THE TWO FLAVOURS DO NOT KNOW EACH OTHER'S NAME FOR IT, and that is measured rather
+ * than assumed: `SET SESSION max_statement_time = 5` is 1193 "Unknown system variable"
+ * on MySQL 8.4, and MySQL's MAX_EXECUTION_TIME does not exist on MariaDB. One spelling
+ * would therefore leave one of the two flavours with no statement timeout at all - and
+ * silently, because a failed SET only leaves a string in last_error. MySQL counts
+ * MILLISECONDS, MariaDB counts SECONDS. mysqli reports MariaDB as something like
+ * `5.5.5-10.6.12-MariaDB`, so the name is in the string either way.
+ *
+ * PURE, AND TAKING THE DESCRIPTION AS AN ARGUMENT, so both branches can be tested from
+ * a machine with only one of the two servers on it. Nobody on this project has reached
+ * a MariaDB; the MySQL branch is measured on 8.4.0 and the MariaDB branch is this
+ * function plus its test.
+ */
+function wpmcp_sql_timeout_statement($serverInfo) {
+    if (stripos((string) $serverInfo, 'mariadb') !== false) {
+        return 'SET SESSION max_statement_time = ' . (WPMCP_SQL_TIMEOUT_MS / 1000);
+    }
+
+    return 'SET SESSION MAX_EXECUTION_TIME = ' . (int) WPMCP_SQL_TIMEOUT_MS;
 }
 
 /**
@@ -1912,6 +1958,9 @@ function wpmcp_sql_errno() {
 function wpmcp_sql_select_run($sql) {
     global $wpdb;
 
+    $denied = wpmcp_sql_forbidden();
+    if ($denied) { return $denied; }
+
     // A human types `SELECT 1;`. One trailing semicolon and the whitespace around it, and
     // nothing else - no comment stripping, no normalisation. Anything further would be
     // this file deciding what the statement means, which is the job it refuses to take.
@@ -1945,13 +1994,7 @@ function wpmcp_sql_select_run($sql) {
     $thrown        = null;
 
     try {
-        if (wpmcp_sql_is_mariadb()) {
-            // MariaDB counts SECONDS, as a decimal, under a different name entirely.
-            $wpdb->query('SET SESSION max_statement_time = ' . (WPMCP_SQL_TIMEOUT_MS / 1000));
-        } else {
-            $wpdb->query('SET SESSION MAX_EXECUTION_TIME = ' . (int) WPMCP_SQL_TIMEOUT_MS);
-        }
-
+        $wpdb->query(wpmcp_sql_timeout_statement(wpmcp_sql_server_info()));
         $wpdb->query("SET SESSION optimizer_switch = 'derived_merge=off'");
         $wpdb->last_error = '';
 

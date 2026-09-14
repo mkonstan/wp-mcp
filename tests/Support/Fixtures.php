@@ -835,6 +835,46 @@ final class Fixtures
             . implode("\n", $lines) . "\n";
     }
 
+    /**
+     * The one piece of debris that is not a NAME: an opt-in switch left on.
+     *
+     * '' when the sql-select switch is off, a report when it is on.
+     *
+     * WHY THIS ONE IS WORTH A CHECK. Every other fixture this suite makes carries the run
+     * prefix, so it is findable and attributable. An option is a single shared value with
+     * no room for a prefix: turn `wpmcp_sql_enabled` on and you have turned it on for the
+     * site, for good, for every admin-scope token - and sql-select reads every table the
+     * WordPress database user can read, wp_users among them. A test run that left that
+     * behind would be the single most expensive thing this suite could do to a site.
+     *
+     * SO NO TEST WRITES IT. SqlSelectTest arms the switch with a `pre_option_` filter in a
+     * mu-plugin, gated on a per-request header, and asserts the stored option is the same
+     * value afterwards as before. This check is the backstop for the day somebody reaches
+     * for update_option() instead, and for a run that was killed mid-test.
+     *
+     * An operator who turned the switch on deliberately on their own site will see this
+     * line too. That is the right trade: a false alarm costs one sentence, and the failure
+     * it guards against is silent.
+     */
+    public static function switchesLeftOn(): string
+    {
+        $value = trim(WpCli::evaluate(
+            'echo get_option("wpmcp_sql_enabled") ? "ON" : "OFF";'
+        ));
+
+        if ($value !== 'ON') {
+            return '';
+        }
+
+        return "OPT-IN SWITCH LEFT ON.\n"
+            . "  option wpmcp_sql_enabled is ON - sql-select is exposed to every"
+            . " admin-scope token on this site.\n"
+            . "  No test in this suite writes that option (they filter it per request), so"
+            . " a suite run that turned it\n"
+            . "  on is a bug. Turn it off in Settings > WP MCP, or with"
+            . " `wp option update wpmcp_sql_enabled 0`.\n";
+    }
+
     /** foreignDebris() to STDERR, at most once per distinct report per process. */
     public static function warnAboutForeignDebris(): void
     {
