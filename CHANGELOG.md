@@ -100,10 +100,18 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Three gates, all required:** the switch, an admin-scope token, and `manage_options` on
   the token's user. Admin scope is not an administrator, since a token can be minted to run
   as any user.
-- **The plugin's own two tables are refused by name.** `{prefix}wpmcp_tokens` and
-  `{prefix}wpmcp_file_versions`. The database user owns them, so this is the one rule the
-  server cannot enforce; it is a blunt name check that refuses the statement if either name
-  appears anywhere in it, comments and string literals included.
+- **The plugin's own two tables, and `LOAD_FILE`, are refused by name.**
+  `{prefix}wpmcp_tokens` and `{prefix}wpmcp_file_versions` - the database user owns them, so
+  this is the one rule the server cannot enforce. `LOAD_FILE()` because it passes both walls
+  (a query expression, and a read) and reads the server's disk whenever `secure_file_priv`
+  and the `FILE` privilege permit it; that is one function and not a file-read boundary, and
+  SECURITY.md says to pin `secure_file_priv` or deny `FILE` regardless. All three are a blunt
+  name check that refuses the statement if the name appears anywhere in it, comments and
+  string literals included.
+- **The session is handed back as it was found.** The prior `MAX_EXECUTION_TIME` (or
+  `max_statement_time`) and `optimizer_switch` are read before they are changed and restored
+  in the same `finally` as the `ROLLBACK`, so the connection WordPress uses for the rest of
+  the request does not carry a 5-second cap and an altered plan away from this tool.
 - **It reads everything else that connection can read**, `wp_users` and its password hashes
   included. Read [SECURITY.md](SECURITY.md) before switching it on.
 - New auth event `sql_select` (`token_id`, `user_id`, `row_count`, `truncated`,

@@ -201,8 +201,8 @@ With Allow SQL reads on, an admin token can ask one read-only SQL statement per 
 
 calls `sql-select` and comes back with columns and rows. It is for the questions the other
 tools have no shape for - counts, joins, a report across post meta - and it reads every
-table the WordPress database user can read, so leave it off unless you are using it and
-read [SECURITY.md](../SECURITY.md) first.
+table the WordPress database user can read, and on some servers files off the disk as well,
+so leave it off unless you are using it and read [SECURITY.md](../SECURITY.md) first.
 
 It answers at most 200 rows and 256 KB per call, and says so with `truncated: true`, so
 ask for an aggregate rather than a dump. Writes are refused by the database itself, not by

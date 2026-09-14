@@ -199,10 +199,14 @@ one on every comment, quote, case and encoding. When it does not, it fails silen
 direction of running something. Letting the server be the parser has one implementation
 and no second opinion to drift.
 
-The one thing the server cannot decide is that the plugin's own two tables are off limits:
-the WordPress database user created them and can read them. That is therefore the tool's
-only string inspection, and it refuses the statement if either name appears anywhere in it,
-comments and string literals included.
+What the server cannot decide is what the WordPress database user should not have been
+given. It created the plugin's own two tables and can read them; on many hosts it also holds
+`FILE`, which makes `LOAD_FILE()` - a query expression, and a read, so accepted by both walls
+- a way to read the server's disk. Those three names are therefore the tool's only string
+inspection, and it refuses the statement if any of them appears anywhere in it, comments and
+string literals included. It is a short denylist over a surface whose real fence is the
+server, not a second fence: `secure_file_priv` and the `FILE` grant are the operator's, and
+[SECURITY.md](SECURITY.md) says so.
 
 ## Why it looks plain
 

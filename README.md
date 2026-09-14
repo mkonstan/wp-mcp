@@ -309,9 +309,11 @@ Off by default, and a separate switch in the same **Settings > WP MCP** form. Sw
 on gives an admin token one more tool, `sql-select`, which runs a single read-only SQL
 statement and hands back the rows.
 
-**It reads every table the WordPress database user can read.** That is the whole point of
-it and it is the whole of the risk: `wp_users` and its password hashes, every plugin's
-tables, every option including API keys other plugins have stored there. There is no
+**It reads every table the WordPress database user can read, and - if your MySQL lets it -
+files on the server too.** That is the whole point of it and it is the whole of the risk:
+`wp_users` and its password hashes, every plugin's tables, every option including API keys
+other plugins have stored there. See *The file-reading escape hatch* below for the second
+half of that sentence. There is no
 per-table permission to configure, because there is nothing this plugin can configure -
 the connection it borrows is WordPress's own and it already has those privileges. Two
 tables are refused by name (below); everything else the connection can see, the tool can
@@ -379,6 +381,30 @@ needs a different alias, and `SHOW` / `DESCRIBE` are not query expressions, so u
 `0x`-prefixed hex rather than as text: WordPress's JSON encoder does not fail on such a
 value and does not null it either, it silently rewrites the offending byte as `?`, and a
 blob that looks like text and is not the data is worse than no answer.
+
+### The file-reading escape hatch, and what is yours to close
+
+`LOAD_FILE()` reads a file off the **server's disk** and it passes both walls: it is a query
+expression, so the wrapper takes it, and it is a read, so the transaction takes it too.
+Whether bytes actually come back is then MySQL's decision, not this plugin's - it depends on
+`secure_file_priv` and on whether your database user holds `FILE`.
+
+So `load_file` is refused by name, the same blunt way the two tables below are. **That is one
+function, not a boundary.** It is the only file-reading function reachable inside a `SELECT`
+expression (`INTO OUTFILE` and `INTO DUMPFILE`, the write side of the same privilege, are
+already syntax errors inside the wrapper), and refusing it closes the obvious route - but
+the plugin cannot promise anything about a database server it does not configure.
+
+If this matters to you, and it should if the site holds anything, set it at the server:
+
+```ini
+# my.cnf - disables LOAD_FILE, SELECT ... INTO OUTFILE and LOAD DATA INFILE outright
+secure_file_priv = NULL
+```
+
+or give the WordPress database user no `FILE` privilege. Either is worth doing whether or
+not you enable this tool: they are the only things that actually decide what MySQL will read
+for whoever can reach it.
 
 ### The two tables it will not read
 
