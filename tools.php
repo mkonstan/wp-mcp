@@ -1834,6 +1834,46 @@ function wpmcp_sql_timeout_statement($serverInfo) {
 }
 
 /**
+ * The name of that variable on this flavour, so its prior value can be read back and
+ * restored. Same branch, same pure shape, one source of truth for the spelling.
+ */
+function wpmcp_sql_timeout_variable($serverInfo) {
+    return stripos((string) $serverInfo, 'mariadb') !== false
+        ? 'max_statement_time'
+        : 'MAX_EXECUTION_TIME';
+}
+
+/**
+ * Put the two session variables back the way they were found.
+ *
+ * WHY IT IS WORTH THE TWO ROUND TRIPS. $wpdb is the connection WordPress uses for the rest
+ * of the request - every option write, every `WP_Query`, every other plugin's query. Left
+ * as this tool sets them, a 5-second server-side cap applies to every later SELECT and
+ * every later plan is built with `derived_merge` off. Neither is likely to break a page,
+ * and "the request ends in milliseconds anyway" was the first version's reasoning; but a
+ * tool that silently changes how unrelated queries are planned and timed is a tool that
+ * will one day be the answer to a bug nobody can reproduce.
+ *
+ * BEST EFFORT, AND SILENT ON FAILURE. A null prior value means the read did not work -
+ * an unexpected flavour, a proxy - and there is nothing honest to restore. The values are
+ * re-validated on the way back in even though they came from the server: they are being
+ * concatenated into SQL, and "it came from the database" is the sentence in front of most
+ * second-order injections. The timeout is a number or nothing; the switch goes through
+ * prepare().
+ */
+function wpmcp_sql_restore_session($variable, $priorTimeout, $priorSwitch) {
+    global $wpdb;
+
+    if ($priorTimeout !== null && preg_match('/^[0-9]+(\.[0-9]+)?$/', (string) $priorTimeout) === 1) {
+        $wpdb->query('SET SESSION ' . $variable . ' = ' . (string) $priorTimeout);
+    }
+
+    if ($priorSwitch !== null && preg_match('/^[A-Za-z0-9_=,]+$/', (string) $priorSwitch) === 1) {
+        $wpdb->query($wpdb->prepare('SET SESSION optimizer_switch = %s', (string) $priorSwitch));
+    }
+}
+
+/**
  * The identifiers this tool refuses to see, ANYWHERE in the statement, case-insensitively.
  *
  * THIS IS THE ONLY STRING INSPECTION IN THE TOOL AND IT EXISTS BECAUSE THE SERVER CANNOT
@@ -1866,6 +1906,40 @@ function wpmcp_sql_denied_identifiers() {
         WPMCP_TABLE,
         WPMCP_VERSIONS_TABLE,
     )));
+}
+
+/**
+ * SQL functions refused by name for the same reason the two tables are: the server will
+ * run them and the server cannot be told not to.
+ *
+ * `LOAD_FILE()` READS A FILE OFF THE SERVER'S DISK AND BOTH WALLS LET IT THROUGH. It is a
+ * valid query expression, so the derived-table wrapper accepts it, and it is a read, so
+ * `START TRANSACTION READ ONLY` accepts it too - measured through the exact wrapper on
+ * MySQL 8.4.0, errno 0 from both. Whether bytes actually come back is then decided by
+ * `secure_file_priv` and the database user's `FILE` privilege, neither of which this
+ * plugin controls and both of which are the operator's to get right. On a host where
+ * `secure_file_priv` is empty or points somewhere useful, `SELECT LOAD_FILE('.../wp-config.php')`
+ * hands over the database password and every salt, and the tool's own docs would have
+ * promised the blast radius was "the database".
+ *
+ * `INTO OUTFILE` and `INTO DUMPFILE` - the WRITE side of the same privilege - are already
+ * 1064 inside the wrapper, because they are not part of a query expression. `LOAD_FILE` is
+ * the read side and it is the one file-touching function reachable inside a SELECT
+ * expression, which is why one entry closes it rather than a list.
+ *
+ * THIS IS NOT A COMPLETE FILE-READ BOUNDARY AND MUST NOT BE DOCUMENTED AS ONE. It is one
+ * name, refused bluntly, on a surface whose real fence is the server; an operator who
+ * cares should still pin `secure_file_priv` or deny the database user `FILE`. SECURITY.md
+ * says exactly that.
+ *
+ * Matched by the same rule as the table names: anywhere in the statement, case-insensitive,
+ * with nothing stripped first. So a column called `payload_load_file` is refused too. Same
+ * deliberate over-refusal, same reason - the alternative is a lexer.
+ *
+ * @return array
+ */
+function wpmcp_sql_denied_functions() {
+    return array('load_file');
 }
 
 /**
@@ -1982,7 +2056,19 @@ function wpmcp_sql_select_run($sql) {
         }
     }
 
-    $wrapped = 'SELECT * FROM (' . $statement . ') AS wpmcp_q LIMIT ' . (int) (WPMCP_SQL_ROW_CAP + 1);
+    foreach (wpmcp_sql_denied_functions() as $function) {
+        if (stripos($statement, $function) !== false) {
+            return new WP_Error(
+                'wpmcp_sql_denied',
+                'SQL functions that read the server filesystem cannot be used: the'
+                . ' statement mentions ' . strtoupper($function) . '(). That rule matches'
+                . ' the name anywhere in the statement, including inside a comment or a'
+                . ' string literal.'
+            );
+        }
+    }
+
+    $wrapped ='SELECT * FROM (' . $statement . ') AS wpmcp_q LIMIT ' . (int) (WPMCP_SQL_ROW_CAP + 1);
 
     $started       = microtime(true);
     $suppressed    = $wpdb->suppress_errors(true);
@@ -1993,7 +2079,18 @@ function wpmcp_sql_select_run($sql) {
     $errno         = 0;
     $thrown        = null;
 
+    $timeoutVariable = wpmcp_sql_timeout_variable(wpmcp_sql_server_info());
+    $priorTimeout    = null;
+    $priorSwitch     = null;
+
     try {
+        // READ BOTH BEFORE CHANGING EITHER, so the `finally` can put them back. $wpdb is
+        // shared with the rest of the request: without this, every later WordPress SELECT
+        // ran under a 5-second server cap and with derived_merge off, which is this tool
+        // quietly changing how somebody else's query is planned.
+        $priorTimeout = $wpdb->get_var('SELECT @@SESSION.' . $timeoutVariable);
+        $priorSwitch  = $wpdb->get_var('SELECT @@SESSION.optimizer_switch');
+
         $wpdb->query(wpmcp_sql_timeout_statement(wpmcp_sql_server_info()));
         $wpdb->query("SET SESSION optimizer_switch = 'derived_merge=off'");
         $wpdb->last_error = '';
@@ -2002,6 +2099,14 @@ function wpmcp_sql_select_run($sql) {
         $inTransaction    = true;
         $wpdb->last_error = '';
 
+        // THE CAPS BOUND THE RESPONSE, NOT THE FETCH. get_results() materialises every
+        // returned cell at full width before wpmcp_sql_cell() trims one of them, so the
+        // 8 KiB and 256 KiB budgets shape what goes on the wire and not what goes into PHP
+        // memory. The wrapper's LIMIT holds the row count to 201; what bounds the width is
+        // the server's own `max_allowed_packet` per value, and what bounds the time spent
+        // building it is the statement timeout set above. Streaming with an unbuffered
+        // query is the real fix and is in analysis/BACKLOG.md; the caller is already an
+        // administrator spending their own request, which is why it is parked there.
         $rows  = (array) $wpdb->get_results($wrapped, ARRAY_N);
         $error = (string) $wpdb->last_error;
         $errno = wpmcp_sql_errno();
@@ -2017,6 +2122,14 @@ function wpmcp_sql_select_run($sql) {
     } finally {
         // WHATEVER HAPPENED. See the docblock: the rest of the request shares this handle.
         if ($inTransaction) { $wpdb->query('ROLLBACK'); }
+
+        wpmcp_sql_restore_session($timeoutVariable, $priorTimeout, $priorSwitch);
+
+        // The ROLLBACK and the two restores are this function's own statements. Whatever
+        // they left in last_error is not an answer to anybody's question - $error was
+        // captured inside the try, before any of them ran - and leaving it set would hand
+        // the next reader of last_error a failure that is not theirs.
+        $wpdb->last_error = '';
         $wpdb->suppress_errors($suppressed);
     }
 
@@ -2136,7 +2249,7 @@ function wpmcp_sql_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Run one read-only SQL SELECT. Args: sql (required). The statement is wrapped as a derived table inside a READ ONLY transaction, so anything but a single SELECT is a server syntax error. CTEs, joins, UNION and ORDER BY work; SHOW, stacked statements, INTO OUTFILE and FOR UPDATE do not, and a derived table needs unique column names. Returns JSON: columns, rows, row_count, truncated, truncated_by. At most 200 rows, 256KB of rows and 8KB per cell (cut with an ellipsis). The plugin\'s own tables are refused, even when named only in a comment. NULL is null; a non-UTF-8 value comes back as 0x-prefixed hex.',
+        'description' => 'Run one read-only SQL SELECT. Args: sql (required). The statement is wrapped as a derived table inside a READ ONLY transaction, so anything but a single SELECT is a server syntax error. CTEs, joins, UNION and ORDER BY work; SHOW, stacked statements, INTO OUTFILE and FOR UPDATE do not, and a derived table needs unique column names. Returns JSON: columns, rows, row_count, truncated, truncated_by. At most 200 rows, 256KB of rows and 8KB per cell (cut with an ellipsis). The plugin\'s own tables and LOAD_FILE are refused, even when named only in a comment. NULL is null; a non-UTF-8 value comes back as 0x-prefixed hex.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('sql' => array('type' => 'string')), 'required' => array('sql')),
         'run' => function ($a) {

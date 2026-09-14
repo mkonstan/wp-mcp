@@ -4,10 +4,10 @@
  *
  * WHAT THIS TIER CAN SEE THAT THE OTHER CANNOT: the ORDER of the statements sent to the
  * connection. Over HTTP, sql-select is a black box that either answers or does not; the
- * argument that it is safe is an argument about a sequence - session caps, then
- * `START TRANSACTION READ ONLY`, then the wrapped statement, then `ROLLBACK` - and a
- * sequence is only assertable from inside. FakeWpdb records every query in order and this
- * file reads that list.
+ * argument that it is safe is an argument about a sequence - read the session variables,
+ * set the caps, `START TRANSACTION READ ONLY`, the wrapped statement, `ROLLBACK`, put the
+ * session variables back - and a sequence is only assertable from inside. FakeWpdb records
+ * every query in order and this file reads that list.
  *
  * THE ROLLBACK IS THE ONE THAT MATTERS. $wpdb is reused for the rest of the request, so a
  * connection left inside a READ ONLY transaction fails every write WordPress makes after
@@ -45,10 +45,17 @@ final class SqlSelectRunTest extends TestCase
 
         WordPressRuntime::logInAs(11, 'wpmcp-unit-admin');
         WordPressRuntime::allowCap('manage_options');
+
+        // The two session variables the tool reads before it changes them. Real values
+        // from jaygroup, so the restore has something recognisable to put back.
+        $this->wpdb->vars = [
+            'SELECT @@SESSION.MAX_EXECUTION_TIME' => '0',
+            'SELECT @@SESSION.optimizer_switch'   => 'index_merge=on,derived_merge=on,hash_join=on',
+        ];
     }
 
     /**
-     * The sequence, in order, with ROLLBACK last.
+     * The whole sequence, in order: read, set, begin, run, roll back, put back.
      *
      * @group sprint-9
      */
@@ -61,18 +68,89 @@ final class SqlSelectRunTest extends TestCase
 
         $queries = $this->wpdb->queries;
 
-        self::assertSame('SET SESSION MAX_EXECUTION_TIME = 5000', $queries[0]);
-        self::assertSame("SET SESSION optimizer_switch = 'derived_merge=off'", $queries[1]);
-        self::assertSame('START TRANSACTION READ ONLY', $queries[2]);
+        self::assertSame('SELECT @@SESSION.MAX_EXECUTION_TIME', $queries[0]);
+        self::assertSame('SELECT @@SESSION.optimizer_switch', $queries[1]);
+        self::assertSame('SET SESSION MAX_EXECUTION_TIME = 5000', $queries[2]);
+        self::assertSame("SET SESSION optimizer_switch = 'derived_merge=off'", $queries[3]);
+        self::assertSame('START TRANSACTION READ ONLY', $queries[4]);
         self::assertSame(
             'SELECT * FROM (SELECT 1 AS one) AS wpmcp_q LIMIT 201',
-            $queries[3],
+            $queries[5],
             'The statement must be wrapped as a derived table with one more row than the'
             . ' cap. The wrapper is what makes a non-SELECT a server syntax error, and the'
             . ' 201st row is what sets `truncated`.'
         );
-        self::assertSame('ROLLBACK', $queries[4]);
-        self::assertCount(5, $queries, 'Something else was sent: ' . implode(' | ', $queries));
+        self::assertSame('ROLLBACK', $queries[6]);
+        self::assertSame('SET SESSION MAX_EXECUTION_TIME = 0', $queries[7]);
+        self::assertSame(
+            "SET SESSION optimizer_switch = 'index_merge=on,derived_merge=on,hash_join=on'",
+            $queries[8],
+            'The prior optimizer_switch must go back verbatim. $wpdb is the connection the'
+            . ' rest of the request uses.'
+        );
+        self::assertCount(9, $queries, 'Something else was sent: ' . implode(' | ', $queries));
+    }
+
+    /**
+     * The session variables are restored after a THROW as well, in the same `finally`.
+     *
+     * Same reasoning as the ROLLBACK below: the connection is handed back to WordPress
+     * either way, so "we put it back unless something went wrong" is the case that matters.
+     *
+     * @group sprint-9
+     */
+    public function testTheSessionVariablesAreRestoredOnTheThrowPathToo(): void
+    {
+        $this->wpdb->throwOnGetResults = new RuntimeException('the driver blew up');
+
+        try {
+            \wpmcp_sql_select_run('SELECT 1');
+        } catch (\Throwable $ignored) {
+            // See testAThrowingDriverStillLeavesTheConnectionRolledBack.
+        }
+
+        self::assertContains(
+            'SET SESSION MAX_EXECUTION_TIME = 0',
+            $this->wpdb->queries,
+            'The 5-second statement cap was left on the connection after a throw, so every'
+            . ' later SELECT in the request runs under it.'
+        );
+        self::assertContains(
+            "SET SESSION optimizer_switch = 'index_merge=on,derived_merge=on,hash_join=on'",
+            $this->wpdb->queries,
+            'derived_merge was left off after a throw, so every later query in the request'
+            . ' is planned differently.'
+        );
+    }
+
+    /**
+     * A prior value that could not be read is not restored, and nothing is invented.
+     *
+     * A null is what an unexpected flavour or a proxy gives back, and `SET SESSION x = `
+     * with nothing after it is a syntax error sent on every call. The restore is
+     * best-effort by design and this is the "effort was not possible" half.
+     *
+     * @group sprint-9
+     */
+    public function testAnUnreadablePriorValueIsNotRestored(): void
+    {
+        $this->wpdb->vars = [];
+
+        \wpmcp_sql_select_run('SELECT 1');
+
+        foreach ($this->wpdb->queries as $query) {
+            self::assertStringNotContainsString(
+                'SET SESSION MAX_EXECUTION_TIME = 0',
+                (string) $query
+            );
+            self::assertDoesNotMatchRegularExpression(
+                '/SET SESSION \S+ =\s*$/',
+                (string) $query,
+                'A restore was attempted with no value: ' . $query
+            );
+        }
+
+        self::assertSame('ROLLBACK', end($this->wpdb->queries));
     }
 
     /**
@@ -116,6 +194,16 @@ final class SqlSelectRunTest extends TestCase
             'SET SESSION MAX_EXECUTION_TIME = 5000',
             \wpmcp_sql_timeout_statement('')
         );
+
+        // The variable NAME follows the same branch, because the restore has to read and
+        // write the one the cap was set on. Two spellings that disagreed would restore a
+        // variable nobody touched and leave the cap in place for the rest of the request.
+        self::assertSame('MAX_EXECUTION_TIME', \wpmcp_sql_timeout_variable('8.4.0'));
+        self::assertSame('max_statement_time', \wpmcp_sql_timeout_variable('10.11.6-MariaDB'));
+        self::assertStringContainsString(
+            \wpmcp_sql_timeout_variable('10.11.6-MariaDB'),
+            \wpmcp_sql_timeout_statement('10.11.6-MariaDB')
+        );
     }
 
     /**
@@ -137,12 +225,23 @@ final class SqlSelectRunTest extends TestCase
             // See the docblock.
         }
 
-        self::assertSame(
+        $queries = $this->wpdb->queries;
+
+        self::assertContains(
             'ROLLBACK',
-            end($this->wpdb->queries) ?: '(nothing was sent at all)',
+            $queries,
             'The driver threw and the transaction was never rolled back. $wpdb is reused'
             . ' for the rest of the request, so every write after this one would fail with'
-            . ' 1792. That is what the `finally` is for.'
+            . ' 1792. That is what the `finally` is for. Sent: ' . implode(' | ', $queries)
+        );
+
+        // AND IT COMES FIRST IN THE `finally`. The session restores that follow it are
+        // ordinary statements; issuing one while still inside the transaction would make
+        // the clean-up depend on the thing it is cleaning up after.
+        self::assertLessThan(
+            array_search('SET SESSION MAX_EXECUTION_TIME = 0', $queries, true),
+            array_search('ROLLBACK', $queries, true),
+            'The session restore was sent before the ROLLBACK.'
         );
     }
 
@@ -206,6 +305,50 @@ final class SqlSelectRunTest extends TestCase
     }
 
     /**
+     * `LOAD_FILE()` is refused by name, before the connection is touched.
+     *
+     * IT PASSES BOTH WALLS. It is a valid query expression, so the derived-table wrapper
+     * takes it, and it is a read, so `START TRANSACTION READ ONLY` takes it too - measured
+     * through the exact wrapper on MySQL 8.4.0, errno 0 from both. What decides whether
+     * bytes come back is then `secure_file_priv` and the database user's `FILE` privilege,
+     * neither of which this plugin owns. On a host where those permit it,
+     * `SELECT LOAD_FILE('.../wp-config.php')` is the database password and every salt, out
+     * of a tool whose documentation promised the blast radius was the database.
+     *
+     * `INTO OUTFILE` and `INTO DUMPFILE`, the write side of the same privilege, are already
+     * 1064 inside the wrapper. This is the read side.
+     *
+     * @group sprint-9
+     */
+    public function testLoadFileIsRefusedByNameBeforeAnythingRuns(): void
+    {
+        $cases = [
+            'plain'            => "SELECT LOAD_FILE('/etc/passwd') AS x",
+            'lower case'       => "SELECT load_file('/etc/passwd') AS x",
+            'mixed case'       => "SELECT LoAd_FiLe('/etc/passwd') AS x",
+            'inside a comment' => 'SELECT 1 -- load_file',
+            'as a column name' => 'SELECT payload_load_file FROM wp_options',
+        ];
+
+        foreach ($cases as $what => $statement) {
+            $result = \wpmcp_sql_select_run($statement);
+
+            self::assertInstanceOf(\WP_Error::class, $result, "{$what} was not refused.");
+            self::assertSame('wpmcp_sql_denied', $result->get_error_code(), $what);
+            self::assertStringContainsString(
+                'read the server filesystem',
+                $result->get_error_message(),
+                "{$what} was refused for the wrong reason: " . $result->get_error_message()
+            );
+            self::assertSame(
+                [],
+                $this->wpdb->queries,
+                "{$what} reached the connection."
+            );
+        }
+    }
+
+    /**
      * An empty statement is a validation refusal, with nothing sent and nothing logged.
      *
      * @group sprint-9
@@ -241,7 +384,7 @@ final class SqlSelectRunTest extends TestCase
 
         self::assertSame(
             'SELECT * FROM (SELECT 1 /* ; keep me */) AS wpmcp_q LIMIT 201',
-            $this->wpdb->queries[3],
+            $this->wpdb->queries[5],
             'The trailing semicolon and the surrounding whitespace come off; a semicolon'
             . ' inside the statement is the statement\'s business.'
         );

@@ -94,6 +94,27 @@ final class FakeWpdb
         return $this->columnNames;
     }
 
+    /**
+     * What get_var() answers, by query string, with a fallback for anything unlisted.
+     *
+     * sql-select reads two session variables before it changes them, so the restore in its
+     * `finally` has something to put back. A fake that answered null for both would make
+     * every restore assertion pass by never running.
+     *
+     * @var array<string, string|null>
+     */
+    public array $vars = [];
+
+    /** What get_var() answers for a query not in $vars. */
+    public ?string $defaultVar = null;
+
+    public function get_var($query = null, $x = 0, $y = 0)
+    {
+        $this->queries[] = $query;
+
+        return $this->vars[$query] ?? $this->defaultVar;
+    }
+
     public function suppress_errors($suppress = true)
     {
         $previous             = $this->suppressErrors;

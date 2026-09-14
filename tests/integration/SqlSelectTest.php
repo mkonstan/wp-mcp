@@ -76,6 +76,9 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     /** The stored option before this class touched anything. Asserted unchanged after. */
     private static string $optionBefore = '';
 
+    /** `on` or `off`: whether THIS site's optimizer_switch has derived_merge on. */
+    private static string $mergeDefault = 'on';
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -89,6 +92,13 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
         Fixtures::purge();
 
         self::$optionBefore = self::storedSwitch();
+
+        // What this site's connection starts a request with, so the restore assertion
+        // compares against the operator's value and not against a guess.
+        self::$mergeDefault = str_contains(
+            WpCli::evaluate('global $wpdb; echo (string) $wpdb->get_var("SELECT @@SESSION.optimizer_switch");'),
+            'derived_merge=off'
+        ) ? 'off' : 'on';
 
         self::$adminId = Fixtures::createUser(self::adminLogin(), 'administrator');
         // An Editor holds edit_posts and not manage_options, so an admin-SCOPE token
@@ -406,6 +416,65 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
         }
     }
 
+    /**
+     * `LOAD_FILE()` is refused by name, without running - the one file-reading function
+     * that gets through both walls.
+     *
+     * FOUND BY REVIEW, AND IT IS THE ONE HOLE THE TWO WALLS DO NOT CLOSE. `LOAD_FILE` is a
+     * valid query expression, so the wrapper takes it, and it is a read, so the READ ONLY
+     * transaction takes it too - the reviewer probed errno 0 from both, through this tool's
+     * exact wrapper, on this site. What stops the bytes coming back is `secure_file_priv`
+     * and the database user's `FILE` privilege, which belong to the operator and not to
+     * this plugin: on jaygroup `secure_file_priv` is NULL so the read is disabled, and the
+     * database user is `root` WITH `FILE`. On a host configured the other way,
+     * `SELECT LOAD_FILE('.../wp-config.php')` is the database password and every salt.
+     *
+     * SO THE TEST CANNOT BE "the read failed" - on this box it would pass against code
+     * that had no rule at all, which is exactly how the hole survived the first round. It
+     * is "the statement never reached the database": a validation-style refusal, no
+     * `sql_select` event, nothing in the trace log.
+     *
+     * @group sprint-9
+     */
+    public function testLoadFileIsRefusedWithoutReachingTheDatabase(): void
+    {
+        $cases = [
+            'upper case'       => "SELECT LOAD_FILE('/etc/hostname') AS f",
+            'lower case'       => "SELECT load_file('/etc/hostname') AS f",
+            'inside a comment' => 'SELECT 1 AS n /* load_file */',
+        ];
+
+        foreach ($cases as $what => $statement) {
+            TestRecorder::reset();
+            $before = TraceLog::contents();
+
+            $result = $this->sql($statement);
+
+            self::assertTrue($result->isError, "{$what} was not refused: " . $result->text);
+            self::assertStringContainsString(
+                'read the server filesystem',
+                $result->text,
+                "{$what} was refused for the wrong reason: " . $result->text
+            );
+            self::assertStringNotContainsString(
+                'Trace id:',
+                $result->text,
+                "{$what} produced a trace id. A rule this server applies on purpose is not"
+                . ' a failure.'
+            );
+            self::assertSame(
+                0,
+                TestRecorder::countOf(TestRecorder::AUTH . 'sql_select'),
+                "{$what} fired a sql_select event, so the statement reached the database."
+            );
+            self::assertSame(
+                $before,
+                TraceLog::contents(),
+                "{$what} wrote to the private log, so something went to the server."
+            );
+        }
+    }
+
     /* ------------------------------------------------------------------
      * (d) the caps
      * ---------------------------------------------------------------- */
@@ -602,6 +671,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
             . ' inside the READ ONLY transaction. 1792 is what that looks like.'
         );
 
+        $this->assertSessionHandedBackClean($probes[0], 'a failed statement');
+
         // And the ordinary path: a write tool in a LATER request works too.
         $post = $this->mcp(self::$adminToken)->callTool('create-post', [
             'title'  => Fixtures::name('after-a-failed-select'),
@@ -629,6 +700,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
 
         self::assertCount(1, $probes, 'The end-of-request write probe did not run.');
         self::assertSame('', (string) ($probes[0]['error'] ?? 'no error field'));
+
+        $this->assertSessionHandedBackClean($probes[0], 'a successful statement');
     }
 
     /* ------------------------------------------------------------------
@@ -697,6 +770,34 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     /* ------------------------------------------------------------------
      * helpers
      * ---------------------------------------------------------------- */
+
+    /**
+     * The two session variables sql-select changes are back as this site had them.
+     *
+     * READ IN THE SAME REQUEST, on the same connection, after the tool returned - see the
+     * class docblock for why a second request would answer this for free. Left as the tool
+     * sets them, every later WordPress SELECT in the request runs under a 5-second server
+     * cap and every later plan is built with derived_merge off: this tool silently changing
+     * how unrelated queries behave.
+     *
+     * The merge default is read from the site rather than assumed, because `derived_merge`
+     * is an operator-settable flag and a test that hard-coded `on` would be asserting
+     * something about somebody's my.cnf.
+     */
+    private function assertSessionHandedBackClean(array $probe, string $after): void
+    {
+        self::assertNotSame(
+            '5000',
+            (string) ($probe['timeout'] ?? 'the probe reported no timeout at all'),
+            "MAX_EXECUTION_TIME was still 5000 after {$after} returned."
+        );
+        self::assertSame(
+            self::$mergeDefault,
+            (string) ($probe['merge'] ?? 'the probe reported no merge field at all'),
+            "optimizer_switch did not go back to this site's own value after {$after}"
+            . ' returned.'
+        );
+    }
 
     /** The option as the database holds it, with no filter in the way. */
     private static function storedSwitch(): string
@@ -847,9 +948,19 @@ add_action('shutdown', static function () use (\$wpmcp_test_sql_armed) {
         '{$never}'
     ));
     \$error = (string) \$wpdb->last_error;
+
+    // The session variables sql-select changed, read back on the connection it handed
+    // over. Anything but the values this site started the request with means the tool
+    // put a 5-second cap and an altered plan on everybody else's queries.
+    \$timeout = \$wpdb->get_var('SELECT @@SESSION.MAX_EXECUTION_TIME');
+    \$switch  = \$wpdb->get_var('SELECT @@SESSION.optimizer_switch');
     \$wpdb->suppress_errors(\$suppressed);
 
-    wpmcp_auth_event('tx_probe', array('error' => \$error));
+    wpmcp_auth_event('tx_probe', array(
+        'error'   => \$error,
+        'timeout' => (string) \$timeout,
+        'merge'   => strpos((string) \$switch, 'derived_merge=off') === false ? 'on' : 'off',
+    ));
 }, 1);
 PHP;
     }
