@@ -149,9 +149,11 @@ jobs:
           status=0
           # Every sprint that has closed. sprint-3, sprint-4 and sprint-5 were added in
           # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
-          # were never asserted in CI at all. A new sprint adds its group here on the day
+          # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
+          # for the same reason: both gates had closed and neither was asserted anywhere
+          # but on the machine that ran them. A new sprint adds its group here on the day
           # its gate closes, and the commit that adds it watches this job.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"

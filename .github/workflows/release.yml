@@ -121,7 +121,7 @@ jobs:
         # published release. Keep the two lists in step.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
