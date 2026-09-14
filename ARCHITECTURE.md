@@ -236,8 +236,9 @@ or one deferred core setter, applies the capability WordPress puts in front of t
 in wp-admin, and hands back `changed`. Two tools that wrote the same five fields out twice
 would have drifted on the sixth, and the interesting part of each field is a gate rather
 than an assignment: `author` answers to `edit_others_posts`, and `featured_image` answers
-to `edit_post` on the ATTACHMENT, which resolves through the attachment's own author and
-parent.
+to `edit_post` on the ATTACHMENT, which resolves through the attachment's own author
+exactly as a post's does - the parent plays no part, because `map_meta_cap` consults
+`post_parent` only for a revision.
 
 The deferred half exists for one reason: `set_post_thumbnail()` needs a post id, which on
 create does not exist yet - but its capability check does not. So the refusal happens

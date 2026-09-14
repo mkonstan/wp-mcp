@@ -167,6 +167,20 @@ admin can renew them for thirty days from when they were minted - see below.
   read and write it. The `_<field name>` reference row ACF keeps is not written, which is
   measured and documented in README: a field that has been set through ACF at least once
   reads back correctly, and one that never has reads back as a raw string.
+- **Values go in slashed.** WordPress's meta API takes slashed input and unslashes it, so
+  a value written raw lost a backslash: `C:\Users\max` became `C:Usersmax`, a regex
+  `\d+` became `d+`. `set-post-meta` now slashes the key and the value the way core's own
+  REST meta layer does, and a backslash survives byte for byte. A key **containing** a
+  backslash is refused outright, at save time and at call time: `is_protected_meta()` sees
+  the backslash rather than the underscore behind it, so `\_thumbnail_id` would have passed
+  every protected-key check and arrived at the database as `_thumbnail_id`.
+- Only `null` deletes a key. An empty JSON object decodes to an empty array, which used to
+  take the list branch and delete every row while reporting success; an object, a nested
+  list, and an empty list or object are now all refused.
+- `changed` names the fields the call named, on **create-post** as well as update-post -
+  it used to omit `title`, `content` and `status` on create.
+- `author` refuses anything that is not an integer id or a non-empty login string.
+  `author: true` used to be cast to user id 1.
 - Deleting the plugin removes the new `wpmcp_meta_keys` option with everything else.
 
 ### New: `list-posts` can find things, and `get-post` returns the rest of the post

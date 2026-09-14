@@ -295,10 +295,11 @@ gives `{id, name}`, with the display name; never a login, never an email.
 
 **`featured_image` is checked against the attachment, not against your post.** You need to
 be able to edit that attachment, which for an Author means their own uploads and not
-someone else's, and it has to be an image. `0` removes the image. It round-trips through
+someone else's - whose post the file happens to be attached to makes no difference either
+way - and it has to be an image. `0` removes the image. It round-trips through
 `get-post`'s `featured_image`.
 
-Both tools reply with `changed`: the list of fields this call actually touched.
+Both tools reply with `changed`: the fields this call named, in the order above.
 
 ### Post meta (opt-in)
 
@@ -311,18 +312,28 @@ The list exists because post meta has no capability of its own that separates a 
 from a plugin's private state. WordPress offers no way to tell them apart, so this plugin
 does not guess: you name the keys, and those are the only keys MCP can see. Keys WordPress
 calls protected - anything starting with an underscore, such as `_thumbnail_id` or
-`_edit_lock` - are dropped when you save and refused if called anyway.
+`_edit_lock` - are dropped when you save and refused if called anyway, and so is any key
+containing a backslash (the meta API strips one slash from every key it is given, so
+`\_thumbnail_id` would arrive as `_thumbnail_id`).
 
 `get-post-meta {id, key?}` returns `meta`, an object of key to value, holding every
-allow-listed key that has a value on that post - or just the one key you name. One row
-comes back as a value, several as a list. Reading needs only what `get-post` needs, so a
-post a caller may not read answers identically to a post that is not there.
+allow-listed key that has a value on that post - or just the one key you name. A key
+holding one row comes back as a value; a key holding N rows comes back as a list of N
+values. Reading needs only what `get-post` needs, so a post a caller may not read answers
+identically to a post that is not there.
 
-`set-post-meta {id, key, value}` replaces the key: a scalar writes one row, a flat list
-writes several, `null` deletes it. An object is refused - post meta has no schema, and a
-nested structure would be stored as PHP-serialised text only this site can read back. It
-needs the capability to edit the post *and* WordPress's own `edit_post_meta` for that key.
-WordPress stores meta as text, so a number or a boolean comes back as its string form.
+`set-post-meta {id, key, value}` replaces the key: a scalar writes **one** row, a flat
+list of N scalars writes **N separate rows**, `null` deletes it. Nothing else is accepted
+- an object, a nested list, and an empty list or object are all errors, and `null` is the
+only way to delete. It needs the capability to edit the post *and* WordPress's own
+`edit_post_meta` for that key. WordPress stores meta as text, so a number or a boolean
+comes back as its string form; a backslash survives unchanged.
+
+**One row or N rows is a convention, and it is the one WordPress calls `single: false`.**
+A field that expects a single *serialised* array instead - an ACF repeater, gallery or
+flexible-content field, or any key a plugin registered with `single: true` and an array
+type - cannot be written through this tool: a list would become N rows where that field
+expects one.
 
 A key that is not on the list is refused by name, and the refusal never mentions the keys
 that are.
