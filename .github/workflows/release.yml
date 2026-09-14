@@ -129,10 +129,11 @@ jobs:
           WPMCP_WP_ENV: '1'
         # Same check as ci.yml, and it has to be here too: ci.yml does not run on a tag
         # push, so this workflow is the only thing standing between a red gate and a
-        # published release. Keep the two lists in step.
+        # published release. Keep the two lists in step. sprint-9 was added in Sprint 9,
+        # on the day its gate closed.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"

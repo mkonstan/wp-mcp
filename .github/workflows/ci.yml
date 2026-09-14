@@ -162,9 +162,15 @@ jobs:
           # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
           # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
           # for the same reason: both gates had closed and neither was asserted anywhere
-          # but on the machine that ran them. A new sprint adds its group here on the day
-          # its gate closes, and the commit that adds it watches this job.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8; do
+          # but on the machine that ran them. sprint-9 was added in Sprint 9, on the day
+          # its gate closed. A new sprint adds its group here on the day its gate closes,
+          # and the commit that adds it watches this job.
+          #
+          # sprint-9 is the first group whose subject depends on the DATABASE FLAVOUR:
+          # sql-select spells its session statement timeout one way on MySQL and another
+          # on MariaDB, and this container is the only MariaDB anyone on this project can
+          # reach. A red sprint-9 here on a green local run is very likely that.
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
