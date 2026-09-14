@@ -327,6 +327,82 @@ final class ToolContractTest extends TestCase
     }
 
     /**
+     * EVERY listing query merges wpmcp_list_query_guards(), and this is a GREP on purpose.
+     *
+     * The three arguments in that array are the ones no caller may touch and every listing
+     * query must carry - and two of them are invisible from outside:
+     *
+     *   ignore_sticky_posts  The integration tier proves it, with a stuck fixture: without
+     *                        it a listing filtered only by after/before, status or orderby
+     *                        is a HOME query, and core splices every sticky post into the
+     *                        front of one with post_status => 'publish' and none of the
+     *                        original conditions.
+     *   update_post_meta_cache  NOTHING ELSE CHECKS THIS AT ALL. It is not observable on the
+     *                        wire: the listing returns the same six fields either way. What
+     *                        it changes is that the depth fetch - up to 10,001 rows a query
+     *                        at the page cap - stops priming the postmeta cache for rows
+     *                        whose meta nobody reads, which on a site carrying ACF or SEO
+     *                        meta is the difference between slow and fatal. A behavioural
+     *                        test would have to measure memory; this asserts the argument.
+     *
+     * The grep is what catches the failure the guards exist to prevent: a THIRD listing
+     * query, added later, written without them. A behavioural test would only cover the two
+     * queries that exist today.
+     *
+     * SCOPED TO wpmcp_core_tools(), and the reason is a measurement rather than laziness.
+     * list-media also runs a WP_Query, it also passes no search term by default, and it is
+     * therefore also a home query - but core scopes the sticky fetch to the QUERY'S OWN
+     * post_type (`$post_type = $query_vars['post_type']`, class-wp-query.php:2012, used at
+     * :3612), and list-media asks for `attachment` while a sticky post is a `post`, so the
+     * splice returns nothing there. It must also KEEP the meta cache, because it returns
+     * file URLs and `wp_get_attachment_url()` reads `_wp_attached_file`. Widening this grep
+     * to the whole file would be demanding the wrong thing of it.
+     *
+     * The same scoping is why list-posts is only exposed on `post_type: "post"` - its
+     * default, and so the ordinary call.
+     *
+     * @group sprint-10
+     */
+    public function testEveryListingQueryCarriesTheSharedQueryGuards(): void
+    {
+        $source = file_get_contents(WPMCP_PLUGIN_DIR . '/tools.php');
+
+        self::assertIsString($source, 'tools.php could not be read, so this proves nothing.');
+
+        $start = strpos($source, 'function wpmcp_core_tools()');
+        self::assertNotFalse($start, 'wpmcp_core_tools() is gone from tools.php.');
+
+        $end = strpos($source, "\nfunction wpmcp_content_tools()", $start);
+        self::assertNotFalse($end, 'wpmcp_content_tools() no longer follows wpmcp_core_tools().');
+
+        $source  = substr($source, $start, $end - $start);
+        $queries = preg_match_all('/new WP_Query\(/', $source);
+        $guarded = preg_match_all(
+            '/new WP_Query\(\s*array_merge\(\s*\$filters,\s*wpmcp_list_query_guards\(\)/',
+            $source
+        );
+
+        self::assertSame(2, $queries, 'list-posts is meant to run exactly two queries (KB 0.4).');
+        self::assertSame(
+            $queries,
+            $guarded,
+            "{$queries} WP_Query calls in wpmcp_core_tools(), {$guarded} of them merging"
+            . ' wpmcp_list_query_guards(). A listing query written without the guards is a'
+            . ' listing that answers a date window with posts outside it, and primes the'
+            . ' postmeta cache for ten thousand rows nobody reads.'
+        );
+
+        // The one value nothing else in the suite can see. `true` for the other two is
+        // asserted behaviourally: no_found_rows by the has_more paging tests,
+        // ignore_sticky_posts by the stuck fixture in PostFilterReadsTest.
+        self::assertFalse(
+            wpmcp_list_query_guards()['update_post_meta_cache'],
+            'The listing primes the postmeta cache again. Nothing on the wire changes when'
+            . ' it does, which is exactly why it needs an assertion here.'
+        );
+    }
+
+    /**
      * The first sentence of every description says what the tool does, in under 50
      * characters, starting with a verb.
      *

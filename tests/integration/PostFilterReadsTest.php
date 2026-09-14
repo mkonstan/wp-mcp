@@ -43,6 +43,10 @@
  * post_modified runs aa < dd < bb < ee < cc - three different permutations of the same
  * five posts, so an assertion on one of them cannot be satisfied by another.
  *
+ * post_modified is WRITTEN, not produced by touching posts in an order: see build(). Two
+ * rewrites in the same second tie, and a tie is decided by the ID tie-break rather than by
+ * the order the fixture intended.
+ *
  * Every fixture is named `wpmcp-test-<run id>-*` and removed in tearDownAfterClass.
  *
  * @group sprint-10
@@ -111,6 +115,11 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     private static int $tagB      = 0;
     private static int $navMenu   = 0;
     private static int $hiddenTerm = 0;
+    private static int $catTie    = 0;
+
+    /** Two published posts sharing a post_date to the second, in a category of their own. */
+    private static int $tieOne = 0;
+    private static int $tieTwo = 0;
 
     // date:     cc < ee < aa < dd < bb        title:    aa < bb < cc < dd < ee
     // modified: aa < dd < bb < ee < cc        (cc is rewritten last, ee twice)
@@ -123,6 +132,18 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     private static int $hiddenDraft   = 0;
     private static int $page          = 0;
     private static int $attachment    = 0;
+
+    /**
+     * True once cc-charlie has been stuck, so teardown only unsticks what it stuck.
+     *
+     * `sticky_posts` IS A SHARED OPTION WITH NO RUN PREFIX ON IT - the same class of thing
+     * as `wpmcp_db_ver`, and the one fixture here a killed process could leave behind, since
+     * purge() matches names and an option holding ids has none. Two concurrent runs are
+     * nonetheless safe: stick_post() appends one id and unstick_post() removes that one id,
+     * and the two runs' ids differ. A stale id left in it points at a deleted post and is
+     * inert in WordPress, but it is still debris, so destroy() unsticks BEFORE it deletes.
+     */
+    private static bool $stuck = false;
 
     private static string $authorToken = '';
     private static string $subToken    = '';
@@ -160,6 +181,7 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         self::$catDraft  = Fixtures::createTerm('category', Fixtures::name('cat-draft'), Fixtures::name('cat-draft'));
         self::$tagA      = Fixtures::createTerm('post_tag', Fixtures::name('tag-a'), Fixtures::name('tag-a'));
         self::$tagB      = Fixtures::createTerm('post_tag', Fixtures::name('tag-b'), Fixtures::name('tag-b'));
+        self::$catTie    = Fixtures::createTerm('category', Fixtures::name('cat-tie'), Fixtures::name('cat-tie'));
         // A term in a taxonomy is_taxonomy_viewable() refuses. nav_menu is registered
         // by core with public => false on every site, so this case does not depend on
         // the stress site's plugins.
@@ -246,9 +268,33 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         Fixtures::setPostTerms(self::$hiddenPrivate, 'post_tag', [self::$tagB]);
         Fixtures::setPostTerms(self::$hiddenDraft, 'category', [self::$catDraft]);
 
-        // A PAGE, for the taxonomy-not-attached-to-this-post-type case. WP_Query
-        // silently ignores `cat` on a post type with no category taxonomy, so without
-        // this the filter would return every page on the site and look like it worked.
+        // TWO POSTS TIED ON post_date, TO THE SECOND, in a category nothing else is in.
+        // Ordinary data: an import, or anything scripted, shares a second routinely. They are
+        // the EDITOR's so that no `author`-filtered assertion elsewhere has to know about
+        // them, and their content carries no marker so no `search` assertion does either.
+        self::$tieOne = Fixtures::createPostWith([
+            'post_title'   => Fixtures::name('gg-tie-one'),
+            'post_status'  => 'publish',
+            'post_author'  => self::$editorId,
+            'post_content' => Fixtures::name('tie-body'),
+            'post_date'    => '2019-04-05 12:00:00',
+        ]);
+        self::$tieTwo = Fixtures::createPostWith([
+            'post_title'   => Fixtures::name('hh-tie-two'),
+            'post_status'  => 'publish',
+            'post_author'  => self::$editorId,
+            'post_content' => Fixtures::name('tie-body'),
+            'post_date'    => '2019-04-05 12:00:00',
+        ]);
+        Fixtures::setPostTerms(self::$tieOne, 'category', [self::$catTie]);
+        Fixtures::setPostTerms(self::$tieTwo, 'category', [self::$catTie]);
+
+        // A PAGE, for the taxonomy-not-attached-to-this-post-type case. Measured: WP_Query
+        // does NOT ignore `cat` on a post type with no category taxonomy - it builds the
+        // term_relationships join anyway and returns nothing - so the allow-list is belt and
+        // braces there. What this fixture catches is the OTHER shape: a filter that cannot be
+        // resolved being silently DROPPED, which answers a question about one category with
+        // every page on the site.
         self::$page = Fixtures::createPostWith([
             'post_title'   => Fixtures::name('ff-page'),
             'post_type'    => 'page',
@@ -278,10 +324,8 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         Fixtures::updatePostContent(self::$echo, self::marker() . ' ' . Fixtures::name('rev-1'));
         Fixtures::updatePostContent(self::$echo, self::marker() . ' ' . Fixtures::name('rev-2'));
 
-        // LAST, so cc-charlie is the most recently modified post in `set` while it is the
-        // OLDEST by post_date. That is what separates `orderby: "modified"` from
-        // `orderby: "date"`, and the own draft sits in the middle of both orderings, so
-        // the merge is exercised on either column.
+        // cc-charlie is rewritten too, so it has a revision of its own and is the most
+        // recently modified post in `set` while being the OLDEST by post_date.
         //
         // THE DRAFT IS DELIBERATELY NOT TOUCHED. Measured on WP 7.1: wp_update_post on a
         // date-floating post with post_date_gmt = '0000-00-00 00:00:00' takes core's
@@ -291,6 +335,35 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         // it to the top of every date ordering and quietly destroyed the GMT-null case
         // two tests below.
         Fixtures::updatePostContent(self::$charlie, self::marker() . ' ' . Fixtures::name('touched'));
+
+        // AND THEN post_modified IS STATED, NOT RACED. Leaving it to the touch order means
+        // leaving it to the CLOCK: wp_update_post() writes current_time('mysql') to the
+        // second, so "charlie was touched after echo" only produces a different
+        // post_modified if the two wp-cli calls land in different seconds. On the stress
+        // site they do; on the bare one they do not, echo and charlie TIE, and the ID
+        // tie-break - correctly - puts the higher id first, which is not the order these
+        // expectations were written for. That is the same class of bug the tie-break exists
+        // to fix, found in this file's own fixture, and the fix is to say what the data is.
+        //
+        // post_modified_gmt is left alone throughout: dd-delta's is '0000-00-00 00:00:00'
+        // and get-post maps that to null, which a later test asserts.
+        foreach ([
+            [self::$alpha, '2021-07-06 10:00:00'],
+            [self::$delta, '2021-09-08 10:00:00'],
+            [self::$bravo, '2022-01-12 10:00:00'],
+            [self::$echo, '2026-01-01 10:00:00'],
+            [self::$charlie, '2026-01-02 10:00:00'],
+        ] as [$id, $modified]) {
+            Fixtures::setPostModified($id, $modified);
+        }
+
+        // STICK cc-charlie. A sticky post is spliced into the front of any query WP_Query
+        // considers a home query - which is any listing filtered only by after/before, status
+        // or orderby, because none of those set a query flag - with `post_status => 'publish'`
+        // and none of the original query's conditions. Nothing in the fixture set was sticky
+        // before, so all thirty tests were blind to it.
+        Fixtures::stickPost(self::$charlie);
+        self::$stuck = true;
 
         self::$postTaxonomies = Fixtures::viewableTaxonomies('post');
 
@@ -335,6 +408,13 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // BEFORE the posts are deleted: unsticking reads nothing but the id, yet leaving it
+        // until after the delete would mean the id is all that is left to go on.
+        if (self::$stuck) {
+            Fixtures::unstickPost(self::$charlie);
+            self::$stuck = false;
+        }
+
         // The hidden term goes FIRST, while its taxonomy is still registered: purge()
         // walks get_taxonomies(), so once the mu-plugin is gone the term is invisible to
         // every cleanup path there is.
@@ -344,11 +424,12 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         foreach ([
             self::$attachment, self::$alpha, self::$bravo, self::$charlie, self::$delta,
             self::$echo, self::$hiddenPrivate, self::$hiddenDraft, self::$page,
+            self::$tieOne, self::$tieTwo,
         ] as $id) {
             Fixtures::deletePost($id);
         }
 
-        foreach ([self::$catSet, self::$catA, self::$catSecret, self::$catDraft] as $id) {
+        foreach ([self::$catSet, self::$catA, self::$catSecret, self::$catDraft, self::$catTie] as $id) {
             Fixtures::deleteTerm('category', $id);
         }
         Fixtures::deleteTerm('post_tag', self::$tagA);
@@ -374,6 +455,14 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
             static fn ($t) => str_replace(Fixtures::runPrefix(), '', (string) $t),
             $result->column('title')
         );
+    }
+
+    /** A copy of $ids, sorted ascending - for "the same set, whatever the order". */
+    private function sorted(array $ids): array
+    {
+        sort($ids);
+
+        return array_values($ids);
     }
 
     /** list-posts as one token, asserting only that it did not fail. */
@@ -544,9 +633,15 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * A CATEGORY ON A POST TYPE THAT HAS NO CATEGORIES. `cat` is silently ignored by
-     * WP_Query on a post type with no category taxonomy, so without the attachment
-     * check this returns every page on the site while looking like a filtered answer.
+     * A CATEGORY ON A POST TYPE THAT HAS NO CATEGORIES is an empty list, and NOT a
+     * dropped filter.
+     *
+     * The tempting claim - that WP_Query walks past `cat` here, so an unchecked filter
+     * returns every page on the site - is false, and was measured: WP_Query builds the
+     * term_relationships join regardless and matches nothing. What this pins is the shape
+     * that IS a real failure and that the `catmiss` mutation produces: resolving the term,
+     * failing, and carrying on WITHOUT the filter, which turns a narrow question into the
+     * whole unfiltered listing.
      *
      * The control is the same page listing WITHOUT the category, which does find the
      * seeded page - so the empty result is the filter and not a broken post_type.
@@ -897,9 +992,10 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
 
     /**
      * `orderby: "modified"` is a DIFFERENT answer from `orderby: "date"` on this set:
-     * cc-charlie was rewritten last, so it sorts FIRST by modified and LAST by date, and
-     * the Author's own draft moves from second to fourth between the two. Without that
-     * difference an orderby test proves only that the argument was accepted.
+     * cc-charlie's post_modified is set latest and its post_date is the earliest, so it
+     * sorts FIRST by modified and LAST by date, and the Author's own draft moves from second
+     * to fourth between the two. Without that difference an orderby test proves only that
+     * the argument was accepted.
      *
      * @group sprint-10
      */
@@ -1110,6 +1206,148 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         self::assertSame(2, $data['count'], 'count is the size of THIS page.');
     }
 
+    /**
+     * A STICKY POST IS NOT SPLICED PAST A DATE WINDOW OR A STATUS.
+     *
+     * WP_Query decides `is_home` from the QUERY VARS: `s`, `cat`, `tag_id`, `tax_query` and
+     * `author` all mark a query as something else, but `date_query`, `post_status`, `orderby`
+     * and `posts_per_page` mark NOTHING. So a listing filtered only by `after`/`before`,
+     * `status` or `orderby` is a home query - and on a home query at page one, core fetches
+     * every sticky post by `post__in` with `post_status => 'publish'` and splices it in at
+     * the front, carrying none of the original query's conditions. list-posts never passes
+     * `paged`, so page one is every page.
+     *
+     * The answer that came back was not a permission leak - stickies are published - it was
+     * a FALSE ANSWER TO THE QUESTION ASKED, which is the failure this whole tool is built
+     * not to have: `after: "2030-01-01"` returned posts from 2021, and `status: "draft"`
+     * returned published ones.
+     *
+     * Three shapes, all with cc-charlie stuck: an empty window, a NON-empty window that
+     * cc-charlie is outside of, and a status it does not have. The middle one is the
+     * strongest - it proves the filter still returns things while not returning that.
+     *
+     * @group sprint-10
+     */
+    public function testAStickyPostIsNotInjectedPastADateWindowOrAStatus(): void
+    {
+        self::assertContains(
+            self::$charlie,
+            Fixtures::stickyIds(),
+            'The fixture is not actually sticky, so nothing below is being tested.'
+        );
+
+        // (a) An empty window. Every one of these listings is a home query.
+        $this->assertFindsNothing(
+            self::$subToken,
+            ['after' => '2030-01-01', 'limit' => 100],
+            (string) self::$charlie
+        );
+
+        // (b) A window with content in it that the sticky post is OUTSIDE of. ee-echo is
+        // 2021-05-04 and cc-charlie is 2021-03-02, so the answer must hold one and not the
+        // other - a filter that returns nothing would pass (a) and fail here. Three days
+        // wide, and the listing is NOT scoped by a category on purpose (a category would
+        // make it an archive query and the splice would never have fired); three days keeps
+        // the stress site's own content inside the row limit so ee-echo cannot fall off.
+        $may = $this->listing(self::$subToken, [
+            'after'  => '2021-05-03',
+            'before' => '2021-05-05',
+            'limit'  => 100,
+        ]);
+        self::assertContains(self::$echo, $may->column('id'), 'The date window returned nothing of ours.');
+        self::assertNotContains(
+            self::$charlie,
+            $may->column('id'),
+            'A sticky post dated outside the window was returned inside it.'
+        );
+
+        // (c) A status it does not have, on a token that may see drafts. The sticky post is
+        // published; before this it arrived anyway, in front of the drafts that were asked
+        // for.
+        $drafts = $this->listing(self::$adminToken, ['status' => 'draft', 'limit' => 100]);
+        self::assertNotContains(
+            self::$charlie,
+            $drafts->column('id'),
+            'A published sticky post was returned by status: "draft".'
+        );
+
+        // And it is still perfectly findable, in its natural date position - last of the four
+        // a Subscriber may see in `set`, not first because it is stuck.
+        $set = $this->listing(self::$subToken, ['category' => Fixtures::name('set'), 'limit' => 100]);
+        self::assertSame(
+            [self::$bravo, self::$alpha, self::$echo, self::$charlie],
+            $set->column('id'),
+            'The sticky post is not in its date position in an ordinary listing.'
+        );
+    }
+
+    /**
+     * PAGING OVER ROWS TIED ON THE SORT COLUMN IS STABLE, because the SQL tie-breaks on ID.
+     *
+     * The merge comparator has always tie-broken on ID, but the comparator only ever sees
+     * the rows the `LIMIT` already chose. Page one runs `LIMIT 2` and page two `LIMIT 3`
+     * (the depth fetch is page * limit + 1): with `ORDER BY post_date DESC` alone, those are
+     * two statements MySQL may answer with a different relative order - and a different
+     * SUBSET - of any group of rows tied on that column, so a caller paging through an
+     * import could see one row twice and another never.
+     *
+     * Two posts share a post_date to the second here. The assertion is the ORDER, in both
+     * directions: `ID` is unique, so `post_date DESC, ID DESC` puts the later-created post
+     * first and `ASC, ASC` puts it last. Without the secondary key the two calls have no
+     * reason to differ, and the tied group's order is whatever the access path yields.
+     *
+     * @group sprint-10
+     */
+    public function testPagingOverTiedDatesIsStableInBothDirections(): void
+    {
+        self::assertGreaterThan(
+            self::$tieOne,
+            self::$tieTwo,
+            'The tie fixtures were not created in ascending id order, so the expectations'
+            . ' below are the wrong way round.'
+        );
+
+        $descending = [];
+        $ascending  = [];
+
+        for ($page = 1; $page <= 2; $page++) {
+            $desc = $this->listing(self::$subToken, [
+                'category' => Fixtures::name('cat-tie'),
+                'limit'    => 1,
+                'page'     => $page,
+            ]);
+            $asc = $this->listing(self::$subToken, [
+                'category' => Fixtures::name('cat-tie'),
+                'order'    => 'asc',
+                'limit'    => 1,
+                'page'     => $page,
+            ]);
+
+            self::assertCount(1, $desc->items(), "Descending page {$page} is not one item.");
+            self::assertCount(1, $asc->items(), "Ascending page {$page} is not one item.");
+
+            $descending[] = $desc->column('id')[0];
+            $ascending[]  = $asc->column('id')[0];
+        }
+
+        self::assertSame(
+            [self::$tieTwo, self::$tieOne],
+            $descending,
+            'Two posts tied on post_date did not page in descending ID order. Either a row'
+            . ' appeared on both pages or the pages disagree about which row is first.'
+        );
+        self::assertSame(
+            [self::$tieOne, self::$tieTwo],
+            $ascending,
+            'The same two rows did not reverse when the direction did, so the ordering is'
+            . ' not being decided by the tie-break at all.'
+        );
+
+        // Neither direction lost a row or showed one twice.
+        self::assertSame([self::$tieOne, self::$tieTwo], $this->sorted($descending));
+        self::assertSame([self::$tieOne, self::$tieTwo], $this->sorted($ascending));
+    }
+
     /* ========================================================================
      * The subscriber sweep
      * ==================================================================== */
@@ -1129,20 +1367,35 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     {
         $hidden = [self::$delta, self::$hiddenPrivate, self::$hiddenDraft];
 
+        // EVERY CALL CARRIES THE IDS IT MUST RETURN, not just the ids it must not. The
+        // sweep-table row for a Subscriber says "4 published, no draft"; asserting only the
+        // second half would let a filter that returns NOTHING pass every line of it.
+        $four = [self::$bravo, self::$alpha, self::$echo, self::$charlie];
+
         $calls = [
-            ['category' => Fixtures::name('set'), 'limit' => 100],
-            ['search' => self::marker(), 'limit' => 100],
-            ['term' => 'category:' . Fixtures::name('set'), 'limit' => 100],
-            ['category' => Fixtures::name('set'), 'orderby' => 'title', 'order' => 'asc', 'limit' => 100],
-            ['category' => Fixtures::name('set'), 'orderby' => 'modified', 'limit' => 100],
-            ['category' => Fixtures::name('set'), 'after' => '2020-01-01', 'limit' => 100],
-            ['category' => Fixtures::name('set'), 'before' => '2030-01-01', 'limit' => 100],
-            ['category' => Fixtures::name('set'), 'limit' => 2, 'page' => 2],
-            ['author' => Fixtures::name('author'), 'limit' => 100],
+            [['category' => Fixtures::name('set'), 'limit' => 100], $four],
+            [['search' => self::marker(), 'limit' => 100], $four],
+            [['term' => 'category:' . Fixtures::name('set'), 'limit' => 100], $four],
+            [['category' => Fixtures::name('set'), 'orderby' => 'title', 'order' => 'asc', 'limit' => 100],
+                [self::$alpha, self::$bravo, self::$charlie, self::$echo]],
+            [['category' => Fixtures::name('set'), 'orderby' => 'modified', 'limit' => 100],
+                [self::$charlie, self::$echo, self::$bravo, self::$alpha]],
+            [['category' => Fixtures::name('set'), 'after' => '2020-01-01', 'limit' => 100], $four],
+            [['category' => Fixtures::name('set'), 'before' => '2030-01-01', 'limit' => 100], $four],
+            [['category' => Fixtures::name('set'), 'limit' => 2, 'page' => 2], [self::$echo, self::$charlie]],
+            [['author' => Fixtures::name('author'), 'limit' => 100], [self::$alpha, self::$echo]],
+            [['tag' => Fixtures::name('tag-a'), 'limit' => 100], [self::$alpha, self::$echo]],
+            [['term' => 'post_tag:' . Fixtures::name('tag-a'), 'limit' => 100], [self::$alpha, self::$echo]],
         ];
 
-        foreach ($calls as $args) {
+        foreach ($calls as [$args, $expected]) {
             $result = $this->listing(self::$subToken, $args);
+
+            self::assertSame(
+                $expected,
+                $result->column('id'),
+                'A Subscriber\'s list-posts(' . json_encode($args) . ') returned the wrong set.'
+            );
 
             foreach ($hidden as $id) {
                 self::assertNotContains(
@@ -1154,13 +1407,16 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
             }
         }
 
-        $published = $this->listing(self::$subToken, ['category' => Fixtures::name('set'), 'limit' => 100]);
-        self::assertSame(
-            [self::$bravo, self::$alpha, self::$echo, self::$charlie],
-            $published->column('id'),
-            'The Subscriber cannot see the published fixtures either, so the assertions'
-            . ' above are passing on an empty listing.'
-        );
+        // The refusals, as a Subscriber: the sweep table claims the same error for every
+        // token, and until now only the Author's was measured.
+        foreach ([['after' => 'yesterday'], ['orderby' => 'rand']] as $bad) {
+            $refused = $this->mcp(self::$subToken)->callTool('list-posts', $bad);
+            self::assertTrue($refused->isError, 'A Subscriber was not refused ' . json_encode($bad));
+        }
+
+        // And the empty answers, as a Subscriber.
+        $this->assertFindsNothing(self::$subToken, ['term' => self::hiddenTaxonomy() . ':' . self::hiddenTermName()]);
+        $this->assertFindsNothing(self::$subToken, ['category' => Fixtures::name('no-such-category')]);
     }
 
     /**
@@ -1203,11 +1459,48 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
             $this->titles($set)
         );
 
+        // A DATE WINDOW AND A PAGE, as an Editor. Both were sweep-table cells this test
+        // could have filled and did not; an Editor sees the other author's draft in both,
+        // which is the whole difference from the Subscriber row.
+        $window = $this->listing(self::$editorToken, [
+            'category' => Fixtures::name('set'),
+            'after'    => '2021-05-01',
+            'before'   => '2021-10-01',
+            'limit'    => 100,
+        ]);
+        self::assertSame([self::$delta, self::$alpha, self::$echo], $window->column('id'));
+
+        $firstPage = $this->listing(self::$editorToken, [
+            'category' => Fixtures::name('set'),
+            'limit'    => 2,
+            'page'     => 1,
+        ]);
+        self::assertSame([self::$bravo, self::$delta], $firstPage->column('id'));
+        self::assertTrue($firstPage->data()['has_more']);
+
+        // The empty answers and the refusals, as an Editor. Same three rows of the table.
+        $this->assertFindsNothing(self::$editorToken, ['term' => self::hiddenTaxonomy() . ':' . self::hiddenTermName()]);
+        $this->assertFindsNothing(self::$editorToken, ['author' => Fixtures::name('no-such-user')]);
+        $this->assertFindsNothing(self::$editorToken, ['category' => Fixtures::name('no-such-category')]);
+
+        foreach ([['after' => '2021-13-45'], ['orderby' => 'meta_value']] as $bad) {
+            $refused = $this->mcp(self::$editorToken)->callTool('list-posts', $bad);
+            self::assertTrue($refused->isError, 'An Editor was not refused ' . json_encode($bad));
+        }
+
         // get-post's editorial field, for the same reason: an Editor may edit somebody
-        // else's post, so they get the revision count a Subscriber is refused.
+        // else's post, so they get the revision count a Subscriber is refused - and the
+        // rest of the fields, which the sweep table claimed and nothing measured.
         $post = $this->mcp(self::$editorToken)->callTool('get-post', ['id' => self::$echo]);
         self::assertFalse($post->isError, $post->text);
-        self::assertSame(Fixtures::revisionCount(self::$echo), $post->data()['revisions']);
+        $data = $post->data();
+        self::assertSame(Fixtures::revisionCount(self::$echo), $data['revisions']);
+        self::assertSame(self::excerptText(), $data['excerpt']);
+        self::assertSame(self::displayName(), $data['author']['name']);
+        self::assertSame('2021-05-04T10:00:00', $data['date']);
+        self::assertIsString($data['modified']);
+        self::assertSame(self::$attachment, $data['featured_image']['id']);
+        self::assertSame(self::$postTaxonomies, array_keys($data['terms']));
     }
 
     /* ========================================================================
@@ -1317,6 +1610,24 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         self::assertNull(
             $reader->data()['revisions'],
             'A Subscriber was told how many times a post had been rewritten.'
+        );
+
+        // AND THE REST OF THE ROW. The sweep table says a Subscriber gets every other new
+        // field on a post they may read; `revisions` alone was the only thing measured, so
+        // "returned" was a claim about six fields that no assertion touched.
+        $data = $reader->data();
+        self::assertSame(self::excerptText(), $data['excerpt']);
+        self::assertStringContainsString('http', (string) $data['link']);
+        self::assertSame(self::$authorId, $data['author']['id']);
+        self::assertSame(self::displayName(), $data['author']['name']);
+        self::assertSame('2021-05-04T10:00:00', $data['date']);
+        self::assertIsString($data['date_gmt']);
+        self::assertIsString($data['modified']);
+        self::assertSame(self::$attachment, $data['featured_image']['id']);
+        self::assertSame(self::$postTaxonomies, array_keys($data['terms']));
+        self::assertSame(
+            [Fixtures::name('cat-a'), Fixtures::name('set')],
+            array_column($data['terms']['category'], 'slug')
         );
 
         $editor = $this->mcp(self::$authorToken)->callTool('get-post', ['id' => self::$echo]);

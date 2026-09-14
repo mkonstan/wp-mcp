@@ -448,6 +448,85 @@ final class Fixtures
         return array_values(array_filter(array_map('intval', explode(',', trim($raw)))));
     }
 
+    /**
+     * Set a post's `post_modified` to an exact value, and ONLY that column.
+     *
+     * WHY A FIXTURE HAS TO STATE THIS RATHER THAN LET IT HAPPEN. `post_modified` is written
+     * by wp_update_post() as `current_time('mysql')` - to the SECOND. A fixture that makes
+     * one post "more recently modified" by touching it after another is therefore relying on
+     * two wp-cli invocations landing in different seconds, which is a property of how fast
+     * the machine is. On the plugin-heavy stress site each call takes long enough that they
+     * do; on a bare site they do not, the two posts TIE, and `orderby: "modified"` is then
+     * decided by the ID tie-break - correctly, deterministically, and not in the order the
+     * test was written for. Stating the value removes the clock from the test.
+     *
+     * post_modified_gmt IS DELIBERATELY NOT TOUCHED. A date-floating post carries
+     * '0000-00-00 00:00:00' there and get-post maps that to null; writing a real value would
+     * quietly destroy the case that asserts it.
+     *
+     * Direct SQL, then clean_post_cache(): wp_update_post() would overwrite post_modified
+     * with the current time, which is the thing being avoided.
+     */
+    public static function setPostModified(int $postId, string $datetime): void
+    {
+        WpCli::run([
+            'eval',
+            sprintf(
+                'global $wpdb; $wpdb->update($wpdb->posts, array("post_modified" => %s),'
+                . ' array("ID" => %d)); clean_post_cache(%d); echo "ok";',
+                self::phpString($datetime),
+                $postId,
+                $postId
+            ),
+        ]);
+    }
+
+    /**
+     * Make a post sticky, and report it back.
+     *
+     * A STICKY POST IS NOT A DECORATION. WP_Query splices every sticky into the front of any
+     * query it considers a HOME query - which is any listing whose only filters are among
+     * after/before, status, orderby and the row count, because none of those set a query
+     * flag - fetched by post__in with post_status => 'publish' and none of the original
+     * query's conditions. A suite whose fixtures are never sticky is blind to all of it.
+     *
+     * `sticky_posts` IS A SHARED OPTION WITH NO RUN PREFIX, like `wpmcp_db_ver`: purge()
+     * matches names, and an option holding ids has none. Two concurrent runs are still safe,
+     * because stick_post() appends exactly one id and unstick_post() removes exactly that
+     * one, and the two runs stick different posts. The caller must unstick in teardown.
+     *
+     * @return list<int> the sticky ids AFTER the change, read back from the site
+     */
+    public static function stickPost(int $postId): array
+    {
+        return self::stickyIds(sprintf('stick_post(%d);', $postId));
+    }
+
+    /** Tolerant: the post may already have been unstuck, or deleted. */
+    public static function unstickPost(int $postId): array
+    {
+        return self::stickyIds(sprintf('unstick_post(%d);', $postId));
+    }
+
+    /**
+     * The site's sticky post ids, optionally after running one statement first.
+     *
+     * Read back rather than assumed, so a test can assert that its fixture really is sticky
+     * before it asserts that the tool ignores stickiness - otherwise "the sticky post was
+     * not injected" passes on a site where nothing was ever stuck.
+     *
+     * @return list<int>
+     */
+    public static function stickyIds(string $before = ''): array
+    {
+        $raw = WpCli::run([
+            'eval',
+            $before . ' echo implode(",", array_map("intval", (array) get_option("sticky_posts", array())));',
+        ]);
+
+        return array_values(array_filter(array_map('intval', explode(',', trim($raw)))));
+    }
+
     /** Tolerant: the term may already be gone. Deletes by id, never by name. */
     public static function deleteTerm(string $taxonomy, int $termId): void
     {
