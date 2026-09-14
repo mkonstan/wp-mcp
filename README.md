@@ -194,7 +194,7 @@ executes.
 |---|---|---|
 | `post_type` | one post type this tool serves | `post` |
 | `status` | one post status | every status the caller may see |
-| `search` | text matched against title, excerpt and content | - |
+| `search` | text matched against title, excerpt and content; a leading `-` on a word **excludes** it | - |
 | `category`, `tag` | a slug or a term id | - |
 | `term` | `"taxonomy:slug"`, for any other taxonomy | - |
 | `author` | a user id or a user login | - |
@@ -208,6 +208,12 @@ It answers with `count`, `page`, `limit`, `has_more` and `items`. There is no to
 purpose: a total is a count of posts the caller has not been shown, and on the
 own-unpublished side it would be a count of somebody's drafts. Page until `has_more` is
 `false`.
+
+Two things it deliberately does not do. **Sticky posts are ignored**: WordPress pins them to
+the front of a home query regardless of what was asked for, which would mean a date window or
+a status filter quietly returning posts outside it. And **ties are broken by ID**, in the same
+direction as the sort, so paging over rows that share a date or a title cannot show one row
+twice and another never.
 
 **A filter that names something the caller may not see returns an empty list, not an
 error.** An unknown category, a tag holding only somebody else's draft, an author who has

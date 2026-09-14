@@ -127,7 +127,9 @@ admin can renew them for thirty days from when they were minted - see below.
   and `tag` (slug or term id), `term` (`"taxonomy:slug"`, for any other taxonomy),
   `author` (user id or login), `after` and `before` (ISO 8601 date or datetime, both
   inclusive), and `orderby` (`date`, `modified` or `title`; default `date`) with `order`
-  (`asc` or `desc`; default `desc`).
+  (`asc` or `desc`; default `desc`). `search` is WordPress's own search, so a leading `-` on
+  a word excludes it - that is documented in the tool's description rather than stripped,
+  because silently turning an exclusion into its opposite is worse than a syntax to learn.
 - **A filter that names something you may not see returns an empty list, not an error.**
   An unknown category, a tag holding only somebody else's draft, an author with nothing
   published, a term in a private taxonomy and a taxonomy nobody registered all answer
@@ -152,6 +154,24 @@ admin can renew them for thirty days from when they were minted - see below.
   now carries `page`, `limit` and `has_more` beside `count` and `items`. There is still no
   total: a total is a count of posts the caller has not been shown, and on the
   own-unpublished side it would be a count of somebody's drafts.
+- **Sticky posts are ignored, and that was a bug worth naming.** WordPress decides a query
+  is a "home" query from its arguments, and `after`/`before`, `status` and `orderby` set no
+  argument that says otherwise - so a listing filtered only by those was a home query, and
+  core splices every sticky post into the front of one, fetched as `publish` with none of the
+  original conditions. `after: "2030-01-01"` returned posts from 2021; `status: "draft"` on
+  an editor's token returned published ones. Not a permission leak - stickies are published -
+  but a false answer to the question asked, which is the failure this tool exists not to have.
+  Both queries now pass `ignore_sticky_posts`.
+- **Ties are broken by ID in the SQL, not only in the merge.** The ordering handed to both
+  queries is now `<column>, ID`, in the same direction. Without it, rows sharing a `post_date`
+  to the second - which any import produces - could come back in a different order, and a
+  different subset, from the `LIMIT` behind page one and the `LIMIT` behind page two, so a
+  caller paging through them could see one twice and another never.
+- **The listing no longer primes the postmeta cache.** It reads id, title, type, status, slug
+  and the permalink and no meta at all, while the paging fetch can ask for up to 10,001 rows
+  per query; on a site carrying ACF or SEO meta, priming that is a memory problem rather than
+  a slow one. The term cache stays on - `get_permalink()` needs it on a `%category%`
+  permalink structure.
 - **One ordering across the merge.** list-posts runs two queries - everything you may see,
   plus your own unpublished work, which WP_Query cannot express in one - and both are now
   given the same explicit `orderby`/`order`, with the merge comparator following the same
