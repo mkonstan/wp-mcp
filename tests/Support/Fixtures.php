@@ -252,6 +252,211 @@ final class Fixtures
     }
 
     /**
+     * A post with fields createPost() has no parameter for - an excerpt, a chosen
+     * post_date, a comment status - in one `wp post create`.
+     *
+     * $fields are wp-cli's own `post create` flags without the leading dashes, so the
+     * set is whatever wp_insert_post accepts and there is no allow-list to keep in step
+     * with the tests. `post_title` is required and goes through assertPrefixed() like
+     * every other fixture name, so a post created this way is still findable by
+     * teardown and by the debris check.
+     *
+     * @param array<string, string|int> $fields
+     * @return int the new post's ID
+     */
+    public static function createPostWith(array $fields): int
+    {
+        $title = (string) ($fields['post_title'] ?? '');
+        self::assertPrefixed($title);
+
+        $args = ['post', 'create'];
+
+        foreach ($fields as $key => $value) {
+            $args[] = '--' . $key . '=' . $value;
+        }
+
+        $args[] = '--porcelain';
+
+        $id = self::porcelainId(WpCli::run($args));
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create the fixture post {$title}.");
+        }
+
+        return $id;
+    }
+
+    /**
+     * The id out of a `--porcelain` run, which is NOT always the whole of stdout.
+     *
+     * MEASURED ON THE STRESS SITE: a caching plugin there hooks term creation and
+     * answers with `Success: Purged all caches successfully.` on the line BEFORE the
+     * porcelain id, so `(int) $out` is 0 and the fixture build dies claiming the term
+     * could not be created. Any plugin on anybody's site may do the same to any command,
+     * so the id is taken as the last all-digit line rather than as the first thing that
+     * happens to be there.
+     */
+    private static function porcelainId(string $out): int
+    {
+        foreach (array_reverse(preg_split('/\r\n|\r|\n/', trim($out))) as $line) {
+            $line = trim((string) $line);
+
+            if ($line !== '' && ctype_digit($line)) { return (int) $line; }
+        }
+
+        return 0;
+    }
+
+    /**
+     * A term in any taxonomy. The NAME carries the run prefix, which is what
+     * leftoverTerms() and purge() match on; the slug is derived from it by WordPress
+     * unless one is given, and a given slug must carry the prefix too so that a
+     * slug-addressed fixture cannot collide with a real term on the stress site.
+     *
+     * @return int the new term's ID
+     */
+    public static function createTerm(string $taxonomy, string $name, string $slug = ''): int
+    {
+        self::assertPrefixed($name);
+
+        $args = ['term', 'create', $taxonomy, $name, '--porcelain'];
+
+        if ($slug !== '') {
+            self::assertPrefixed($slug);
+            $args[] = '--slug=' . $slug;
+        }
+
+        $id = self::porcelainId(WpCli::run($args));
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create the fixture term {$name} in {$taxonomy}.");
+        }
+
+        return $id;
+    }
+
+    /**
+     * Put a post in terms, addressed by TERM ID.
+     *
+     * By id and not by slug on purpose: `wp post term set` resolves a name or slug by
+     * searching, and on the stress site - a real client's database - a search can find
+     * somebody else's term. An id cannot be ambiguous.
+     *
+     * `set`, not `add`, so the fixture's terms are exactly what the test asked for even
+     * when WordPress has already assigned a default category.
+     *
+     * @param list<int> $termIds
+     */
+    public static function setPostTerms(int $postId, string $taxonomy, array $termIds): void
+    {
+        $args = ['post', 'term', 'set', (string) $postId, $taxonomy];
+
+        foreach ($termIds as $id) { $args[] = (string) $id; }
+
+        $args[] = '--by=id';
+
+        WpCli::run($args);
+    }
+
+    /** One post meta value. Used for _thumbnail_id and _wp_attached_file. */
+    public static function setPostMeta(int $postId, string $key, string $value): void
+    {
+        WpCli::run(['post', 'meta', 'set', (string) $postId, $key, $value]);
+    }
+
+    /**
+     * A display name that is NOT the login.
+     *
+     * `wp user create` leaves display_name equal to the login, so a test asserting that
+     * get-post returns a display name and not a login would pass on two identical
+     * strings and prove nothing at all.
+     */
+    public static function setDisplayName(int $userId, string $displayName): void
+    {
+        self::assertPrefixed($displayName);
+
+        WpCli::run(['user', 'update', (string) $userId, '--display_name=' . $displayName]);
+    }
+
+    /**
+     * Rewrite a post's content, which is how a REVISION is made: wp_update_post stores
+     * the pre-update state as a revision whenever the content actually changes.
+     */
+    public static function updatePostContent(int $postId, string $content): void
+    {
+        self::assertPrefixed($content);
+
+        WpCli::run(['post', 'update', (string) $postId, '--post_content=' . $content]);
+    }
+
+    /**
+     * How many revisions the site holds for a post, counted through wp-cli.
+     *
+     * The tool under test counts them through wp_get_post_revisions() inside a request;
+     * this counts them from outside, so an assertion comparing the two is a comparison
+     * of two independent paths rather than a restatement of one.
+     */
+    public static function revisionCount(int $postId): int
+    {
+        return (int) WpCli::evaluate(sprintf(
+            'echo count(wp_get_post_revisions(%d, array("fields" => "ids")));',
+            $postId
+        ));
+    }
+
+    /**
+     * The taxonomies get-post is allowed to report for a post type: attached to it AND
+     * viewable.
+     *
+     * Read from the site rather than written into the test, so the expectation is
+     * whatever THIS site registers - the stress site carries custom taxonomies the bare
+     * one does not, and a hard-coded list would either fail there or assert nothing.
+     *
+     * @return list<string>
+     */
+    public static function viewableTaxonomies(string $postType): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            'foreach (get_object_taxonomies(%s) as $t) {'
+            . ' if (is_taxonomy_viewable($t)) { echo $t, "\n"; } }',
+            self::phpString($postType)
+        ));
+
+        return array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $raw))));
+    }
+
+    /**
+     * The post ids currently in one term, read straight from the site.
+     *
+     * A control for the taxonomy tests: "list-posts returned nothing" only means the
+     * allow-list refused the taxonomy if the term really does hold a post the caller can
+     * otherwise see. Read through get_objects_in_term(), which no allow-list of ours is
+     * anywhere near.
+     *
+     * @return list<int>
+     */
+    public static function postIdsInTerm(string $taxonomy, int $termId): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$ids = get_objects_in_term(%d, %s);'
+            . ' if (is_wp_error($ids)) { echo "ERROR:" . $ids->get_error_message(); return; }'
+            . ' echo implode(",", array_map("intval", $ids));',
+            $termId,
+            self::phpString($taxonomy)
+        ));
+
+        return array_values(array_filter(array_map('intval', explode(',', trim($raw)))));
+    }
+
+    /** Tolerant: the term may already be gone. Deletes by id, never by name. */
+    public static function deleteTerm(string $taxonomy, int $termId): void
+    {
+        if ($termId > 0) {
+            WpCli::tryRun(['term', 'delete', $taxonomy, (string) $termId]);
+        }
+    }
+
+    /**
      * @param string $email author email, or '' to leave it empty. Set it only when a
      *                      test needs to prove the email is NOT reachable - it is
      *                      never returned by any tool.
