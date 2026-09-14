@@ -167,8 +167,10 @@ An `admin`-scope token gets 16, those 7 plus `create-post`, `update-post`, `dele
 `reply-comment`. It gets 22 if Enable code-edit tools is also ticked in Settings > WP MCP,
 which adds `code-list`, `code-read`, `code-write`, `code-delete`, `code-history` and
 `code-restore`, and 23 if Allow SQL reads is ticked as well, which adds `sql-select`.
-Both switches are off until you tick them, and a tool that is switched off is not in the
-list at all.
+Naming at least one key in Post meta keys adds `get-post-meta` to both lists - it is a read
+tool - and `set-post-meta` to the admin one, so a site with everything switched on serves 8
+and 25. Every switch is off, and the key list empty, until you say otherwise; a tool that
+cannot run is not in the list at all.
 
 ### Undoing a code edit
 

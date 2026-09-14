@@ -121,6 +121,54 @@ admin can renew them for thirty days from when they were minted - see below.
 - New option `wpmcp_sql_enabled`, removed on uninstall. No schema change. The catalog is
   23 tools.
 
+### New: scheduling, authorship and featured images on the write tools
+
+- **`create-post` and `update-post` gain `date`, `author` and `featured_image`**, shaped
+  and capability-checked in one shared step so the two tools cannot drift apart. Both now
+  also report `changed`: the list of fields the call actually touched.
+- **`date` is ISO 8601**, with or without a UTC offset. Without one it is the site's local
+  time, which is what wp-admin shows; with one the instant is fixed by the caller. Both
+  `post_date` and `post_date_gmt` are written to describe that one instant. A malformed
+  date is refused rather than guessed at - there is no `next tuesday`.
+- **Scheduling works and says what it did.** Send a future `date` with `status: "future"`;
+  the capability is `publish_posts`, because scheduling is publishing. WordPress silently
+  turns `publish` plus a future date into `future`, and `future` plus a past date into
+  `publish`, so the result carries the stored `status` and `date` rather than what was
+  asked for. A date given to a **draft** is now kept - core re-dates a draft on every
+  update unless told the date was deliberate, so passing one used to be a silent no-op.
+- **`author`** takes a user id or a login, needs the capability to edit other people's
+  posts of that type, and refuses a user who could not write that post type - with a
+  sentence that says nothing else about the account. The reply gives `{id, name}` with the
+  display name.
+- **`featured_image`** takes an image attachment id and is checked against **that
+  attachment**: you need to be able to edit it, which for an Author means their own uploads
+  and not somebody else's. `0` removes the image. A create that is refused for its image
+  leaves no post behind.
+
+### New: `get-post-meta` and `set-post-meta`, behind an allow-list (opt-in, off by default)
+
+- **Two tools for a post's custom fields**, listed only when an administrator has named at
+  least one meta key in the new **Post meta keys** textarea in Settings > WP MCP. While the
+  list is empty they are absent from `tools/list` and calling either by name answers what
+  a tool nobody registered answers - the rule the code tools and `sql-select` already
+  follow.
+- **The allow-list exists because WordPress has no capability that separates a subtitle
+  from a plugin's private state.** Rather than guess, the operator names the exact keys.
+  Keys WordPress calls protected - anything with a leading underscore - are dropped on save
+  and refused at call time as well, because the option is an ordinary row that wp-cli or a
+  restored backup can write without passing through the form.
+- `get-post-meta {id, key?}` returns `meta` as an object of key to value: one row as a
+  value, several as a list, and only keys that have a value. It refuses a post the caller
+  may not read exactly the way `get-post` does.
+- `set-post-meta {id, key, value}` replaces the key - a scalar, a flat list, or `null` to
+  delete it. An object is refused. It needs the capability to edit the post *and*
+  WordPress's own `edit_post_meta` for that key.
+- **ACF values are ordinary meta under the field name**, so naming the field lets a token
+  read and write it. The `_<field name>` reference row ACF keeps is not written, which is
+  measured and documented in README: a field that has been set through ACF at least once
+  reads back correctly, and one that never has reads back as a raw string.
+- Deleting the plugin removes the new `wpmcp_meta_keys` option with everything else.
+
 ### New: `list-posts` can find things, and `get-post` returns the rest of the post
 
 - **`list-posts` gains nine filters**: `search` (title, excerpt and content), `category`

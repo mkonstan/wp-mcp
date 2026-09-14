@@ -47,11 +47,12 @@ token minted for an Editor cannot read another author's private post, cannot del
 someone else's page, and sees only approved comments unless that Editor holds
 `moderate_comments`. Deleting the user stops the token working. The field defaults to you.
 
-**Scope** narrows from there. A `read` token is served the seven read tools and nothing
-else: the write tools are not listed to it, and are refused if it calls one anyway. An
-`admin` token is served sixteen, those seven plus the nine that write, and four more when
-code editing is switched on. Scope only subtracts. It cannot hand a token a capability its
-user does not have.
+**Scope** narrows from there. A `read` token is served the read tools and nothing else:
+the write tools are not listed to it, and are refused if it calls one anyway. That is
+seven tools, plus `get-post-meta` when the site has declared post meta keys. An `admin`
+token is served those and the nine that write, plus `set-post-meta` with the same meta
+keys declared, `sql-select` when SQL reads are on, and six more when code editing is on.
+Scope only subtracts. It cannot hand a token a capability its user does not have.
 
 **Active window** and **Lifetime** are two separate timers, and the split is what lets a
 token be both short-lived and long-lived at once.
@@ -136,7 +137,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Twenty-three tools. Each declares the four MCP annotation hints, so a client can tell a
+Twenty-five tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -164,6 +165,8 @@ listing from a deletion before it asks you to approve anything.
 | `code-history` | admin + code editing | no | no | yes | no |
 | `code-restore` | admin + code editing | no | yes | no | no |
 | `sql-select` | admin + SQL reads | no | no | yes | no |
+| `get-post-meta` | read + meta keys | yes | no | yes | no |
+| `set-post-meta` | admin + meta keys | no | yes | yes | no |
 
 Three rows in that table need a sentence.
 
@@ -180,6 +183,10 @@ rather than adding to them.
 
 `openWorldHint` is true for `upload-media` alone, which fetches a URL you supply. Every
 other tool's reach stops at this site's database and active theme.
+
+`get-post-meta` is the one read tool behind an opt-in: it is listed only when the site
+has declared post meta keys (see *Post meta*), and it reports `readOnlyHint: true` like
+every other `read`-scope tool.
 
 `create-post` defaults to `draft`. `delete-post` and `delete-media` trash unless you pass
 `force: true`. Every argument is validated against the tool's schema before the tool runs:
@@ -248,6 +255,93 @@ Three details in that list are decisions rather than data:
 `terms` lists only taxonomies that are attached to the post type and public. A private
 taxonomy is a plugin's internal bookkeeping, and its term names are often customer
 segments or workflow states rather than anything the post says.
+
+### Writing content
+
+`create-post` and `update-post` take the same fields, shaped and checked in one place so
+the two cannot disagree. `update-post` needs `id`; everything else is optional on both.
+
+| Argument | Takes | Capability it needs |
+|---|---|---|
+| `title`, `content`, `excerpt` | text | to edit the post |
+| `slug` | text, turned into a URL slug | to edit the post |
+| `status` | `draft`, `pending`, `publish`, `private`, `future`, `trash` | publishing and trashing each need their own |
+| `terms` | `{taxonomy: [id or name]}` | to assign in that taxonomy; naming a term that does not exist yet also needs to create one |
+| `date` | ISO 8601 date or datetime | none of its own - see below |
+| `author` | a user id or a user login | to edit other people's posts of that type |
+| `featured_image` | an image attachment id, or `0` | to edit **that attachment** |
+
+**`date` is the site's local time unless you say otherwise.** `2026-03-04T09:30:00` means
+half past nine on your site's clock - the time an editor sees in wp-admin. Add an offset
+(`Z`, `+02:00`, `-0500`) and the instant is fixed regardless of where the site thinks it
+is. Either way both columns WordPress stores, `post_date` and `post_date_gmt`, are written
+to describe one instant. A date that is not a date is an error, not a guess: there is no
+`next tuesday`.
+
+**Scheduling is publishing.** To schedule, send a future `date` with `status: "future"`;
+the capability is `publish_posts`, the same one a Contributor does not have. Two silent
+things WordPress does with dates, which the result therefore reports rather than hides:
+
+- `status: "publish"` with a **future** date is stored as `future`. It is a schedule.
+- `status: "future"` with a **past** date is stored as `publish`. It goes live now.
+
+Read `status` and `date` in the reply for what actually happened. A date on a **draft** is
+kept, which is not WordPress's default - core re-dates a draft to "now" on every update
+unless it is told the date was deliberate.
+
+**`author` needs the capability wp-admin gates its Author box on**, and the user you name
+has to be one who could write that post type - naming a Subscriber is an error. The reply
+gives `{id, name}`, with the display name; never a login, never an email.
+
+**`featured_image` is checked against the attachment, not against your post.** You need to
+be able to edit that attachment, which for an Author means their own uploads and not
+someone else's, and it has to be an image. `0` removes the image. It round-trips through
+`get-post`'s `featured_image`.
+
+Both tools reply with `changed`: the list of fields this call actually touched.
+
+### Post meta (opt-in)
+
+Off by default, and the third switch in the same **Settings > WP MCP** form - a textarea,
+**Post meta keys**, one exact key name per line. While it is empty, `get-post-meta` and
+`set-post-meta` are **not listed at all** and calling either by name answers exactly what
+a tool nobody registered answers.
+
+The list exists because post meta has no capability of its own that separates a subtitle
+from a plugin's private state. WordPress offers no way to tell them apart, so this plugin
+does not guess: you name the keys, and those are the only keys MCP can see. Keys WordPress
+calls protected - anything starting with an underscore, such as `_thumbnail_id` or
+`_edit_lock` - are dropped when you save and refused if called anyway.
+
+`get-post-meta {id, key?}` returns `meta`, an object of key to value, holding every
+allow-listed key that has a value on that post - or just the one key you name. One row
+comes back as a value, several as a list. Reading needs only what `get-post` needs, so a
+post a caller may not read answers identically to a post that is not there.
+
+`set-post-meta {id, key, value}` replaces the key: a scalar writes one row, a flat list
+writes several, `null` deletes it. An object is refused - post meta has no schema, and a
+nested structure would be stored as PHP-serialised text only this site can read back. It
+needs the capability to edit the post *and* WordPress's own `edit_post_meta` for that key.
+WordPress stores meta as text, so a number or a boolean comes back as its string form.
+
+A key that is not on the list is refused by name, and the refusal never mentions the keys
+that are.
+
+**ACF.** An Advanced Custom Fields value is an ordinary meta row under the field's name,
+so naming the field here is what lets a token read and write it. ACF also keeps a second
+row, `_<field name>`, holding the field key; these tools write only the value. Measured on
+a site running ACF Pro:
+
+- A field that has been set through ACF before - so the reference row exists - reads back
+  through `get_field()` exactly as written, formatted by the field type.
+- A field that has **never** had a value has no reference row, and `get_field()` then
+  returns the raw stored string. For a text or URL field that is right. For an image or a
+  relationship field the caller gets the id as a string instead of the shaped array ACF
+  would normally build.
+
+So: set a field once in wp-admin before handing it to an agent, or keep the tools to
+simple field types. There is no ACF-specific code in this plugin, deliberately - it is one
+vendor's convention, and a plugin that special-cased it would be wrong for the next one.
 
 ## HTTPS enforcement depends on your proxy
 

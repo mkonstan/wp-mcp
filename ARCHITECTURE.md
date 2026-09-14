@@ -16,8 +16,8 @@ who checks that pass on every knock and then does the work as that user.
 |---|---|
 | `wp-mcp.php` | Bootstrap, the two tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The twenty-three tools and the helpers they share. |
-| `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the two opt-in switches (code editing, SQL reads). |
+| `tools.php` | The twenty-five tools and the helpers they share. |
+| `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: the log, its unguessable name, the daily self-check, and the admin warnings. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
 | `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
@@ -179,7 +179,7 @@ enabling the feature.
 
 ## The second opt-in: one read-only SQL statement
 
-`sql-select` is the twenty-third tool and it is gated the same way - a switch in Settings >
+`sql-select` is gated the same way - a switch in Settings >
 WP MCP, off by default, and the tool is absent from `tools/list` until it is on - but the
 thing it is fenced against is refused somewhere else entirely. The code tools' fence is
 PHP: this plugin decides which path is allowed. sql-select's fence is the DATABASE, and
@@ -207,6 +207,42 @@ inspection, and it refuses the statement if any of them appears anywhere in it, 
 string literals included. It is a short denylist over a surface whose real fence is the
 server, not a second fence: `secure_file_priv` and the `FILE` grant are the operator's, and
 [SECURITY.md](SECURITY.md) says so.
+
+## The third opt-in: an operator's list of meta keys
+
+`get-post-meta` and `set-post-meta` are gated by the same invariant - absent from
+`tools/list` until they can run - but by a LIST rather than a switch, and the difference is
+the point. The other two opt-ins are a yes/no about a surface whose shape this plugin
+knows. Post meta has no shape: it is one table holding a marketing user's subtitle, an ACF
+value, a page builder's serialised payload and `_edit_lock`, with no capability that
+separates any of them. WordPress itself only distinguishes "protected" - a leading
+underscore - which is a naming convention, not a permission.
+
+So the plugin does not decide. `wpmcp_meta_keys` holds the exact key names an
+administrator typed into Settings > WP MCP, and those are the only keys that exist for
+MCP; an empty list means the two tools are not there. Normalisation happens on save AND on
+every read, because that option is an ordinary row and wp-cli, another plugin or a restored
+backup can write it without ever passing through the form.
+
+The capability checks are then the ordinary ones: `read_post` to read, `edit_post` plus
+WordPress's own `edit_post_meta` for the key to write. The allow-list narrows inside them
+and never widens - a key on the list is still refused on a post the caller cannot reach.
+
+## One place shapes a post field
+
+`create-post` and `update-post` do not each know what an `excerpt` or a `date` is. Both
+call `wpmcp_post_fields()`, which turns every optional field into one `wp_insert_post` key
+or one deferred core setter, applies the capability WordPress puts in front of that field
+in wp-admin, and hands back `changed`. Two tools that wrote the same five fields out twice
+would have drifted on the sixth, and the interesting part of each field is a gate rather
+than an assignment: `author` answers to `edit_others_posts`, and `featured_image` answers
+to `edit_post` on the ATTACHMENT, which resolves through the attachment's own author and
+parent.
+
+The deferred half exists for one reason: `set_post_thumbnail()` needs a post id, which on
+create does not exist yet - but its capability check does not. So the refusal happens
+before `wp_insert_post()` runs and only the writing waits, which is what stops a refused
+create leaving an orphan behind.
 
 ## Why it looks plain
 
