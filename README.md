@@ -367,10 +367,13 @@ listener that waits for an "ok" waits forever. The eleven types:
 | `content_type_deny` | the POST was not `application/json` | `content_type` |
 | `body_too_large` | `Content-Length` over the cap | `length` |
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
-| `stale_backup_sweep` | the 1.1 upgrade swept the active theme for backup files an older version left there | `found`, `moved`, `skipped_extension`, `skipped_unreadable`, `skipped_too_big`, `skipped_undeletable`, `moved_paths`, `skipped_paths` |
+| `stale_backup_sweep` | a schema upgrade swept the active theme and found backup files an older version had left there | `found`, `moved`, `skipped_extension`, `skipped_unreadable`, `skipped_too_big`, `skipped_undeletable`, `moved_paths`, `skipped_paths` |
 
-`stale_backup_sweep` fires at most once in a site's life, on the request that performs the
-schema upgrade. `moved_paths` names each collected file with the version id it became and
+`stale_backup_sweep` fires on the request that performs a schema upgrade, and only when
+the sweep found something - so it is usually once, on the upgrade to 1.1, but any later
+schema bump that finds a backup file in the theme fires it again.
+
+`moved_paths` names each collected file with the version id it became and
 `skipped_paths` names each one left on disk with the reason; both are capped at 25 entries
 with an `and N more` tail, because the rest is in the table and this is one log line.
 
