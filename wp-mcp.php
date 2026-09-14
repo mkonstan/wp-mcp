@@ -385,7 +385,7 @@ function wpmcp_migrate_sweep_stale_backups() {
     if ($root === '' || !is_dir($root)) { return $tally; }
 
     // THE ONE PLACE IN THE PLUGIN THAT STILL SPELLS THE OLD SUFFIX, which is why it is
-    // passed down rather than pulled from a constant: tests/unit/StaleBackupSweepTest.php
+    // passed down rather than pulled from a constant: tests/unit/SurfaceSweepTest.php
     // greps the whole repository for it and exempts exactly this function.
     $suffix = '.bak';
 
