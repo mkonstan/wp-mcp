@@ -150,14 +150,22 @@ function wpmcp_render_admin() {
               . ' The token itself did not change, so the client needs no edit.';
     }
 
-    // Handle code-editing settings save
+    // Handle the code-editing + SQL settings save.
+    //
+    // ONE FORM, ONE NONCE, and the SQL switch rides in it rather than getting a second
+    // form of its own. Both switches turn on a surface that an admin-scope token can
+    // reach and neither is on by default, so an operator decides about them in one place
+    // and one submit; a second form would be a second nonce and a second way for a
+    // checkbox to be silently left at its old value because the other form was the one
+    // that posted.
     if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'code_settings') {
         check_admin_referer('wpmcp_code');
         update_option('wpmcp_code_enabled', !empty($_POST['code_enabled']) ? 1 : 0);
+        update_option('wpmcp_sql_enabled', !empty($_POST['sql_enabled']) ? 1 : 0);
         $lines = isset($_POST['denylist']) ? (string) wp_unslash($_POST['denylist']) : '';
         $list  = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $lines))));
         update_option('wpmcp_code_denylist', $list);
-        $notice = 'Code-editing settings saved.';
+        $notice = 'Code-editing and SQL settings saved.';
     }
 
     global $wpdb;
@@ -357,7 +365,7 @@ function wpmcp_render_admin() {
         </tbody>
       </table>
 
-      <h2>Code editing</h2>
+      <h2>Code editing and SQL reads</h2>
       <form method="post">
         <?php wp_nonce_field('wpmcp_code'); ?>
         <input type="hidden" name="wpmcp_action" value="code_settings">
@@ -382,8 +390,22 @@ function wpmcp_render_admin() {
               <p class="description">One per line, never read or written. Bare name (functions.php) blocks that file anywhere; trailing slash (inc/) blocks a folder.</p>
             </td>
           </tr>
+          <tr>
+            <th scope="row">Allow SQL reads (sql-select)</th>
+            <td>
+              <label><input type="checkbox" name="sql_enabled" value="1" <?php checked(wpmcp_sql_enabled()); ?>>
+                Allow admin-scope tokens to run one read-only SQL SELECT at a time</label>
+              <p class="description">Off by default. It reads every table the WordPress
+                database user can read &mdash; including <code><?php echo esc_html($wpdb->users); ?></code>
+                and its password hashes. Writes are refused by the database itself, not by
+                a filter: the statement runs inside a READ ONLY transaction, wrapped so
+                that anything but a single SELECT is a syntax error. At most 200 rows and
+                256&nbsp;KB per call. While off, the tool is not exposed at all, even to
+                admin tokens.</p>
+            </td>
+          </tr>
         </table>
-        <?php submit_button('Save code settings'); ?>
+        <?php submit_button('Save code and SQL settings'); ?>
       </form>
       <p style="margin-top:24px;color:#666;font-size:12px">
         ☕ Like WP MCP? <a href="https://github.com/sponsors/mkonstan" target="_blank" rel="noopener">Sponsor the project</a> &mdash; it stays free either way.

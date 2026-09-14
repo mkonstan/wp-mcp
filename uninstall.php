@@ -34,6 +34,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
  * wpmcp_trace_log_unwritable set when a trace went to error_log() instead
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
+ * wpmcp_sql_enabled         the sql-select switch
  */
 $wpmcp_options = array(
     'wpmcp_db_ver',
@@ -42,6 +43,7 @@ $wpmcp_options = array(
     'wpmcp_trace_log_unwritable',
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
+    'wpmcp_sql_enabled',
 );
 
 /** Every transient. Deleted through the API, because an object cache holds them too. */

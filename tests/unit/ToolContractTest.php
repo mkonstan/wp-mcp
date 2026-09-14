@@ -68,7 +68,7 @@ final class ToolContractTest extends TestCase
     }
 
     /**
-     * All four hints, on all twenty tools, as real booleans.
+     * All four hints, on every tool in the catalog, as real booleans.
      *
      * @group sprint-5
      */
@@ -175,6 +175,12 @@ final class ToolContractTest extends TestCase
             // code-write's reason: the file ends up the same, the history does not - a
             // second call stores another version of what it replaced.
             'code-restore'     => [true,  false, false],
+            // Sprint 9. sql-select cannot write - the server refuses it, not a
+            // filter - so it destroys nothing, and running the same SELECT twice
+            // has no additional effect because it has no effect at all. Its
+            // readOnlyHint is false like every other admin-scope tool's, which
+            // testReadOnlyHintIsDerivedFromTheWriteFlag above asserts on its own.
+            'sql-select'       => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

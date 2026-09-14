@@ -883,6 +883,15 @@ function wpmcp_client_ip() {
  *   content_type_deny the POST was not application/json (content_type)
  *   body_too_large    CONTENT_LENGTH over the cap      (length)
  *   registry_reject   a filter-added tool was refused  (tool, reason)
+ *   stale_backup_sweep a schema upgrade collected what an older version left beside
+ *                     theme files                   (found, moved, skipped_*, *_paths)
+ *   sql_select        sql-select ran a statement     (token_id, user_id, row_count,
+ *                                                    truncated, elapsed_ms, sql)
+ *
+ * `sql` on a sql_select is the FIRST 200 CHARACTERS of the statement and never more. The
+ * whole of it can carry a value out of somebody's database, and this log is not the trace
+ * log; the full statement reaches the trace log on the one path where it is worth having,
+ * which is a statement the server refused.
  *
  * Every context also carries `ip` - which is there to be READ, not enforced: nothing in
  * this plugin decides anything from the caller's address. `reason` on validate_fail is

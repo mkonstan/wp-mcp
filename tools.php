@@ -10,6 +10,7 @@
  * wpmcp_media_tools():    list-media / get-media / upload-media / delete-media.
  * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
  * wpmcp_code_tools():     the six jailed code-edit tools (active theme only).
+ * wpmcp_sql_tools():      sql-select, one read-only SQL statement (opt-in, off by default).
  * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
  *                   'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
@@ -1688,4 +1689,417 @@ function wpmcp_version_author_login($userId) {
     $user = get_userdata($userId);
 
     return $user ? $user->user_login : '(deleted user ' . $userId . ')';
+}
+
+/* ============================================================
+ * sql-select. A read-only SQL window onto this site's database.
+ *
+ * ONE TOOL, ONE SWITCH, AND NO PARSER. The tool hands the caller's statement to the
+ * database inside a wrapper that makes anything other than a single SELECT a SERVER
+ * syntax error, and runs it inside a READ ONLY transaction that makes a write the
+ * server refuses even when the wrapper lets the syntax through. Both walls are the
+ * server's own; nothing here inspects the SQL to decide whether it is safe, because a
+ * SQL parser written in PHP is a second, worse implementation of MySQL's grammar and
+ * every one of them has been walked around.
+ *
+ * WHAT WAS MEASURED, on MySQL 8.4.0 (jaygroup, WordPress 7.1, PHP 8.2.29), wrapping
+ * each statement as `SELECT * FROM (<sql>) AS wpmcp_q LIMIT 201`:
+ *
+ *   INTO OUTFILE / INTO DUMPFILE / INTO @var   1064, syntax error.
+ *   `SELECT 1; DROP TABLE x`                   1064 - the semicolon cannot appear there,
+ *                                              and WordPress talks to mysqli through
+ *                                              mysqli_query(), which carries one
+ *                                              statement at a time in the first place.
+ *   `UPDATE ...`, `DELETE ...`, `SHOW TABLES`  1064 - a derived table must be a query
+ *                                              expression, and none of those is one.
+ *   `SELECT ... FOR UPDATE`                    ACCEPTED BY THE WRAPPER. This is the one
+ *                                              the design expected to be a syntax error
+ *                                              and it is not: MySQL 8.4 parses a locking
+ *                                              read inside a derived table. It is
+ *                                              refused by the OTHER wall - 1792, "Cannot
+ *                                              execute statement in a READ ONLY
+ *                                              transaction" - which is exactly why there
+ *                                              are two walls and not one.
+ *   `SELECT ... LOCK IN SHARE MODE`            accepted by both walls. It takes shared
+ *                                              locks and writes nothing; the session
+ *                                              timeout below bounds how long it can hold
+ *                                              them, and ROLLBACK releases them.
+ *   `WITH c AS (...) SELECT * FROM c`          works inside the wrapper.
+ *   an inner `ORDER BY`                        honoured, with derived_merge on AND off.
+ *                                              The merge-drops-ORDER-BY behaviour this
+ *                                              was expected to need `derived_merge=off`
+ *                                              for did NOT reproduce on 8.4.0. The
+ *                                              switch is set anyway: it is documented
+ *                                              server behaviour on earlier 8.0.x, it
+ *                                              costs one round trip, and an ordering a
+ *                                              caller asked for and silently did not get
+ *                                              is the kind of wrong answer nobody checks.
+ *   duplicate column names                     1060. `SELECT p.ID, m.post_id AS ID ...`
+ *                                              is legal on its own and illegal as a
+ *                                              derived table, because a derived table's
+ *                                              columns must be uniquely named. A real
+ *                                              limitation of the wrapper; the caller
+ *                                              aliases one of them and moves on.
+ *
+ * THE DATABASE USER CAN READ EVERYTHING, and that is the point to be honest about: this
+ * tool reads whatever the WordPress database user can read, `wp_users` and its password
+ * hashes included. It is off by default, admin-scope only, and the switch is in
+ * Settings > WP MCP next to code editing. See SECURITY.md.
+ * ========================================================== */
+
+/** Rows returned at most. One more than this is FETCHED, and that one sets `truncated`. */
+define('WPMCP_SQL_ROW_CAP', 200);
+
+/** Bytes of JSON-encoded rows returned at most. */
+define('WPMCP_SQL_BYTE_CAP', 262144);
+
+/** Bytes of one cell returned at most; past this it is cut and suffixed with an ellipsis. */
+define('WPMCP_SQL_CELL_CAP', 8192);
+
+/** How long the server may spend on the statement. */
+define('WPMCP_SQL_TIMEOUT_MS', 5000);
+
+function wpmcp_sql_enabled() {
+    return (bool) get_option('wpmcp_sql_enabled', false);
+}
+
+/**
+ * Is the server MariaDB? Asked once per request, because it is a property of the
+ * connection and the answer costs a round trip on some drivers.
+ *
+ * The two flavours spell the statement timeout differently and neither knows the
+ * other's name: `SET SESSION max_statement_time = 5` is 1193 "Unknown system variable"
+ * on MySQL 8.4 (measured), and MySQL's MAX_EXECUTION_TIME does not exist on MariaDB.
+ * mysqli reports MariaDB as something like `5.5.5-10.6.12-MariaDB`, so the name is in
+ * the string either way.
+ */
+function wpmcp_sql_is_mariadb() {
+    static $answer = null;
+
+    if ($answer === null) {
+        global $wpdb;
+        $info   = is_object($wpdb) && method_exists($wpdb, 'db_server_info')
+            ? (string) $wpdb->db_server_info()
+            : '';
+        $answer = (stripos($info, 'mariadb') !== false);
+    }
+
+    return $answer;
+}
+
+/**
+ * The identifiers this tool refuses to see, ANYWHERE in the statement, case-insensitively.
+ *
+ * THIS IS THE ONLY STRING INSPECTION IN THE TOOL AND IT EXISTS BECAUSE THE SERVER CANNOT
+ * MAKE THIS DECISION. Everything else the tool refuses is refused by MySQL itself - the
+ * wrapper's grammar, the READ ONLY transaction, the statement timeout. But the WordPress
+ * database user owns the token table and the file-version table: it created them and it
+ * can read them, and there is no GRANT this plugin can issue on its own connection to
+ * take that away. So the one thing the server will happily do and must not is read the
+ * table of token hashes and the table of theme-file bytes, and the only place that can be
+ * stopped is here, before the statement is sent.
+ *
+ * NOTHING IS STRIPPED FIRST. No comments removed, no strings skipped, no tokenising: a
+ * mention of either name inside a comment or inside a string literal refuses the whole
+ * statement. That over-refuses - `SELECT 'wpmcp_tokens' AS label` is harmless and is
+ * refused - and over-refusal is the safe direction, because the alternative is a
+ * comment-stripper that has to be exactly as correct as MySQL's lexer to be worth
+ * anything. It is documented in README.md and in the tool's own refusal message.
+ *
+ * The bare constants are matched as well as the prefixed names. A prefix is a prefix, so
+ * `wp_wpmcp_tokens` contains `wpmcp_tokens` and the bare form already subsumes it - the
+ * prefixed names are listed too so that the rule reads as what it is rather than as a
+ * substring trick, and so it keeps holding if a constant is ever renamed.
+ *
+ * @return array
+ */
+function wpmcp_sql_denied_identifiers() {
+    return array_values(array_unique(array(
+        wpmcp_table(),
+        wpmcp_versions_table(),
+        WPMCP_TABLE,
+        WPMCP_VERSIONS_TABLE,
+    )));
+}
+
+/**
+ * One cell on its way to the wire: null stays null, invalid UTF-8 becomes hex, long is cut.
+ *
+ * WHY HEX AND NOT THE BYTES. wp_json_encode() does not fail on a value that is not valid
+ * UTF-8 and it does not return null for it either - measured on this stack, the four
+ * bytes `61 80 62 63` come back as `"a?bc"`, the bad byte silently replaced by a question
+ * mark by WordPress's own _wp_json_convert_string() sanity pass. A caller reading a
+ * `longblob`, a serialised option written by a plugin in latin1, or a hash column would
+ * therefore be handed something that looks like text and is not the data. `0x`-prefixed
+ * uppercase hex is unambiguous, round-trips, and is what every database client shows for
+ * a binary value.
+ *
+ * THE CUT IS IN BYTES AND THEN REPAIRED. WPMCP_SQL_CELL_CAP is a byte budget - one
+ * `longtext` column must not be able to become the whole response - and a byte cut lands
+ * in the middle of a multibyte character often enough to matter, which would hand
+ * wp_json_encode() exactly the invalid string this function exists to prevent. So the
+ * trailing partial sequence is dropped (at most three bytes) before the ellipsis is added.
+ */
+function wpmcp_sql_cell($value) {
+    if ($value === null) { return null; }
+
+    $text = (string) $value;
+
+    if ($text !== '' && preg_match('//u', $text) !== 1) {
+        $text = '0x' . strtoupper(bin2hex($text));
+    }
+
+    if (strlen($text) > WPMCP_SQL_CELL_CAP) {
+        $text = substr($text, 0, WPMCP_SQL_CELL_CAP);
+
+        while ($text !== '' && preg_match('//u', $text) !== 1) {
+            $text = substr($text, 0, -1);
+        }
+
+        $text .= "\xE2\x80\xA6";
+    }
+
+    return $text;
+}
+
+/**
+ * The mysqli error number of the last statement, or 0 when it cannot be reached.
+ *
+ * THE NUMBER IS THE ONE THING THE CLIENT GETS. The server's message is not fit for the
+ * wire - 1054 names a column, 1064 quotes the statement back, and either can carry a
+ * table name, a path or a value out of somebody's database - but the NUMBER is a closed,
+ * public vocabulary and it is what an agent needs in order to do something other than
+ * retry: 1064 means rewrite the SQL, 1054 means the column is not there, 1060 means alias
+ * the duplicate, 1792 means the statement tried to write, 3024 means it was too slow.
+ *
+ * $wpdb does not expose it. `last_error` is a string and `dbh` is the mysqli handle, so
+ * the number is read from there, defensively: a site on a $wpdb replacement (HyperDB,
+ * LudicrousDB, SQLite) may have no mysqli object at all, in which case the client gets
+ * the trace id alone and the operator finds the rest in the log.
+ */
+function wpmcp_sql_errno() {
+    global $wpdb;
+
+    if (is_object($wpdb) && isset($wpdb->dbh) && class_exists('mysqli') && $wpdb->dbh instanceof mysqli) {
+        return (int) $wpdb->dbh->errno;
+    }
+
+    return 0;
+}
+
+/**
+ * Run one statement and shape the answer. A WP_Error is a refusal the caller can act on.
+ *
+ * THE ORDER IS THE DESIGN. Session caps, then READ ONLY, then the wrapped statement, then
+ * ROLLBACK in a `finally` - and the ROLLBACK is the part that is not optional. $wpdb is
+ * reused for the rest of the request: every option write, every post save, everything
+ * WordPress does after this tool returns runs on the same connection, and a connection
+ * left inside a READ ONLY transaction fails all of it with 1792. The `finally` is what
+ * makes that true after a throw as well as after an error.
+ *
+ * NOTHING ELSE IS RESTORED. MAX_EXECUTION_TIME applies to read-only SELECTs and nothing
+ * else, optimizer_switch only changes a plan and not a result, both are session-scoped,
+ * and the request ends within milliseconds of this returning - so putting them back would
+ * be two more round trips buying nothing. It is a deliberate choice, not an oversight.
+ *
+ * A FAILED `SET` IS NOT THE CALLER'S ERROR. An exotic server that does not know one of
+ * these variables leaves its complaint in $wpdb->last_error, which the code below would
+ * otherwise read as the statement's own failure; last_error is therefore cleared after the
+ * preamble. The caps are best-effort - the wrapper and the transaction are the gate.
+ *
+ * @return array|WP_Error
+ */
+function wpmcp_sql_select_run($sql) {
+    global $wpdb;
+
+    // A human types `SELECT 1;`. One trailing semicolon and the whitespace around it, and
+    // nothing else - no comment stripping, no normalisation. Anything further would be
+    // this file deciding what the statement means, which is the job it refuses to take.
+    $statement = preg_replace('/;\s*$/', '', trim((string) $sql));
+    $statement = $statement === null ? '' : trim($statement);
+
+    if ($statement === '') {
+        return new WP_Error('wpmcp_sql_empty', 'The sql argument is empty.');
+    }
+
+    foreach (wpmcp_sql_denied_identifiers() as $identifier) {
+        if (stripos($statement, $identifier) !== false) {
+            return new WP_Error(
+                'wpmcp_sql_denied',
+                "The plugin's own tables cannot be read: the statement mentions "
+                . $identifier . '. That rule matches the name anywhere in the statement,'
+                . ' including inside a comment or a string literal.'
+            );
+        }
+    }
+
+    $wrapped = 'SELECT * FROM (' . $statement . ') AS wpmcp_q LIMIT ' . (int) (WPMCP_SQL_ROW_CAP + 1);
+
+    $started       = microtime(true);
+    $suppressed    = $wpdb->suppress_errors(true);
+    $inTransaction = false;
+    $rows          = array();
+    $columns       = array();
+    $error         = '';
+    $errno         = 0;
+    $thrown        = null;
+
+    try {
+        if (wpmcp_sql_is_mariadb()) {
+            // MariaDB counts SECONDS, as a decimal, under a different name entirely.
+            $wpdb->query('SET SESSION max_statement_time = ' . (WPMCP_SQL_TIMEOUT_MS / 1000));
+        } else {
+            $wpdb->query('SET SESSION MAX_EXECUTION_TIME = ' . (int) WPMCP_SQL_TIMEOUT_MS);
+        }
+
+        $wpdb->query("SET SESSION optimizer_switch = 'derived_merge=off'");
+        $wpdb->last_error = '';
+
+        $wpdb->query('START TRANSACTION READ ONLY');
+        $inTransaction    = true;
+        $wpdb->last_error = '';
+
+        $rows  = (array) $wpdb->get_results($wrapped, ARRAY_N);
+        $error = (string) $wpdb->last_error;
+        $errno = wpmcp_sql_errno();
+
+        if ($error === '') {
+            // POSITIONAL, not associative. $wpdb->get_results(..., ARRAY_A) would collapse
+            // two columns of the same name into one and say nothing; ARRAY_N plus the
+            // column list keeps the shape the server actually returned.
+            $columns = array_map('strval', (array) $wpdb->get_col_info('name'));
+        }
+    } catch (Throwable $e) {
+        $thrown = $e;
+    } finally {
+        // WHATEVER HAPPENED. See the docblock: the rest of the request shares this handle.
+        if ($inTransaction) { $wpdb->query('ROLLBACK'); }
+        $wpdb->suppress_errors($suppressed);
+    }
+
+    if ($thrown !== null) {
+        return wpmcp_sql_failure(wpmcp_trace($thrown, 'tools/call', 'sql-select'), 0);
+    }
+
+    if ($error !== '') {
+        // The server's sentence and the statement go to the private log and nowhere else.
+        $detail = new WP_Error('wpmcp_sql_server', $error, array(
+            'errno'     => $errno,
+            'statement' => $statement,
+        ));
+
+        return wpmcp_sql_failure(
+            wpmcp_trace_wp_error($detail, 'tools/call', 'sql-select'),
+            $errno
+        );
+    }
+
+    $out         = array();
+    $bytes       = 0;
+    $truncated   = false;
+    $truncatedBy = '';
+    $total       = count($rows);
+
+    foreach (array_values($rows) as $index => $row) {
+        if (count($out) >= WPMCP_SQL_ROW_CAP) {
+            // The 201st row was fetched for exactly this: it is the evidence that there
+            // was more, without a second COUNT(*) over the caller's statement.
+            $truncated   = true;
+            $truncatedBy = 'rows';
+            break;
+        }
+
+        $cells = array();
+
+        foreach ((array) $row as $value) { $cells[] = wpmcp_sql_cell($value); }
+
+        $out[]  = $cells;
+        $bytes += strlen((string) wp_json_encode($cells));
+
+        // Only when something was actually left behind. A last row that tips the budget
+        // with nothing after it has truncated nothing, and saying otherwise would send an
+        // agent looking for a page that does not exist.
+        if ($bytes > WPMCP_SQL_BYTE_CAP && $index + 1 < $total) {
+            $truncated   = true;
+            $truncatedBy = 'bytes';
+            break;
+        }
+    }
+
+    $result = array(
+        'columns'   => $columns,
+        'rows'      => $out,
+        'row_count' => count($out),
+        'truncated' => $truncated,
+    );
+
+    if ($truncated) { $result['truncated_by'] = $truncatedBy; }
+
+    $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
+
+    wpmcp_auth_event('sql_select', array(
+        'token_id'   => $session ? (int) $session->id : 0,
+        'user_id'    => $session ? (int) $session->user_id : 0,
+        'row_count'  => count($out),
+        'truncated'  => $truncated,
+        'elapsed_ms' => (int) round((microtime(true) - $started) * 1000),
+        // THE FIRST 200 CHARACTERS AND NO MORE. An operator reading the log needs to
+        // recognise the query; the whole of it can carry a value out of the database into
+        // a log that is not the trace log, and the full statement is already in the trace
+        // log on the only path where it is worth having.
+        'sql'        => function_exists('mb_substr') ? mb_substr($statement, 0, 200) : substr($statement, 0, 200),
+    ));
+
+    return $result;
+}
+
+/** The one sentence a failed statement puts on the wire. See wpmcp_sql_errno(). */
+function wpmcp_sql_failure($traceId, $errno) {
+    $number = $errno > 0 ? ' Database error number ' . (int) $errno . '.' : '';
+
+    return new WP_Error(
+        'wpmcp_sql_failed',
+        'The database refused the statement.' . $number
+        . ' Trace id: ' . $traceId . '.'
+    );
+}
+
+/**
+ * The group. Listed only when the switch in Settings > WP MCP is on - endpoint.php's
+ * wpmcp_tools() asks wpmcp_sql_enabled() before it merges this in, so with the switch off
+ * the tool is absent from tools/list AND tools/call answers the same "Unknown tool"
+ * -32602 it answers for a name that was never registered. There is no third answer that
+ * would tell a caller the tool exists but is switched off, because that is a fact about
+ * this site's configuration and a caller who may not use it has no business learning it.
+ */
+function wpmcp_sql_tools() {
+    return array(
+
+    'sql-select' => array(
+        'write' => true,
+        'annotations' => array(
+            // FALSE, AND IT IS THE HOUSE RULE RATHER THAN A CLAIM ABOUT THE TOOL.
+            // readOnlyHint is the inverse of `write` throughout this plugin - `write` IS
+            // the admin-scope gate, the two are one fact, and code-list, code-read and
+            // code-history already report false for the same reason despite only
+            // reading. Sprint 9's brief asked for true here; that would have made this
+            // the one tool whose two declarations disagree, gone red on
+            // ToolContractTest::testReadOnlyHintIsDerivedFromTheWriteFlag, and
+            // contradicted the paragraph in README.md that states the rule. The
+            // description says in words that the tool only reads, which is where a model
+            // actually reads it, and destructiveHint: false carries the safety claim.
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Run one read-only SQL SELECT. Args: sql (required). The statement is wrapped as a derived table inside a READ ONLY transaction, so anything but a single SELECT is a server syntax error. CTEs, joins, UNION and ORDER BY work; SHOW, stacked statements, INTO OUTFILE and FOR UPDATE do not, and a derived table needs unique column names. Returns JSON: columns, rows, row_count, truncated, truncated_by. At most 200 rows, 256KB of rows and 8KB per cell (cut with an ellipsis). The plugin\'s own tables are refused, even when named only in a comment. NULL is null; a non-UTF-8 value comes back as 0x-prefixed hex.',
+        'inputSchema' => array('type' => 'object',
+            'properties' => array('sql' => array('type' => 'string')), 'required' => array('sql')),
+        'run' => function ($a) {
+            return wpmcp_sql_select_run(isset($a['sql']) ? (string) $a['sql'] : '');
+        },
+    ),
+
+    );
 }
