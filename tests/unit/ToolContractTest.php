@@ -181,6 +181,14 @@ final class ToolContractTest extends TestCase
             // readOnlyHint is false like every other admin-scope tool's, which
             // testReadOnlyHintIsDerivedFromTheWriteFlag above asserts on its own.
             'sql-select'       => [false, true,  false],
+            // Sprint 11. get-post-meta reads one post's allow-listed keys and nothing
+            // else. set-post-meta REPLACES the key - every row under it goes and what
+            // was sent is written - which is update-post's judgement for update-post's
+            // reason: destructiveHint: false is MCP's promise that an update is
+            // additive, and replacing three rows with one is not additive. Idempotent
+            // because writing the same value twice leaves the same rows.
+            'get-post-meta'    => [false, true,  false],
+            'set-post-meta'    => [true,  true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

@@ -41,15 +41,17 @@ if ($reason !== '') {
     exit(2);
 }
 
-// TWO KINDS, and the second one has no name to match on: an opt-in switch is a shared
-// value, so "did a run leave it on" cannot be answered by the run prefix. See
-// Fixtures::switchesLeftOn().
+// TWO KINDS, and the second one has no name to match on: an opt-in surface is a shared
+// OPTION, so "did a run leave it on" cannot be answered by the run prefix. Two of them
+// now - the sql-select switch, and the post-meta allow-list, whose KEYS are prefixed even
+// though the option holding them is not. See Fixtures::switchesLeftOn().
 $report   = Fixtures::foreignDebris();
 $switches = Fixtures::switchesLeftOn();
 
 if ($report === '' && $switches === '') {
     echo "debris-check: clean - no wpmcp-test-* users, posts, terms, tokens, mu-plugins,"
-        . " transients, theme files or file-version rows, and no opt-in switch left on.\n";
+        . " transients, theme files or file-version rows, no opt-in switch left on, and no"
+        . " test key left in the post-meta allow-list.\n";
     exit(0);
 }
 

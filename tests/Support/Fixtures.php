@@ -364,6 +364,16 @@ final class Fixtures
         WpCli::run(['post', 'meta', 'set', (string) $postId, $key, $value]);
     }
 
+    /** Remove every row under one meta key. Tolerant: there may be none. */
+    public static function deletePostMeta(int $postId, string $key): void
+    {
+        WpCli::tryEvaluate(sprintf(
+            'echo (int) delete_post_meta(%d, %s);',
+            $postId,
+            self::phpString($key)
+        ));
+    }
+
     /**
      * A display name that is NOT the login.
      *
@@ -402,6 +412,123 @@ final class Fixtures
             'echo count(wp_get_post_revisions(%d, array("fields" => "ids")));',
             $postId
         ));
+    }
+
+    /**
+     * An attachment row whose file never lands on anybody's disk.
+     *
+     * `_wp_attached_file` is all wp_get_attachment_url() and get_attached_file() read, and
+     * wp_attachment_is_image() decides from the mime type OR that file's extension - so an
+     * `.png` name makes a real image as far as every check the plugin makes is concerned,
+     * and a `.pdf` name makes a real non-image. Nothing is written to uploads, which is
+     * what makes this safe to run against a site that belongs to somebody.
+     *
+     * The FILE NAME carries the run prefix like every other fixture: a URL assertion that
+     * matched a bare 'featured.png' would match whatever that site already has.
+     *
+     * @param int $parent post_parent. An attachment's edit_post resolves through its own
+     *                    author AND its parent, so a test about that has to choose.
+     */
+    public static function createAttachment(
+        string $title,
+        int $author,
+        string $fileName,
+        string $mimeType = 'image/png',
+        int $parent = 0
+    ): int {
+        self::assertPrefixed($title);
+        self::assertPrefixed($fileName);
+
+        $id = self::createPostWith([
+            'post_title'      => $title,
+            'post_type'       => 'attachment',
+            'post_status'     => 'inherit',
+            'post_author'     => $author,
+            'post_parent'     => $parent,
+            'post_mime_type'  => $mimeType,
+            'post_content'    => self::name('attachment-body'),
+        ]);
+
+        self::setPostMeta($id, '_wp_attached_file', $fileName);
+
+        return $id;
+    }
+
+    /**
+     * One column of the posts table, read from OUTSIDE the request under test.
+     *
+     * The tool writes through wp_insert_post/wp_update_post inside an HTTP request; this
+     * reads the stored row in a separate process. An assertion comparing the two is a
+     * comparison of two paths rather than a restatement of one.
+     */
+    public static function postField(int $postId, string $field): string
+    {
+        return trim(WpCli::evaluate(sprintf(
+            '$p = get_post(%d); echo $p ? (string) $p->%s : "(no such post)";',
+            $postId,
+            preg_replace('/[^a-z_]/', '', $field)
+        )));
+    }
+
+    /** The post's featured image id, or 0. Read from the site, not from the tool. */
+    public static function thumbnailId(int $postId): int
+    {
+        return (int) trim(WpCli::evaluate(sprintf(
+            'echo (int) get_post_thumbnail_id(%d);',
+            $postId
+        )));
+    }
+
+    /**
+     * Every row stored under one meta key, in order.
+     *
+     * @return list<string>
+     */
+    public static function postMetaRows(int $postId, string $key): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            'echo wp_json_encode(array_map("strval", (array) get_post_meta(%d, %s, false)));',
+            $postId,
+            self::phpString($key)
+        ));
+
+        $rows = json_decode(trim($raw), true);
+
+        return is_array($rows) ? array_values(array_map('strval', $rows)) : [];
+    }
+
+    /**
+     * WordPress's OWN local-to-UTC conversion for this site, as get_gmt_from_date() does it.
+     *
+     * The expectation for post_date_gmt is computed HERE, from the site's configured
+     * timezone, and never written into a test as a constant: both Local sites this suite
+     * runs against happen to sit at UTC, so a hard-coded pair would assert nothing and
+     * would then be wrong on the first site that does not.
+     *
+     * It is also an independent path from the code under test: wpmcp_parse_post_date()
+     * converts with DateTimeImmutable and wp_timezone() and never calls this function.
+     */
+    public static function gmtFromDate(string $local): string
+    {
+        return trim(WpCli::evaluate(sprintf(
+            'echo get_gmt_from_date(%s);',
+            self::phpString($local)
+        )));
+    }
+
+    /** The reverse, as get_date_from_gmt() does it: UTC to this site's wall clock. */
+    public static function dateFromGmt(string $gmt): string
+    {
+        return trim(WpCli::evaluate(sprintf(
+            'echo get_date_from_gmt(%s);',
+            self::phpString($gmt)
+        )));
+    }
+
+    /** What this site's timezone is called, for a failure message that can be acted on. */
+    public static function siteTimezone(): string
+    {
+        return trim(WpCli::evaluate('echo wp_timezone()->getName();'));
     }
 
     /**
@@ -1142,21 +1269,57 @@ final class Fixtures
      */
     public static function switchesLeftOn(): string
     {
+        $report = '';
+
         $value = trim(WpCli::evaluate(
             'echo get_option("wpmcp_sql_enabled") ? "ON" : "OFF";'
         ));
 
-        if ($value !== 'ON') {
-            return '';
+        if ($value === 'ON') {
+            $report .= "OPT-IN SWITCH LEFT ON.\n"
+                . "  option wpmcp_sql_enabled is ON - sql-select is exposed to every"
+                . " admin-scope token on this site.\n"
+                . "  No test in this suite writes that option (they filter it per request), so"
+                . " a suite run that turned it\n"
+                . "  on is a bug. Turn it off in Settings > WP MCP, or with"
+                . " `wp option update wpmcp_sql_enabled 0`.\n";
         }
 
-        return "OPT-IN SWITCH LEFT ON.\n"
-            . "  option wpmcp_sql_enabled is ON - sql-select is exposed to every"
-            . " admin-scope token on this site.\n"
-            . "  No test in this suite writes that option (they filter it per request), so"
-            . " a suite run that turned it\n"
-            . "  on is a bug. Turn it off in Settings > WP MCP, or with"
-            . " `wp option update wpmcp_sql_enabled 0`.\n";
+        // THE OTHER SHARED VALUE, sprint 11: the meta allow-list. It has the same shape of
+        // problem - one option, no room for a run prefix - with one difference that makes
+        // it checkable: the KEYS inside it are fixture names, so a leftover is findable by
+        // the shared prefix even though the option itself is not.
+        //
+        // Every meta test arms the list through a `pre_option_` filter and writes nothing,
+        // exactly as SqlSelectTest does. The one test that DOES write the option is the
+        // settings round trip, which restores the operator's value in the same process.
+        // This is the backstop for the run that was killed in between.
+        $leftover = array_values(array_filter(array_map(
+            'trim',
+            preg_split('/\r\n|\r|\n/', WpCli::evaluate(
+                '$keys = get_option("wpmcp_meta_keys", array());'
+                . ' foreach ((array) $keys as $k) { echo (string) $k, "\n"; }'
+            ))
+        )));
+
+        $ours = array_values(array_filter(
+            $leftover,
+            static fn (string $k) => str_starts_with($k, self::PREFIX)
+        ));
+
+        if ($ours !== []) {
+            if ($report !== '') { $report .= "\n"; }
+
+            $report .= "FIXTURE META KEYS LEFT IN THE ALLOW-LIST.\n"
+                . "  option wpmcp_meta_keys still names " . count($ours) . " test key(s), so"
+                . " get-post-meta and set-post-meta are\n"
+                . "  exposed on this site and can reach them:\n"
+                . '    ' . implode("\n    ", $ours) . "\n"
+                . "  Remove them in Settings > WP MCP, or with"
+                . " `wp option update wpmcp_meta_keys --format=json '[]'`.\n";
+        }
+
+        return $report;
     }
 
     /** foreignDebris() to STDERR, at most once per distinct report per process. */
