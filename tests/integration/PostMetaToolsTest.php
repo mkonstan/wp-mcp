@@ -21,8 +21,10 @@
  * configured.
  *
  * NOTHING WRITES THE OPTION except the settings round trip at the bottom, which reads the
- * operator's value first and puts it back in the same process - an option is a shared
- * value with no room for a run prefix. Its KEYS carry the run prefix, so
+ * operator's value first, makes the real save, reads it back OVER HTTP with the filter
+ * told to stand aside - the one seam the arming would otherwise hide - and puts the value
+ * back in a `finally`, with tearDownAfterClass as a backstop. An option is a shared value
+ * with no room for a run prefix. Its KEYS carry the run prefix, so
  * Fixtures::switchesLeftOn() can report a leftover even though the option itself cannot
  * be attributed.
  *
@@ -60,6 +62,21 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
 
     /** A key nobody allowed. Prefixed too, so a stray row is still findable. */
     private static function strayKey(): string { return Fixtures::name('stray'); }
+
+    /**
+     * The key an operator COULD type into the textarea and that must never work.
+     *
+     * A single leading backslash. `is_protected_meta()` sees `\`, not `_`, so this passes
+     * the protected-key test - and the meta API unslashes the key it is given
+     * (wp-includes/meta.php:62, :220, :420), so without the backslash rule it arrives at
+     * the database as the protected row `_thumbnail_id` and sets a featured image past
+     * the attachment gate `featured_image` exists to enforce. NOT prefixed, deliberately:
+     * the whole point is that it is the real protected name.
+     */
+    private static function backslashKey(): string { return '\\_thumbnail_id'; }
+
+    /** A value with a backslash in it: what a path, a regex or escaped JSON looks like. */
+    private static function backslashValue(): string { return 'C:\\Users\\max\\d+'; }
 
     private static function publishedTitle(): string { return Fixtures::name('meta-published'); }
     private static function draftTitle(): string { return Fixtures::name('meta-draft'); }
@@ -130,6 +147,12 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
     {
         MuPlugin::remove(self::ALLOW);
 
+        // BACKSTOP FOR THE ONE TEST THAT WRITES THE OPTION. Its own `finally` restores;
+        // this catches the process that was killed between the write and the finally, and
+        // costs one wp-cli call. Skipped before build() has read the value, so a failure
+        // during fixture creation cannot blank somebody's list with an empty default.
+        if (self::$optionBefore !== '') { self::restoreAllowList(self::$optionBefore); }
+
         Fixtures::deletePost(self::$publishedId);
         Fixtures::deletePost(self::$draftId);
 
@@ -151,6 +174,11 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
         Fixtures::deletePostMeta(self::$publishedId, self::sizesKey());
         Fixtures::deletePostMeta(self::$publishedId, self::strayKey());
         Fixtures::deletePostMeta(self::$draftId, self::colourKey());
+        // The two rows the backslash test asserts absent. On OUR fixture post only, and
+        // `_thumbnail_id` among them because that is precisely the row a backslash key
+        // would have created - a stale one from a red run would make the next run green.
+        Fixtures::deletePostMeta(self::$publishedId, self::backslashKey());
+        Fixtures::deletePostMeta(self::$publishedId, '_thumbnail_id');
     }
 
     /* ------------------------------------------------------------------
@@ -272,6 +300,123 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * A BACKSLASH SURVIVES THE ROUND TRIP, byte for byte, as a scalar and as a list
+     * element.
+     *
+     * THE META API EXPECTS SLASHED INPUT AND UNSLASHES IT. add_metadata(),
+     * update_metadata() and delete_metadata() each open with `// expected_slashed
+     * ($meta_key)` and then wp_unslash() both arguments (wp-includes/meta.php:61-63,
+     * :218-222, :419-421, WP 7.1), which is why core's own REST meta layer calls
+     * wp_slash() at every one of its five call sites. Handing raw JSON straight in ate one
+     * backslash from every value that had one: `C:\Users\max` stored as `C:Usersmax`, a
+     * regex `\d+` as `d+`. The tool re-read the row and reported the mangled value, so the
+     * answer was honest and the contract was broken.
+     *
+     * READ BACK FROM THE DATABASE, not only from the tool: the tool's own re-read would
+     * agree with itself about a value that was never what the caller sent.
+     *
+     * @group sprint-11
+     */
+    public function testABackslashSurvivesTheRoundTripByteForByte(): void
+    {
+        $written = $this->set(
+            self::$editorToken,
+            self::$publishedId,
+            self::colourKey(),
+            self::backslashValue()
+        );
+
+        self::assertFalse($written->isError, $written->text);
+        self::assertSame(self::backslashValue(), $written->data()['value']);
+        self::assertSame(
+            [self::backslashValue()],
+            Fixtures::postMetaRows(self::$publishedId, self::colourKey()),
+            'The stored row lost a backslash. The meta API unslashes what it is given, so'
+            . ' the tool has to slash first - wp_slash(), exactly as core REST does.'
+        );
+        self::assertSame(
+            [self::colourKey() => self::backslashValue()],
+            $this->get(self::$editorToken, self::$publishedId, self::colourKey())->data()['meta'],
+            'get-post-meta reads back a different string from the one on the row.'
+        );
+
+        $list = $this->set(
+            self::$editorToken,
+            self::$publishedId,
+            self::sizesKey(),
+            ['plain', self::backslashValue()]
+        );
+
+        self::assertFalse($list->isError, $list->text);
+        self::assertSame(['plain', self::backslashValue()], $list->data()['value']);
+        self::assertSame(
+            ['plain', self::backslashValue()],
+            Fixtures::postMetaRows(self::$publishedId, self::sizesKey()),
+            'add_post_meta() unslashes too; a list element needs the same slash.'
+        );
+    }
+
+    /**
+     * A key carrying a backslash is refused, and the protected row it would have become
+     * is not written.
+     *
+     * THE ONE COUNTEREXAMPLE TO "A PROTECTED KEY IS NEVER WRITABLE, EVEN IF AN OPERATOR
+     * TYPES IT INTO THE TEXTAREA". `is_protected_meta('\_thumbnail_id', 'post')` is FALSE
+     * - core strips characters outside the printable range before testing for a leading
+     * underscore, and `\` is printable, so the first character it sees is the backslash.
+     * The allow-list would then hold the key, `edit_post_meta` would map to plain
+     * `edit_post` for the same reason, and `update_post_meta()` would unslash it to
+     * `_thumbnail_id` on the way to the database: an Author setting a featured image to
+     * ANY attachment id, past the gate `featured_image` exists to enforce.
+     *
+     * Both halves of the fix are asserted here: the list is armed WITH the key, so the
+     * allow-list is not what refuses it.
+     *
+     * @group sprint-11
+     */
+    public function testABackslashKeyIsRefusedAndWritesNoProtectedRow(): void
+    {
+        $before = Fixtures::thumbnailId(self::$publishedId);
+
+        $result = $this->set(
+            self::$editorToken,
+            self::$publishedId,
+            self::backslashKey(),
+            999999,
+            'backslash'
+        );
+
+        self::assertTrue(
+            $result->isError,
+            'A key with a leading backslash was accepted. It reaches the database as the'
+            . ' protected key it spells once the meta API unslashes it.'
+        );
+        self::assertStringContainsString('may not contain a backslash', $result->text);
+
+        self::assertSame(
+            [],
+            Fixtures::postMetaRows(self::$publishedId, '_thumbnail_id'),
+            'The refused write landed on the protected row anyway.'
+        );
+        self::assertSame(
+            $before,
+            Fixtures::thumbnailId(self::$publishedId),
+            'The post\'s featured image changed through a meta key.'
+        );
+        self::assertSame(
+            [],
+            Fixtures::postMetaRows(self::$publishedId, self::backslashKey()),
+            'The key was written literally instead, which is debris nothing would clean.'
+        );
+
+        // And reading it is refused the same way, with the same sentence.
+        $read = $this->get(self::$editorToken, self::$publishedId, self::backslashKey(), 'backslash');
+
+        self::assertTrue($read->isError, 'get-post-meta served a backslash key.');
+        self::assertStringContainsString('may not contain a backslash', $read->text);
+    }
+
+    /**
      * A flat list becomes several rows, and comes back as a list.
      *
      * REPLACE, NOT APPEND. The key is given three values, then two, and the answer is two
@@ -344,15 +489,28 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
     {
         $this->set(self::$editorToken, self::$publishedId, self::colourKey(), 'teal');
 
-        foreach ([['shade' => 'teal'], [['s'], ['m']], [['nested' => 1]]] as $bad) {
+        // THE EMPTY ONES ARE THE INTERESTING ONES. `json_decode($body, true)` turns `{}`
+        // into `[]` and `array_is_list([])` is true, so an empty object used to take the
+        // list branch: delete every row, add none. An agent that sent `{}` meaning "an
+        // empty object" silently deleted the field and was told it had succeeded. There
+        // is exactly one way to delete and it is `null`.
+        $cases = [
+            'an object'          => ['shade' => 'teal'],
+            'a list of lists'    => [['s'], ['m']],
+            'a list of objects'  => [['nested' => 1]],
+            'an empty object'    => new \stdClass(),
+            'an empty list'      => [],
+        ];
+
+        foreach ($cases as $what => $bad) {
             $result = $this->set(self::$editorToken, self::$publishedId, self::colourKey(), $bad);
 
             self::assertTrue(
                 $result->isError,
-                'set-post-meta accepted ' . json_encode($bad) . ' as a value.'
+                "set-post-meta accepted {$what} as a value."
             );
             self::assertStringContainsString(
-                'value must be a JSON scalar, a flat list of scalars, or null',
+                'value must be a JSON scalar, a non-empty flat list of scalars, or null',
                 $result->text
             );
         }
@@ -534,18 +692,28 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
      * ---------------------------------------------------------------- */
 
     /**
-     * The settings save normalises the textarea and round-trips it: blanks and duplicates
-     * go, protected keys go, and what is left is what the tools then read.
+     * The settings save normalises the textarea, and what it STORED is what a real HTTP
+     * request then reads.
      *
-     * THE ONE TEST THAT WRITES THE OPTION, and it does the whole thing - read, write,
-     * assert, restore - inside ONE `wp eval`, wrapped in try/finally, so the operator's
-     * value is back even when an assertion below would have failed. The two switches in
-     * the same form are written back with the values they already hold, so
-     * wpmcp_save_settings() is exercised in full without changing what either says.
+     * THE ONLY TEST THAT WRITES THE OPTION. Everywhere else the allow-list is armed by a
+     * `pre_option_` filter for this run's own requests, which writes nothing - so nothing
+     * else in the suite ever crosses the two lines between the settings form and a tool
+     * call (`wpmcp_meta_keys()` -> `get_option`) in a separate process. Here the save is
+     * real, and then the HTTP calls are made with the filter told to STAND ASIDE, so they
+     * read the row the form wrote.
+     *
+     * THE RESTORE IS IN A `finally` IN PHP, not inside the `wp eval`, because it now has
+     * to outlive the HTTP calls as well as the write. tearDownAfterClass restores again,
+     * testTheStoredAllowListIsNeverWritten asserts the value is back, and debris-check
+     * reports a fixture key left in the option. The window in which the option is live is
+     * a few seconds and every key in it carries this run's prefix.
+     *
+     * The two switches in the same form are written back with the values they already
+     * hold, so wpmcp_save_settings() is exercised in full without changing either.
      *
      * @group sprint-11
      */
-    public function testTheSettingsSaveRoundTripsTheTextarea(): void
+    public function testTheSettingsSaveRoundTripsTheTextareaAndAToolReadsIt(): void
     {
         $textarea = implode("\n", [
             '  ' . self::colourKey() . '  ',
@@ -553,50 +721,87 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
             self::sizesKey(),
             self::colourKey(),
             '_secret',
+            // A key `is_protected_meta()` does NOT call protected - it sees a backslash,
+            // not an underscore - and that the meta API would unslash into `_thumbnail_id`.
+            // Dropped here as well as refused at call time; two independent answers.
+            self::backslashKey(),
             '   ',
         ]);
 
-        $report = json_decode(trim(WpCli::evaluate(sprintf(
-            '$before = get_option("wpmcp_meta_keys", array());'
-            . ' $code = get_option("wpmcp_code_enabled");'
-            . ' $sql = get_option("wpmcp_sql_enabled");'
-            . ' $deny = get_option("wpmcp_code_denylist", array());'
-            . ' try {'
-            . '  wpmcp_save_settings(array('
-            . '   "meta_keys" => %s,'
-            . '   "denylist" => implode("\n", (array) $deny),'
-            . '   "code_enabled" => $code ? 1 : 0,'
-            . '   "sql_enabled" => $sql ? 1 : 0,'
-            . '  ));'
-            . '  echo wp_json_encode(array('
-            . '   "stored" => array_values((array) get_option("wpmcp_meta_keys", array())),'
-            . '   "read" => wpmcp_meta_keys(),'
-            . '   "enabled" => wpmcp_meta_enabled() ? 1 : 0,'
-            . '   "code" => get_option("wpmcp_code_enabled") ? 1 : 0,'
-            . '   "sql" => get_option("wpmcp_sql_enabled") ? 1 : 0,'
-            . '   "code_was" => $code ? 1 : 0,'
-            . '   "sql_was" => $sql ? 1 : 0,'
-            . '  ));'
-            . ' } finally {'
-            . '  update_option("wpmcp_meta_keys", $before);'
-            . ' }',
-            self::phpString($textarea)
-        ))), true);
+        try {
+            $report = json_decode(trim(WpCli::evaluate(sprintf(
+                '$code = get_option("wpmcp_code_enabled");'
+                . ' $sql = get_option("wpmcp_sql_enabled");'
+                . ' $deny = get_option("wpmcp_code_denylist", array());'
+                . ' wpmcp_save_settings(array('
+                . '  "meta_keys" => %s,'
+                . '  "denylist" => implode("\n", (array) $deny),'
+                . '  "code_enabled" => $code ? 1 : 0,'
+                . '  "sql_enabled" => $sql ? 1 : 0,'
+                . ' ));'
+                . ' echo wp_json_encode(array('
+                . '  "stored" => array_values((array) get_option("wpmcp_meta_keys", array())),'
+                . '  "read" => wpmcp_meta_keys(),'
+                . '  "enabled" => wpmcp_meta_enabled() ? 1 : 0,'
+                . '  "code" => get_option("wpmcp_code_enabled") ? 1 : 0,'
+                . '  "sql" => get_option("wpmcp_sql_enabled") ? 1 : 0,'
+                . '  "code_was" => $code ? 1 : 0,'
+                . '  "sql_was" => $sql ? 1 : 0,'
+                . ' ));',
+                self::phpString($textarea)
+            ))), true);
 
-        self::assertIsArray($report, 'The settings round trip produced no report.');
+            self::assertIsArray($report, 'The settings save produced no report.');
 
-        self::assertSame(
-            [self::colourKey(), self::sizesKey()],
-            $report['stored'],
-            'The saved allow-list is not the normalised textarea: leading and trailing'
-            . ' space trimmed, blank lines dropped, the duplicate dropped, _secret dropped'
-            . ' because WordPress calls it protected, and the order kept.'
-        );
-        self::assertSame($report['stored'], $report['read'], 'wpmcp_meta_keys() disagrees with the option.');
-        self::assertSame(1, $report['enabled'], 'A non-empty list did not switch the tools on.');
+            self::assertSame(
+                [self::colourKey(), self::sizesKey()],
+                $report['stored'],
+                'The saved allow-list is not the normalised textarea: leading and trailing'
+                . ' space trimmed, blank lines dropped, the duplicate dropped, _secret'
+                . ' dropped because WordPress calls it protected, the backslash key dropped'
+                . ' because the meta API would unslash it into one, and the order kept.'
+            );
+            self::assertSame($report['stored'], $report['read'], 'wpmcp_meta_keys() disagrees with the option.');
+            self::assertSame(1, $report['enabled'], 'A non-empty list did not switch the tools on.');
 
-        self::assertSame($report['code_was'], $report['code'], 'The save moved the code-editing switch.');
-        self::assertSame($report['sql_was'], $report['sql'], 'The save moved the SQL switch.');
+            self::assertSame($report['code_was'], $report['code'], 'The save moved the code-editing switch.');
+            self::assertSame($report['sql_was'], $report['sql'], 'The save moved the SQL switch.');
+
+            // NOW OVER HTTP, reading the row the form just wrote. The filter stands aside
+            // for `stored`, so this is the only place in the suite where the OPTION itself
+            // reaches a request.
+            $listed = $this->listedTools(self::$editorToken, true, 'stored');
+
+            self::assertContains(
+                'get-post-meta',
+                $listed,
+                'The settings form declared two keys and get-post-meta is still not listed.'
+                . ' Nothing else in this suite crosses that seam.'
+            );
+            self::assertContains('set-post-meta', $listed);
+
+            $written = $this->set(
+                self::$editorToken,
+                self::$publishedId,
+                self::colourKey(),
+                'from-the-form',
+                'stored'
+            );
+
+            self::assertFalse($written->isError, $written->text);
+            self::assertSame(
+                [self::colourKey() => 'from-the-form'],
+                $this->get(self::$editorToken, self::$publishedId, self::colourKey(), 'stored')->data()['meta'],
+                'A tool call served by the STORED allow-list did not round-trip.'
+            );
+
+            // And a key the form dropped is still refused when the list is the stored one.
+            $refused = $this->set(self::$editorToken, self::$publishedId, '_secret', 'x', 'stored');
+
+            self::assertTrue($refused->isError, 'A protected key was writable off the stored list.');
+        } finally {
+            self::restoreAllowList(self::$optionBefore);
+        }
 
         self::assertSame(
             self::$optionBefore,
@@ -626,32 +831,41 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
      * ---------------------------------------------------------------- */
 
     /** get-post-meta with the allow-list armed for that request. */
-    private function get(string $token, int $id, ?string $key = null): ToolResult
+    private function get(string $token, int $id, ?string $key = null, string $arm = 'on'): ToolResult
     {
         $arguments = ['id' => $id];
 
         if ($key !== null) { $arguments['key'] = $key; }
 
-        return $this->mcp($token)->callTool('get-post-meta', $arguments, [self::ARM_HEADER => 'on']);
+        return $this->mcp($token)->callTool('get-post-meta', $arguments, [self::ARM_HEADER => $arm]);
     }
 
     /** set-post-meta with the allow-list armed for that request. $value may be null. */
-    private function set(string $token, int $id, string $key, $value): ToolResult
+    private function set(string $token, int $id, string $key, $value, string $arm = 'on'): ToolResult
     {
         return $this->mcp($token)->callTool(
             'set-post-meta',
             ['id' => $id, 'key' => $key, 'value' => $value],
-            [self::ARM_HEADER => 'on']
+            [self::ARM_HEADER => $arm]
         );
     }
 
+    /** Put the operator's allow-list back, from the JSON storedAllowList() returns. */
+    private static function restoreAllowList(string $json): void
+    {
+        WpCli::tryEvaluate(sprintf(
+            'echo (int) update_option("wpmcp_meta_keys", (array) json_decode(%s, true));',
+            self::phpString($json === '' ? '[]' : $json)
+        ));
+    }
+
     /** Every tool name in tools/list, with the allow-list armed or not. */
-    private function listedTools(string $token, bool $armed): array
+    private function listedTools(string $token, bool $armed, string $arm = 'on'): array
     {
         $response = $this->mcp($token)->post(
             'tools/list',
             [],
-            $armed ? [self::ARM_HEADER => 'on'] : []
+            $armed ? [self::ARM_HEADER => $arm] : []
         );
 
         $body = json_decode((string) $response->getBody(), true);
@@ -702,10 +916,11 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
      */
     private static function allowListSource(): string
     {
-        $run    = Fixtures::runId();
-        $header = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
-        $arm    = 'HTTP_' . strtoupper(str_replace('-', '_', self::ARM_HEADER));
-        $keys   = var_export([self::colourKey(), self::sizesKey()], true);
+        $run       = Fixtures::runId();
+        $header    = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
+        $arm       = 'HTTP_' . strtoupper(str_replace('-', '_', self::ARM_HEADER));
+        $keys      = var_export([self::colourKey(), self::sizesKey()], true);
+        $backslash = var_export([self::colourKey(), self::sizesKey(), self::backslashKey()], true);
 
         return <<<PHP
 /**
@@ -713,6 +928,13 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
  * tests/integration/PostMetaToolsTest.php. IT ANSWERS ONLY FOR THIS RUN'S REQUESTS, so
  * it changes nothing for anybody else. If you are reading this on a live site, the run
  * that wrote it crashed; deleting the file is safe.
+ *
+ * FOUR ANSWERS, chosen by this run's arming header:
+ *   'on'         this run's two ordinary keys
+ *   'backslash'  the same plus a key an operator could have typed but must never work
+ *   'stored'     no short-circuit at all - the request reads the OPTION, which is how
+ *                the settings round trip observes its own write over HTTP
+ *   absent       an empty list, so "no keys declared" is deterministic on any site
  */
 add_filter('pre_option_wpmcp_meta_keys', static function (\$pre) {
     \$mine = isset(\$_SERVER['{$header}']) && \$_SERVER['{$header}'] === '{$run}';
@@ -721,9 +943,17 @@ add_filter('pre_option_wpmcp_meta_keys', static function (\$pre) {
         return \$pre;
     }
 
-    \$armed = isset(\$_SERVER['{$arm}']) && \$_SERVER['{$arm}'] === 'on';
+    \$armed = isset(\$_SERVER['{$arm}']) ? \$_SERVER['{$arm}'] : '';
 
-    return \$armed ? {$keys} : array();
+    if (\$armed === 'stored') {
+        return \$pre;
+    }
+
+    if (\$armed === 'backslash') {
+        return {$backslash};
+    }
+
+    return \$armed === 'on' ? {$keys} : array();
 });
 PHP;
     }

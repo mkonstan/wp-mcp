@@ -413,6 +413,49 @@ final class PostFieldWritesTest extends FixtureIntegrationTestCase
         self::assertStringContainsString('not allowed to publish post content', $result->text);
     }
 
+    /**
+     * `changed` names every field the call named, on create as well as on update.
+     *
+     * IT USED TO BE SEEDED FROM THE SHARED STEP ALONE on create, so a call that set a
+     * title, a body, a status and a date reported `["date"]` - while README says `changed`
+     * is what the call touched. The two tools now build it the same way and in the same
+     * order, which is the whole point of their sharing a step.
+     *
+     * @group sprint-11
+     */
+    public function testChangedNamesEveryFieldTheCallNamed(): void
+    {
+        $created = $this->create(self::$editorToken, Fixtures::name('fw-changed'), [
+            'status'         => 'draft',
+            'excerpt'        => Fixtures::name('fw-changed-excerpt'),
+            'date'           => '2021-05-06T07:08:09',
+            'featured_image' => self::$editorImageId,
+        ]);
+
+        self::assertFalse($created->isError, $created->text);
+        self::assertSame(
+            ['title', 'content', 'status', 'excerpt', 'date', 'featured_image'],
+            $created->data()['changed'],
+            'create-post must report the fields it was given, title and content among'
+            . ' them - a client reading `changed` has no other way to know what landed.'
+        );
+
+        $id = (int) $created->data()['id'];
+
+        $updated = $this->mcp(self::$editorToken)->callTool('update-post', [
+            'id'      => $id,
+            'title'   => Fixtures::name('fw-changed-again'),
+            'excerpt' => Fixtures::name('fw-changed-excerpt-2'),
+        ]);
+
+        self::assertFalse($updated->isError, $updated->text);
+        self::assertSame(
+            ['title', 'excerpt'],
+            $updated->data()['changed'],
+            'update-post reports only the fields it was given, and so must create-post.'
+        );
+    }
+
     /* ------------------------------------------------------------------
      * author
      * ---------------------------------------------------------------- */
@@ -528,6 +571,46 @@ final class PostFieldWritesTest extends FixtureIntegrationTestCase
             $absent->text,
             'A user who does not exist and a user who may not write here get different'
             . ' answers, so the argument tells a caller which logins are real.'
+        );
+    }
+
+    /**
+     * `author` that is neither an integer nor a non-empty string is a bad_arg, not a
+     * silent cast to user 1.
+     *
+     * THE SCHEMA CANNOT SAY "INTEGER OR STRING" in the dialect SchemaValidator enforces,
+     * so this argument declares no `type` at all and the validator lets a boolean or a
+     * float through to the tool. `wpmcp_list_author_id(true)` then read `(string) true`
+     * as `'1'` and resolved it to whoever has user id 1 - on most sites the person who
+     * installed WordPress. Harmless in reach (the caller could have sent `1`) and wrong
+     * in kind: an argument whose type nothing checks has to check its own.
+     *
+     * @group sprint-11
+     */
+    public function testAnAuthorThatIsNeitherAnIdNorALoginIsRefused(): void
+    {
+        $before = Fixtures::postField(self::$editorPostId, 'post_author');
+
+        foreach ([true, false, 1.5, ''] as $bad) {
+            $result = $this->mcp(self::$editorToken)->callTool('update-post', [
+                'id'     => self::$editorPostId,
+                'author' => $bad,
+            ]);
+
+            self::assertTrue(
+                $result->isError,
+                'update-post accepted ' . var_export($bad, true) . ' as an author.'
+            );
+            self::assertStringContainsString(
+                'author must be a user id (integer) or a user login',
+                $result->text
+            );
+        }
+
+        self::assertSame(
+            $before,
+            Fixtures::postField(self::$editorPostId, 'post_author'),
+            'post_author moved on a refused call.'
         );
     }
 
