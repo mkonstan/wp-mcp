@@ -9,7 +9,7 @@
  * wpmcp_taxonomy_tools(): list-terms / create-term / delete-term.
  * wpmcp_media_tools():    list-media / get-media / upload-media / delete-media.
  * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
- * wpmcp_code_tools():     the four jailed code-edit tools (active theme only).
+ * wpmcp_code_tools():     the six jailed code-edit tools (active theme only).
  * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
  *                   'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
@@ -73,11 +73,11 @@ function wpmcp_code_enabled() {
 /**
  * May the current user touch theme files at all? Null when yes, a WP_Error when no.
  *
- * Every one of the four code tools begins with this, READ INCLUDED: code-read and
- * code-list hand back theme PHP and the shape of the theme directory, which is source
- * code, not content. wp-admin's theme editor is gated on exactly this trio, and
- * before this the tools were gated on nothing but admin scope plus the
- * wpmcp_code_enabled option - so an admin-scope token minted "Runs as:
+ * Every one of the six code tools begins with this, READS INCLUDED: code-read, code-list
+ * and code-history hand back theme PHP, the shape of the theme directory, and who changed
+ * which file when - which is source code, not content. wp-admin's theme editor is gated
+ * on exactly this trio, and before this the tools were gated on nothing but admin scope
+ * plus the wpmcp_code_enabled option - so an admin-scope token minted "Runs as:
  * some-subscriber" on a site with code editing on could read, rewrite and delete
  * files in the active theme.
  *

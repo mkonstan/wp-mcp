@@ -3,20 +3,17 @@
  * code-write and code-delete version a file into the database instead of leaving a copy
  * of it in the document root.
  *
- * THE DEFECT THIS CLOSES. Both tools used to put the previous contents in a sibling file
- * inside the ACTIVE THEME - `<file>.bak` - and the parse-error revert copied it back.
- * That file is under the document root with an extension nothing executes and nothing
- * blocks, so its URL returns the complete source of a theme file to anyone who asks. It
- * was also a one-generation backup: the second write overwrote the only copy there was.
+ * THE DEFECT THIS CLOSES. Both tools used to put the previous contents in a SIBLING FILE
+ * inside the ACTIVE THEME - the same name with a backup extension appended - and the
+ * parse-error revert copied it back. That file is under the document root with an
+ * extension nothing executes and nothing blocks, so its URL returns the complete source
+ * of a theme file to anyone who asks. It was also a one-generation backup: the second
+ * write overwrote the only copy there was.
  *
  * EVERY ASSERTION ABOUT THE ABSENCE OF ONE IS A DIRECTORY LISTING, never an is_file() on
- * the single name this test expects. "The revert left no backup" is a claim about what is
- * in the directory; a test that asks only after the name it already has in mind cannot
- * see a backup written under a different one, which is exactly how a half-removed
- * implementation would pass.
- *
- * The listing is filtered to THIS RUN's prefix before it is asserted on, because the
- * stress site's active theme is a real client's and may legitimately contain anything.
+ * the single name this test expects - see Fixtures::ourSiblingBackupsInTheTheme(), which
+ * is the one place in the suite that spells the old extension, and which filters the
+ * listing to THIS RUN's prefix because the stress site's active theme is a real client's.
  *
  * @group sprint-8
  */
@@ -145,7 +142,7 @@ final class CodeVersionToolsTest extends FixtureIntegrationTestCase
 
         self::assertSame(
             [],
-            self::ourBackupFilesInTheTheme(),
+            Fixtures::ourSiblingBackupsInTheTheme(),
             'code-write left a backup file inside the theme, which the web server serves.'
         );
     }
@@ -215,7 +212,7 @@ final class CodeVersionToolsTest extends FixtureIntegrationTestCase
 
         self::assertSame(
             [],
-            self::ourBackupFilesInTheTheme(),
+            Fixtures::ourSiblingBackupsInTheTheme(),
             'code-delete left a backup file inside the theme, which the web server serves.'
         );
 
@@ -262,7 +259,7 @@ final class CodeVersionToolsTest extends FixtureIntegrationTestCase
 
         self::assertSame(
             [],
-            self::ourBackupFilesInTheTheme(),
+            Fixtures::ourSiblingBackupsInTheTheme(),
             'The revert went through a backup file inside the theme.'
         );
 
@@ -321,22 +318,6 @@ final class CodeVersionToolsTest extends FixtureIntegrationTestCase
             'The oldest version survived the cap, so something other than the oldest was'
             . ' deleted.'
         );
-    }
-
-    /**
-     * Every name in the active theme's root that belongs to THIS RUN and ends in the old
-     * backup suffix. Empty is the only acceptable answer anywhere in this class.
-     *
-     * @return list<string>
-     */
-    private static function ourBackupFilesInTheTheme(): array
-    {
-        return array_values(array_filter(
-            Fixtures::themeDirListing(),
-            static fn (string $name): bool =>
-                str_starts_with($name, Fixtures::runPrefix())
-                && str_ends_with(strtolower($name), '.bak')
-        ));
     }
 
     /**

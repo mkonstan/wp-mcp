@@ -13,6 +13,44 @@ after the plugin files change. Existing tokens keep answering until exactly the 
 they always would have; at that moment they go **dormant** instead of vanishing, and an
 admin can renew them for thirty days from when they were minted - see below.
 
+### Security: a theme file's backup is no longer served over the web
+
+- **Nothing is written beside a theme file any more.** `code-write` used to copy the file
+  it was about to overwrite to a sibling with a backup extension, and `code-delete`
+  renamed the file to one instead of removing it. Both sat in the **active theme**, which
+  is inside the document root, with an extension nothing executes and nothing blocks - so
+  the URL returned the complete source of a theme file to anybody who guessed it. It was
+  also a backup of exactly one generation: the next write overwrote the only copy.
+- **Previous contents now go into a table**, `{prefix}wpmcp_file_versions`, which is the
+  one store WordPress never serves. Schema revision 4 creates it. Each row holds the
+  path, the bytes, the size, a SHA-256, why it was stored, who caused it and which token
+  they were using. Twenty versions are kept per path - change that with the new
+  `wpmcp_file_versions_keep` filter - and the table is dropped when the plugin is deleted.
+- **The upgrade collects what is already on disk.** On the first request after the plugin
+  files change, revision 4 walks the active theme for the old sibling backups, stores each
+  one under its original path with reason `sweep`, and deletes it. It follows no symlinks,
+  it does not touch the live file next to a backup, it does not recreate a file whose
+  deletion was deliberate, and running it again does nothing. It runs whether or not code
+  editing is switched on: those files are on disk either way.
+- **If a version cannot be stored, the change does not happen.** `code-write` and
+  `code-delete` now return an error rather than touching a file they could not back up
+  first. The PHP parse-error revert writes back the bytes it just versioned, from memory.
+- `code-delete`'s `backup` return field is gone; both writers return `version_id` instead.
+
+### New: `code-history` and `code-restore`
+
+- `code-history {path}` lists the stored versions of one file, newest first: `id`,
+  `saved_at`, `size`, `sha256`, `reason` and `saved_by` (a login, never an email). A path
+  with no stored versions returns an empty list, which is not an error.
+- `code-restore {version_id}` writes one back. It resolves the stored path through the
+  same jail and denylist a caller's path goes through - a denylist can be widened after a
+  version was stored - versions the current contents first under reason `restore`, applies
+  the same PHP parse check and revert, and reports whether the bytes it wrote match the
+  stored hash. A deleted file comes back this way.
+- Both appear only when code editing is enabled, and both sit behind the same gate as the
+  other four: an admin-scope token whose user holds `edit_themes`, with `DISALLOW_FILE_EDIT`
+  and `DISALLOW_FILE_MODS` honoured. The catalog is 22 tools.
+
 ### Breaking: the token travels in a header, and only in a header
 
 - The route whose path carried the token, `/wp-json/wpmcp/mcp/<token>`, **is gone**. A URL

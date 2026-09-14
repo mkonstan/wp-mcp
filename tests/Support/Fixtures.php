@@ -537,6 +537,43 @@ final class Fixtures
         return $found;
     }
 
+    /**
+     * The name the code tools used to give a file's previous contents, up to and
+     * including 1.1.0: the file's own name with a backup extension appended, written
+     * beside it inside the active theme.
+     *
+     * SPELLED HERE AND NOWHERE ELSE IN THE SUITE, which is what lets
+     * tests/unit/SurfaceSweepTest.php grep the whole repository for it and exempt one
+     * support file rather than every test that has to name the thing it is proving gone.
+     */
+    public static function siblingBackupName(string $original): string
+    {
+        return $original . '.bak';
+    }
+
+    /**
+     * The names in one directory of the active theme that belong to THIS RUN and carry
+     * the old backup extension. Empty is the only correct answer from 1.1.0 on.
+     *
+     * A LISTING AND NOT AN is_file() ON AN EXPECTED NAME: "no backup was left" is a claim
+     * about the directory, and a check that looks only where it already believes cannot
+     * see a backup written under another name. Filtered to this run's prefix because the
+     * stress site's active theme is a real client's and may contain anything.
+     *
+     * @return list<string>
+     */
+    public static function ourSiblingBackupsInTheTheme(string $relativeDir = ''): array
+    {
+        $suffix = strtolower(self::siblingBackupName(''));
+
+        return array_values(array_filter(
+            self::themeDirListing($relativeDir),
+            static fn (string $name): bool =>
+                str_starts_with($name, self::runPrefix())
+                && str_ends_with(strtolower($name), $suffix)
+        ));
+    }
+
     /** Remove one file from the active theme. Tolerant: it may already be gone. */
     public static function deleteThemeFile(string $relative): void
     {

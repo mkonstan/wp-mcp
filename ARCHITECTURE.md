@@ -14,14 +14,14 @@ who checks that pass on every knock and then does the work as that user.
 
 | File | Its job |
 |---|---|
-| `wp-mcp.php` | Bootstrap, the token table, and the pass system: mint, validate, revoke, flush expired. Also the class loader for `src/`. |
+| `wp-mcp.php` | Bootstrap, the two tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The twenty tools and the helpers they share. |
+| `tools.php` | The twenty-two tools and the helpers they share. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the code-editing switch. |
 | `trace.php` | The private side of the error boundary: the log, its unguessable name, the daily self-check, and the admin warnings. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
 | `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
-| `uninstall.php` | Deleting the plugin: the table, the options, the log directory, the cron hook. |
+| `uninstall.php` | Deleting the plugin: both tables, the options, the log directory, the cron hook. |
 
 `src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
 `spl_autoload_register` in `wp-mcp.php`. There is no Composer at runtime: `composer.json`
@@ -155,10 +155,19 @@ nothing; deleting the tokens closes it again.
 
 ## Editing theme code
 
-Off by default. When it is on, an admin token's four code tools can read and write inside
+Off by default. When it is on, an admin token's six code tools can read and write inside
 the active theme, with path resolution and symlink checks on every operation, a denylist,
-a text-extension and size cap, and a backup plus parse check that reverts a PHP file whose
-new content does not compile.
+a text-extension and size cap, and a parse check that reverts a PHP file whose new content
+does not compile.
+
+Every change is versioned first. Before a file is overwritten or removed, the bytes that
+are there go into a second table, `{prefix}wpmcp_file_versions`, and if they cannot be
+stored the change does not happen; `code-history` lists what is kept for a path and
+`code-restore` writes one back. A TABLE and not a file, because the active theme is inside
+the document root: the sibling backup this used to write had an extension nothing executes
+and nothing blocks, so its URL returned the complete source of a theme file to anyone who
+asked. The database is the one store WordPress never serves. Schema revision 4 creates the
+table and sweeps any of those sibling files still on disk into it.
 
 That fence is about accidents. It is not a security boundary, because a theme template is
 executable PHP and PHP can reach the database and the filesystem regardless of which file

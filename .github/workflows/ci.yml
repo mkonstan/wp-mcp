@@ -32,10 +32,17 @@ jobs:
           done
           exit $status
 
-      - name: Guard - tools.php auto-revert check is present (wpmcp_bak_ok x3)
+      - name: Guard - the PHP parse check is still wired into both writers
+        # WAS an occurrence count of the old backup-path helper, which is gone with the
+        # sibling files it guarded (schema revision 4 - the version table). The subject
+        # of this guard was never those files: it was the AUTO-REVERT, which they used
+        # to be half of. The marker that must not silently disappear is the parse check
+        # itself, and there are three of it - the definition, code-write, code-restore.
+        # A fourth writer of PHP without a parse check makes this red, which is the
+        # point.
         run: |
-          count=$(grep -c "wpmcp_bak_ok" tools.php)
-          echo "wpmcp_bak_ok occurrences: $count (expected 3)"
+          count=$(grep -c "wpmcp_php_parse_ok" tools.php)
+          echo "wpmcp_php_parse_ok occurrences: $count (expected 3)"
           test "$count" -eq 3
 
   phpunit-unit:

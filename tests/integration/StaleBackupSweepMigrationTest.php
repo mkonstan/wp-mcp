@@ -35,11 +35,11 @@ final class StaleBackupSweepMigrationTest extends FixtureIntegrationTestCase
 {
     /** The backup whose original is still there. */
     private static function pairedOriginal(): string { return Fixtures::name('swept') . '.css'; }
-    private static function pairedBackup(): string { return self::pairedOriginal() . '.bak'; }
+    private static function pairedBackup(): string { return Fixtures::siblingBackupName(self::pairedOriginal()); }
 
     /** The backup whose original the old code-delete renamed away. */
     private static function orphanOriginal(): string { return Fixtures::name('orphan') . '.css'; }
-    private static function orphanBackup(): string { return self::orphanOriginal() . '.bak'; }
+    private static function orphanBackup(): string { return Fixtures::siblingBackupName(self::orphanOriginal()); }
 
     private const PAIRED_BACKUP_BODY  = "/* wpmcp-test paired backup */\r\n.a { color: red }\r\n";
     private const PAIRED_LIVE_BODY    = "/* wpmcp-test paired live */\n.a { color: blue }\n";
@@ -106,7 +106,7 @@ final class StaleBackupSweepMigrationTest extends FixtureIntegrationTestCase
         // suffix is left" is a claim about the directory.
         self::assertSame(
             [],
-            self::ourBackupFilesInTheTheme(),
+            Fixtures::ourSiblingBackupsInTheTheme(),
             'The sweep left a backup file inside the theme.'
         );
 
@@ -192,17 +192,6 @@ final class StaleBackupSweepMigrationTest extends FixtureIntegrationTestCase
             'removed'      => $parts[3],
             'skipped'      => $parts[4],
         ];
-    }
-
-    /** @return list<string> */
-    private static function ourBackupFilesInTheTheme(): array
-    {
-        return array_values(array_filter(
-            Fixtures::themeDirListing(),
-            static fn (string $name): bool =>
-                str_starts_with($name, Fixtures::runPrefix())
-                && str_ends_with(strtolower($name), '.bak')
-        ));
     }
 
     /** @return list<array<string, string>> */

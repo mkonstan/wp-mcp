@@ -17,7 +17,8 @@ container, and checks that every test in it ran rather than skipped. Only then d
 the extracted copies, and publish a GitHub Release with the zip attached.
 
 What blocks it: any lint failure, any failing or skipped test in any job, a zipped file
-that differs from its source, and a missing `wpmcp_bak_ok` marker in `tools.php`. The
+that differs from its source, and a `tools.php` whose `wpmcp_php_parse_ok` marker is not
+in all three of its places - the definition, `code-write` and `code-restore`. The
 `release` job has `needs: [lint, phpunit-unit, integration]`, so a red suite makes
 publishing impossible rather than inadvisable. Nothing here is run by hand, and the tag is
 the only trigger.

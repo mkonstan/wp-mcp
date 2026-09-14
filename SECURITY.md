@@ -32,13 +32,14 @@ With no live token in the table, the endpoint returns 401 to everything. There i
 
 When enabled, the code tools' file API is fenced:
 
-- **Jailed to the active theme directory.** Paths are resolved and re-checked; `..` traversal and symlinks pointing outside the jail are rejected on read, write, and delete (including the `.bak` backup path).
+- **Jailed to the active theme directory.** Paths are resolved and re-checked; `..` traversal and symlinks pointing outside the jail are rejected on read, write, and delete. `code-restore` puts the path stored in a version row through the same check rather than trusting it, because a denylist can be widened after a version was stored.
+- **Nothing is written beside a theme file.** A file's previous contents go into a database table (`{prefix}wpmcp_file_versions`), never to a sibling file. Up to and including 1.1.0's predecessor the tools wrote `<file>` plus a backup extension into the active theme - inside your document root, with an extension nothing executes and nothing blocks, so the URL returned the complete source of a theme file to anyone who asked. Upgrading collects any that are still on disk and removes them; see README's *Code editing*.
 - **Denylist** (configurable; default `functions.php`, `index.php`, `inc/`, `includes/`, `lib/`) is never read or written, so the files most likely to take down the whole site or hold secrets are off limits.
 - **Text extensions only**, size-capped.
 - **Backup + auto-revert.** Every write copies the old file aside first; PHP writes are parse-checked and reverted automatically on a syntax error.
 - **Self-protection, and exactly how far it goes.** The jail is the active theme, and the plugin lives elsewhere, so the code tools' file API cannot open, overwrite or delete this plugin's own files. That is the whole of it. The jail constrains which files the tools touch; it does not constrain what the PHP written into those files does when WordPress runs it. A template in the active theme is executable code: it can read the database, rewrite this plugin's options, write anywhere the web server user can write, and so switch the guard off from the inside.
 
-  So an admin-scope token with code editing enabled is arbitrary code execution on your server, with the web server's privileges. Nothing in the sandbox changes that, and the denylist, the parse check and the backup are there to stop accidents rather than an attacker. Leave code editing off unless you are actively using it.
+  So an admin-scope token with code editing enabled is arbitrary code execution on your server, with the web server's privileges. Nothing in the sandbox changes that, and the denylist, the parse check and the version store are there to stop accidents rather than an attacker. Leave code editing off unless you are actively using it.
 
 ## What is deliberately NOT built
 

@@ -136,8 +136,8 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Twenty tools. Each declares the four MCP annotation hints, so a client can tell a listing
-from a deletion before it asks you to approve anything.
+Twenty-two tools. Each declares the four MCP annotation hints, so a client can tell a
+listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
 |---|---|:--:|:--:|:--:|:--:|
@@ -161,12 +161,15 @@ from a deletion before it asks you to approve anything.
 | `code-read` | admin + code editing | no | no | yes | no |
 | `code-write` | admin + code editing | no | yes | no | no |
 | `code-delete` | admin + code editing | no | yes | yes | no |
+| `code-history` | admin + code editing | no | no | yes | no |
+| `code-restore` | admin + code editing | no | yes | no | no |
 
 Three rows in that table need a sentence.
 
 `readOnlyHint` is the inverse of the scope gate, not of what the tool does to your
-database. `code-list` and `code-read` only look, but they sit behind the admin gate with
-the other code tools, so they report `false`.
+database. `code-list`, `code-read` and `code-history` only look, but they sit behind the
+admin gate with the other code tools, so they report `false`. The active theme is source
+code, not content.
 
 `destructiveHint: false` is MCP's own narrow promise that an update is additive. The four
 tools that make a new object per call keep it. `update-post` does not: it replaces every
@@ -227,23 +230,51 @@ location ^~ /wp-content/wpmcp/ { deny all; }
 
 ## Code editing (opt-in)
 
-Off by default. Switching it on in **Settings > WP MCP** gives an admin token four tools
+Off by default. Switching it on in **Settings > WP MCP** gives an admin token six tools
 that read and write files inside the active theme. The file API is fenced:
 
 - Confined to the active theme directory. `..` traversal and symlinks pointing out are
-  rejected on read, write and delete, including the `.bak` path.
+  rejected on read, write and delete.
 - A configurable denylist (default `functions.php`, `index.php`, `inc/`, `includes/`,
   `lib/`) is never read or written.
-- Text extensions only, size-capped per write.
-- Every write copies the old file aside first. PHP is parse-checked and reverted
-  automatically on a syntax error, so a broken edit does not stick.
+- Text extensions only, size-capped per write at 512 KB.
+- **Every change is versioned into the database first.** Before `code-write` overwrites a
+  file or `code-delete` removes one, the bytes that are there go into
+  `{prefix}wpmcp_file_versions`. If they cannot be stored, the change does not happen.
+- PHP is parse-checked after every write and reverted automatically on a syntax error, so
+  a broken edit does not stick. The revert writes back the bytes that were just versioned.
+
+### Versions, history and restore
+
+`code-history {path}` lists what is stored for a file - newest first, with an id,
+`saved_at`, `size`, `sha256`, the `reason` (`write`, `delete`, `restore` or `sweep`) and
+the login of whoever caused it. A path nobody has changed returns an empty list, which is
+not an error.
+
+`code-restore {version_id}` writes one of them back. It resolves the stored path through
+the same jail and denylist a caller's path goes through, versions the current contents
+first (so a restore can itself be undone), applies the same parse check, and tells you
+whether the bytes it wrote match the stored hash. A deleted file comes back this way.
+
+Twenty versions are kept per path; the twenty-first write drops the oldest. Change that
+with the `wpmcp_file_versions_keep` filter. The table is dropped when the plugin is
+deleted.
+
+**Upgrading from 1.0.x.** Earlier versions backed a file up by writing a copy of it beside
+the original inside the active theme. That copy is under your document root with an
+extension nothing executes and nothing blocks, so its URL served the complete source of a
+theme file to anybody who asked for it. Schema revision 4 walks the active theme on the
+first request after the upgrade, moves every one of those files into the versions table,
+and deletes it. It runs whether or not code editing is switched on, and running it twice
+does nothing the second time.
 
 What that fence does and does not cover is in [SECURITY.md](SECURITY.md). Read it before
 enabling this: an admin token with code editing on can run PHP on your server.
 
 ## Hooks
 
-Five, all of them stable surface in 1.0.
+Six. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
+tools' version store in 1.1.
 
 `wpmcp_tools` (filter) adds your own tools to the catalog. It runs on every request, after
 the built-ins are assembled and before scope filtering. An entry must declare a boolean
@@ -292,7 +323,7 @@ token can fail are one byte-identical 401, and the reason lives here. It receive
 type and a context array, and every context carries `ip`.
 
 There is no success event. A request that is accepted fires nothing at all, so an audit
-listener that waits for an "ok" waits forever. The ten types:
+listener that waits for an "ok" waits forever. The eleven types:
 
 | `$type` | Fired when | Context beyond `ip` |
 |---|---|---|
@@ -306,6 +337,7 @@ listener that waits for an "ok" waits forever. The ten types:
 | `content_type_deny` | the POST was not `application/json` | `content_type` |
 | `body_too_large` | `Content-Length` over the cap | `length` |
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
+| `stale_backup_sweep` | the 1.1 upgrade collected backup files an older version left in the active theme | `found`, `stored`, `removed`, `skipped` |
 
 `reason` on `validate_fail` is one of `missing`, `malformed`, `not_found`, `user_missing`,
 `dormant`, `expired`. The last two are the same `401` on the wire and different advice to
@@ -320,6 +352,15 @@ add_action('wpmcp_auth_event', function ($type, $context) {
 
 `wpmcp_auth_event_redacted_keys` (filter) adds key names to redact from that context
 array. Tokens, hashes and authorization headers are redacted already, at every depth.
+
+`wpmcp_file_versions_keep` (filter) sets how many versions of one theme file the code
+tools keep. The default is 20, pruned oldest-first on insert. A value that is not a
+positive number is ignored rather than obeyed: "keep nothing" makes every write
+unrecoverable and is far more likely to be a mistake than a decision.
+
+```php
+add_filter('wpmcp_file_versions_keep', fn() => 50);
+```
 
 ## Testing
 

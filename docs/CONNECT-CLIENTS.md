@@ -164,8 +164,31 @@ list-media     get-media      list-comments
 
 An `admin`-scope token gets 16, those 7 plus `create-post`, `update-post`, `delete-post`,
 `create-term`, `delete-term`, `upload-media`, `delete-media`, `moderate-comment` and
-`reply-comment`. It gets 20 if Enable code-edit tools is also ticked in Settings > WP MCP,
-which adds `code-list`, `code-read`, `code-write` and `code-delete`.
+`reply-comment`. It gets 22 if Enable code-edit tools is also ticked in Settings > WP MCP,
+which adds `code-list`, `code-read`, `code-write`, `code-delete`, `code-history` and
+`code-restore`.
+
+### Undoing a code edit
+
+The code tools keep the previous contents of every file they change, in a database table
+rather than beside the file. So an edit that went wrong is recoverable from the client,
+without FTP:
+
+> "Show me the history of `header.php`."
+
+calls `code-history` and comes back with a list, newest first: an id, when it was saved,
+its size, its SHA-256, why it was saved (`write`, `delete`, `restore` or the one-off
+`sweep` described in README), and the login of whoever caused it.
+
+> "Put back the version from before that last edit."
+
+calls `code-restore` with the id. It writes those exact bytes back, stores what it
+replaced first - so the restore can itself be undone - parse-checks PHP, and reverts if
+the restore would leave a syntax error. A file `code-delete` removed comes back the same
+way; its version is the last one in the list.
+
+Twenty versions are kept per file. Nothing is written next to the file in your theme, and
+the table goes when the plugin is deleted.
 
 Write tools are not greyed out for a read token. They are not in the list at all, so the
 list you see is already what the token may do.

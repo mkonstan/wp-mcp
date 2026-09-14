@@ -40,10 +40,17 @@ jobs:
           done
           exit $status
 
-      - name: Guard - tools.php auto-revert check is present (wpmcp_bak_ok x3)
+      - name: Guard - the PHP parse check is still wired into both writers
+        # WAS an occurrence count of the old backup-path helper, which is gone with the
+        # sibling files it guarded (schema revision 4 - the version table). The subject
+        # of this guard was never those files: it was the AUTO-REVERT, which they used
+        # to be half of. The marker that must not silently disappear is the parse check
+        # itself, and there are three of it - the definition, code-write, code-restore.
+        # A fourth writer of PHP without a parse check makes this red, which is the
+        # point.
         run: |
-          count=$(grep -c "wpmcp_bak_ok" tools.php)
-          echo "wpmcp_bak_ok occurrences: $count (expected 3)"
+          count=$(grep -c "wpmcp_php_parse_ok" tools.php)
+          echo "wpmcp_php_parse_ok occurrences: $count (expected 3)"
           test "$count" -eq 3
 
   phpunit-unit:
@@ -195,7 +202,7 @@ jobs:
           zip -r wp-mcp.zip wp-mcp -x '*.bak' '*.log'
           cd ..
 
-      - name: GATE - extracted content matches source, lints clean, bak-count == 3
+      - name: GATE - extracted content matches source, lints clean, parse check wired
         run: |
           mkdir -p verify
           unzip -q dist/wp-mcp.zip -d verify
@@ -212,9 +219,11 @@ jobs:
           for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php $(ls src/*.php); do
             php -l "verify/wp-mcp/$f" || fail=1
           done
-          bak=$(grep -c "wpmcp_bak_ok" verify/wp-mcp/tools.php)
-          echo "wpmcp_bak_ok in zip: $bak (expected 3)"
-          test "$bak" -eq 3 || fail=1
+          # The same marker the lint job guards, asserted on the EXTRACTED copy: the
+          # question here is whether what is about to be published is what was tested.
+          parse=$(grep -c "wpmcp_php_parse_ok" verify/wp-mcp/tools.php)
+          echo "wpmcp_php_parse_ok in zip: $parse (expected 3)"
+          test "$parse" -eq 3 || fail=1
           if [ "$fail" -ne 0 ]; then echo "GATE FAILED - not releasing"; exit 1; fi
           echo "GATE PASSED"
 
