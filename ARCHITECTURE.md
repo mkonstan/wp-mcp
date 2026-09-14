@@ -16,8 +16,8 @@ who checks that pass on every knock and then does the work as that user.
 |---|---|
 | `wp-mcp.php` | Bootstrap, the two tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The twenty-two tools and the helpers they share. |
-| `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the code-editing switch. |
+| `tools.php` | The twenty-three tools and the helpers they share. |
+| `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the two opt-in switches (code editing, SQL reads). |
 | `trace.php` | The private side of the error boundary: the log, its unguessable name, the daily self-check, and the admin warnings. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
 | `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
@@ -176,6 +176,33 @@ That fence is about accidents. It is not a security boundary, because a theme te
 executable PHP and PHP can reach the database and the filesystem regardless of which file
 it was written into. [SECURITY.md](SECURITY.md) says this at length. Read it before
 enabling the feature.
+
+## The second opt-in: one read-only SQL statement
+
+`sql-select` is the twenty-third tool and it is gated the same way - a switch in Settings >
+WP MCP, off by default, and the tool is absent from `tools/list` until it is on - but the
+thing it is fenced against is refused somewhere else entirely. The code tools' fence is
+PHP: this plugin decides which path is allowed. sql-select's fence is the DATABASE, and
+nothing in this repository looks at the SQL to decide whether it is safe.
+
+The statement is wrapped as `SELECT * FROM ( ... ) AS wpmcp_q LIMIT 201` and run inside
+`START TRANSACTION READ ONLY`, with a five-second session statement timeout. A derived
+table must be a query expression, so anything that is not one - `UPDATE`, `SHOW`, a second
+statement after a semicolon, `INTO OUTFILE` - is a syntax error from MySQL's own parser;
+and what the wrapper lets through, the transaction refuses (`SELECT ... FOR UPDATE` parses
+inside a derived table and is stopped with 1792). The `ROLLBACK` is in a `finally`, because
+WordPress reuses that connection for the rest of the request.
+
+The reason it is built this way rather than as a validator is that a SQL validator is a
+second implementation of MySQL's grammar, living in PHP, that has to agree with the real
+one on every comment, quote, case and encoding. When it does not, it fails silently in the
+direction of running something. Letting the server be the parser has one implementation
+and no second opinion to drift.
+
+The one thing the server cannot decide is that the plugin's own two tables are off limits:
+the WordPress database user created them and can read them. That is therefore the tool's
+only string inspection, and it refuses the statement if either name appears anywhere in it,
+comments and string literals included.
 
 ## Why it looks plain
 

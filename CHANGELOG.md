@@ -73,7 +73,45 @@ admin can renew them for thirty days from when they were minted - see below.
   stored hash. A deleted file comes back this way.
 - Both appear only when code editing is enabled, and both sit behind the same gate as the
   other four: an admin-scope token whose user holds `edit_themes`, with `DISALLOW_FILE_EDIT`
-  and `DISALLOW_FILE_MODS` honoured. The catalog is 22 tools.
+  and `DISALLOW_FILE_MODS` honoured. The catalog was 22 tools at that point.
+
+### New: `sql-select`, one read-only SQL statement (opt-in, off by default)
+
+- A second switch in **Settings > WP MCP**, `Allow SQL reads`, off by default. While it is
+  off the tool is absent from `tools/list` and calling it by name is refused exactly the
+  way a tool that does not exist is refused - there is no answer that says "it is here but
+  switched off".
+- `sql-select {sql}` runs one statement and returns `{columns, rows, row_count, truncated,
+  truncated_by}` as JSON. Caps: 200 rows, 256 KB of rows, 8 KB per cell (cut and marked
+  with an ellipsis) and a 5-second server-side statement timeout. `NULL` is JSON `null`; a
+  value that is not valid UTF-8 comes back as `0x`-prefixed hex, because WordPress's JSON
+  encoder silently rewrites the offending byte as `?` rather than failing.
+- **Writes are refused by the database, not by a parser in this plugin.** The statement is
+  wrapped as `SELECT * FROM ( ... ) AS wpmcp_q LIMIT 201` and run inside `START TRANSACTION
+  READ ONLY`. The wrapper makes `UPDATE`, `DELETE`, `SHOW`, a stacked second statement,
+  `INTO OUTFILE`, `INTO DUMPFILE` and `INTO @var` syntax errors from MySQL itself; the
+  transaction refuses what the wrapper lets through, which is measurably not nothing -
+  `SELECT ... FOR UPDATE` parses fine inside a derived table on MySQL 8.4 and is stopped by
+  the transaction with 1792. `ROLLBACK` runs in a `finally`, so the connection WordPress
+  reuses for the rest of the request is never left inside a transaction.
+- CTEs (including recursive ones), joins, `UNION` and an inner `ORDER BY` all work. Two
+  limits come with the wrapper: a derived table's columns must be uniquely named, and
+  `SHOW` / `DESCRIBE` are not query expressions - use `information_schema`.
+- **Three gates, all required:** the switch, an admin-scope token, and `manage_options` on
+  the token's user. Admin scope is not an administrator, since a token can be minted to run
+  as any user.
+- **The plugin's own two tables are refused by name.** `{prefix}wpmcp_tokens` and
+  `{prefix}wpmcp_file_versions`. The database user owns them, so this is the one rule the
+  server cannot enforce; it is a blunt name check that refuses the statement if either name
+  appears anywhere in it, comments and string literals included.
+- **It reads everything else that connection can read**, `wp_users` and its password hashes
+  included. Read [SECURITY.md](SECURITY.md) before switching it on.
+- New auth event `sql_select` (`token_id`, `user_id`, `row_count`, `truncated`,
+  `elapsed_ms`, and the first 200 characters of the statement). A refused statement returns
+  the MySQL error number and a trace id; the server's own message and the whole statement
+  go to the private trace log only.
+- New option `wpmcp_sql_enabled`, removed on uninstall. No schema change. The catalog is
+  23 tools.
 
 ### Breaking: the token travels in a header, and only in a header
 

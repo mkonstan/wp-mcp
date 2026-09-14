@@ -42,6 +42,19 @@ When enabled, the code tools' file API is fenced:
 
   So an admin-scope token with code editing enabled is arbitrary code execution on your server, with the web server's privileges. Nothing in the sandbox changes that, and the denylist, the parse check and the version store are there to stop accidents rather than an attacker. Leave code editing off unless you are actively using it.
 
+## SQL reads (opt-in, off by default)
+
+When enabled, `sql-select` runs one read-only SQL statement per call on WordPress's own database connection.
+
+- **It reads everything that connection can read.** `wp_users` and its password hashes, every plugin's tables, every row of `wp_options` including API keys and credentials other plugins have stored there. This is not a gap in the design - it is the feature, stated plainly. The plugin borrows WordPress's `$wpdb`, which already holds those privileges, and there is no `GRANT` it can drop on a connection it does not own. **Do not enable this for a token you would not hand a database password to.**
+- **Three gates, all of them required.** The switch in Settings > WP MCP, an admin-scope token, and `manage_options` on the token's user. Admin SCOPE is not an administrator - a token can be minted to run as any user - so the capability is checked per call, exactly as `edit_themes` is for the code tools. With the switch off the tool is absent from `tools/list` and calling it by name is refused identically to calling a tool that does not exist.
+- **Writes are refused by the server, not by a filter.** The statement is wrapped as a derived table and run inside `START TRANSACTION READ ONLY`. The wrapper makes `UPDATE`, `DELETE`, `SHOW`, a stacked second statement, `INTO OUTFILE`, `INTO DUMPFILE` and `INTO @var` syntax errors decided by MySQL's own parser (1064). The transaction refuses what the wrapper lets through - `SELECT ... FOR UPDATE` parses fine inside a derived table on MySQL 8.4, and is stopped by the transaction with 1792. Nothing in this plugin inspects your SQL to decide whether it is safe; a SQL parser in PHP would have to be exactly as correct as MySQL's grammar, and the failure mode when it is not is silent.
+- **The connection is handed back clean.** `ROLLBACK` runs in a `finally`, whatever happened, because WordPress reuses that connection for the rest of the request. A session left inside a read-only transaction would fail every write after it with 1792, in the middle of unrelated code.
+- **Bounded.** 200 rows, 256 KB of rows, 8 KB per cell, and a 5-second server-side statement timeout, so one query cannot become the response or hold the database.
+- **The plugin's own two tables are refused by name.** `{prefix}wpmcp_tokens` and `{prefix}wpmcp_file_versions` - the token hashes and the stored theme-file bytes. This is the only string inspection in the tool and it exists because the server cannot make this decision: the database user owns those tables. The check is deliberately blunt - naming either table anywhere in the statement, comments and string literals included, refuses the whole call. Over-refusal is the safe direction.
+- **Every call is logged.** A `sql_select` auth event records the token, the user, the row count and the first 200 characters of the statement. A refused statement returns the MySQL error number and a trace id; the server's message and the whole statement go to the private trace log and nowhere else, because 1064 quotes the statement back and 1054 names a column.
+- **What it does not do.** It cannot write, and so it cannot switch itself on, mint a token, or change an option. That is a real difference from code editing, which is arbitrary code execution. The risk here is disclosure, and it is total disclosure of everything in the database.
+
 ## What is deliberately NOT built
 
 These were considered and left out on purpose: installing plugins from a URL (downloads and runs code), deleting users, managing site options or users, activating/deactivating plugins, and any arbitrary `eval` / WP-CLI passthrough. They are the high-blast-radius actions; a scoped tool list that includes them is not much better than a shell.
@@ -51,7 +64,7 @@ These were considered and left out on purpose: installing plugins from a URL (do
 - **The HTTPS gate is only as strong as your proxy.** The endpoint refuses plaintext with 403, deciding with `is_ssl()`, which on a proxied deployment reads a header. A proxy that forwards the client's `X-Forwarded-Proto` instead of setting it lets a client claim HTTPS over a plaintext connection, token in cleartext. Set it at the proxy and never pass the client's value through; `composer test:infra` asks a running host whether you did.
 - **Behind a proxy or CDN**, `REMOTE_ADDR` is the proxy, so every auth event names the proxy rather than the caller. Read the real client address via the provided `wpmcp_client_ip` filter, and only trust a forwarded header from a proxy you control. Nothing is enforced from that value; the log is the reason to get it right.
 - **The credential is a request header, never a URL.** `Authorization: Bearer <token>` is the only form accepted; a path that carries a token is a plain `404`. Request paths are written to access logs, proxy logs and browser history by default, and headers are not. If a client cannot send a header, it cannot use this endpoint.
-- **Anybody holding the token has that token's full scope, from anywhere.** Mint `read` unless you specifically need writes, and keep code editing off unless you are actively using it.
+- **Anybody holding the token has that token's full scope, from anywhere.** Mint `read` unless you specifically need writes, and keep code editing and SQL reads off unless you are actively using them.
 
 ## Reporting
 

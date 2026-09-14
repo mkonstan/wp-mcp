@@ -166,7 +166,9 @@ An `admin`-scope token gets 16, those 7 plus `create-post`, `update-post`, `dele
 `create-term`, `delete-term`, `upload-media`, `delete-media`, `moderate-comment` and
 `reply-comment`. It gets 22 if Enable code-edit tools is also ticked in Settings > WP MCP,
 which adds `code-list`, `code-read`, `code-write`, `code-delete`, `code-history` and
-`code-restore`.
+`code-restore`, and 23 if Allow SQL reads is ticked as well, which adds `sql-select`.
+Both switches are off until you tick them, and a tool that is switched off is not in the
+list at all.
 
 ### Undoing a code edit
 
@@ -190,6 +192,22 @@ way; its version is the last one in the list.
 Twenty versions are kept per file, per theme - a version knows which theme it was taken
 from, and `code-restore` refuses one from a theme that is not the active one. Nothing is
 written next to the file in your theme, and the table goes when the plugin is deleted.
+
+### Asking a question the tools do not answer
+
+With Allow SQL reads on, an admin token can ask one read-only SQL statement per call:
+
+> "How many published posts does each author have?"
+
+calls `sql-select` and comes back with columns and rows. It is for the questions the other
+tools have no shape for - counts, joins, a report across post meta - and it reads every
+table the WordPress database user can read, so leave it off unless you are using it and
+read [SECURITY.md](../SECURITY.md) first.
+
+It answers at most 200 rows and 256 KB per call, and says so with `truncated: true`, so
+ask for an aggregate rather than a dump. Writes are refused by the database itself, not by
+this plugin: the statement runs inside a read-only transaction, wrapped so that anything
+but a single SELECT is a syntax error.
 
 Write tools are not greyed out for a read token. They are not in the list at all, so the
 list you see is already what the token may do.

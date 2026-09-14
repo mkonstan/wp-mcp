@@ -136,7 +136,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Twenty-two tools. Each declares the four MCP annotation hints, so a client can tell a
+Twenty-three tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -163,13 +163,15 @@ listing from a deletion before it asks you to approve anything.
 | `code-delete` | admin + code editing | no | yes | yes | no |
 | `code-history` | admin + code editing | no | no | yes | no |
 | `code-restore` | admin + code editing | no | yes | no | no |
+| `sql-select` | admin + SQL reads | no | no | yes | no |
 
 Three rows in that table need a sentence.
 
 `readOnlyHint` is the inverse of the scope gate, not of what the tool does to your
-database. `code-list`, `code-read` and `code-history` only look, but they sit behind the
-admin gate with the other code tools, so they report `false`. The active theme is source
-code, not content.
+database. `code-list`, `code-read`, `code-history` and `sql-select` only look, but they
+sit behind the admin gate, so they report `false`. The active theme is source code, not
+content, and a SELECT over `wp_users` is not content either. `destructiveHint` is where
+each of them says it destroys nothing.
 
 `destructiveHint: false` is MCP's own narrow promise that an update is additive. The four
 tools that make a new object per call keep it. `update-post` does not: it replaces every
@@ -301,6 +303,99 @@ over HTTP is the worse of the two options.
 What that fence does and does not cover is in [SECURITY.md](SECURITY.md). Read it before
 enabling this: an admin token with code editing on can run PHP on your server.
 
+## SQL reads (opt-in)
+
+Off by default, and a separate switch in the same **Settings > WP MCP** form. Switching it
+on gives an admin token one more tool, `sql-select`, which runs a single read-only SQL
+statement and hands back the rows.
+
+**It reads every table the WordPress database user can read.** That is the whole point of
+it and it is the whole of the risk: `wp_users` and its password hashes, every plugin's
+tables, every option including API keys other plugins have stored there. There is no
+per-table permission to configure, because there is nothing this plugin can configure -
+the connection it borrows is WordPress's own and it already has those privileges. Two
+tables are refused by name (below); everything else the connection can see, the tool can
+read. Do not switch this on for a token you would not hand a database password to.
+
+Three things have to be true for a call to run: the switch is on, the token is
+admin-scope, and the token's user holds `manage_options`. With the switch off the tool is
+not listed and calling it by name is refused exactly the way a tool that does not exist is
+refused - there is no answer that says "it is here but switched off".
+
+### Why a derived table and READ ONLY, not a parser
+
+The obvious implementation reads the statement, decides whether it is "really" a SELECT,
+and runs it if so. That is a SQL parser written in PHP, and it has to be exactly as
+correct as MySQL's grammar to be worth anything. Every one of them has been walked around
+by a comment, a case, a whitespace or an encoding the parser and the server disagreed
+about, and the failure is silent: the parser says SELECT and the server does something
+else.
+
+So nothing here inspects your SQL to decide whether it is safe. The statement is handed to
+the database wrapped as a derived table and run inside a read-only transaction:
+
+```sql
+SET SESSION MAX_EXECUTION_TIME = 5000;      -- max_statement_time = 5 on MariaDB
+SET SESSION optimizer_switch = 'derived_merge=off';
+START TRANSACTION READ ONLY;
+SELECT * FROM ( your statement ) AS wpmcp_q LIMIT 201;
+ROLLBACK;
+```
+
+The wrapper is the first wall. A derived table has to be a query expression, so `UPDATE`,
+`DELETE`, `SHOW`, a second statement after a semicolon, `INTO OUTFILE`, `INTO DUMPFILE`
+and `INTO @var` are all **syntax errors from the server** - error 1064, decided by MySQL's
+own parser rather than by a guess about it.
+
+The transaction is the second wall, and it is not decoration: `SELECT ... FOR UPDATE`
+parses perfectly happily inside a derived table (measured on MySQL 8.4), so the wrapper
+does not stop it. `START TRANSACTION READ ONLY` does, with error 1792. The `ROLLBACK`
+happens whatever the statement did, because WordPress reuses that connection for the rest
+of the request.
+
+What still works: joins, `UNION`, `GROUP BY`, subqueries, CTEs (`WITH ... SELECT`,
+recursive ones included), and an inner `ORDER BY`. Two real limits come with the wrapper -
+a derived table's columns must be **uniquely named**, so `SELECT p.ID, m.post_id AS ID`
+needs a different alias, and `SHOW` / `DESCRIBE` are not query expressions, so use
+`information_schema` instead.
+
+### What comes back
+
+```json
+{ "columns": ["ID", "post_title"], "rows": [["12", "Hello"]], "row_count": 1,
+  "truncated": false }
+```
+
+`truncated_by` is `"rows"` or `"bytes"` and is present only when `truncated` is true.
+
+| Cap | Value | What happens |
+|---|---|---|
+| Rows | 200 | 201 are fetched; the 201st is why `truncated` is true |
+| Bytes of rows | 256 KB | appending stops, `truncated_by: "bytes"` |
+| One cell | 8 KB | cut and marked with an ellipsis |
+| Time | 5 seconds | the server ends the statement (error 3024) |
+
+`NULL` comes back as JSON `null`. A value that is not valid UTF-8 comes back as
+`0x`-prefixed hex rather than as text: WordPress's JSON encoder does not fail on such a
+value and does not null it either, it silently rewrites the offending byte as `?`, and a
+blob that looks like text and is not the data is worse than no answer.
+
+### The two tables it will not read
+
+`{prefix}wpmcp_tokens` and `{prefix}wpmcp_file_versions` - the token hashes and the stored
+theme-file bytes. This is the one rule the server cannot enforce, because the database user
+owns those tables and there is no privilege the plugin can drop on its own connection. So
+it is a name check, and it is deliberately blunt: **naming either table anywhere in the
+statement refuses it**, including inside a comment or a string literal. `SELECT
+'wpmcp_tokens' AS label` is harmless and is refused too. Over-refusing costs you an alias;
+the alternative is a comment-and-string stripper that has to be exactly as correct as
+MySQL's lexer, which is the parser this design exists to avoid.
+
+Every call that runs is logged as a `sql_select` auth event with the caller, the row count
+and the first 200 characters of the statement. A statement the server refused comes back as
+an error carrying the MySQL error number and a trace id; the server's own message and the
+whole statement go to the private trace log and nowhere else.
+
 ## Hooks
 
 Six. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
@@ -352,8 +447,10 @@ worth reading needs this filter. Only trust a forwarded header from a proxy you 
 token can fail are one byte-identical 401, and the reason lives here. It receives the event
 type and a context array, and every context carries `ip`.
 
-There is no success event. A request that is accepted fires nothing at all, so an audit
-listener that waits for an "ok" waits forever. The eleven types:
+There is no success event for the endpoint itself. A request that is accepted fires
+nothing at all, so an audit listener that waits for an "ok" waits forever. One TOOL is
+the exception - `sql-select` logs every statement it runs, because "somebody read the
+database" is the event an operator wants. The twelve types:
 
 | `$type` | Fired when | Context beyond `ip` |
 |---|---|---|
@@ -368,6 +465,12 @@ listener that waits for an "ok" waits forever. The eleven types:
 | `body_too_large` | `Content-Length` over the cap | `length` |
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
 | `stale_backup_sweep` | a schema upgrade swept the active theme and found backup files an older version had left there | `found`, `moved`, `skipped_extension`, `skipped_unreadable`, `skipped_too_big`, `skipped_undeletable`, `moved_paths`, `skipped_paths` |
+| `sql_select` | `sql-select` ran a statement | `token_id`, `user_id`, `row_count`, `truncated`, `elapsed_ms`, `sql` |
+
+`sql` is the **first 200 characters** of the statement and never more. The whole of it
+can carry a value out of the database into a log that is not the private trace log; the
+full statement goes to the trace log on the one path where it is worth having, which is
+a statement the server refused.
 
 `stale_backup_sweep` fires on the request that performs a schema upgrade, and only when
 the sweep found something - so it is usually once, on the upgrade to 1.1, but any later
