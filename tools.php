@@ -399,6 +399,391 @@ function wpmcp_own_listable_statuses($post_type) {
         wpmcp_listable_statuses($post_type)
     ));
 }
+/**
+ * ISO 8601 for one WordPress datetime column, or null when the column holds no date.
+ *
+ * A date-floating status - draft, pending, auto-draft - is stored by wp_insert_post
+ * with post_date_gmt AND post_modified_gmt set to '0000-00-00 00:00:00'; only the
+ * non-GMT columns are populated (measured on WP 7.1, and the same measurement the
+ * list-posts merge sorts on). That is not a date: formatting it yields
+ * '-0001-11-30T00:00:00', which a client will happily parse as the year 1 BC. It is
+ * reported as null instead, so "this post has no GMT date" is sayable.
+ *
+ * mysql_to_rfc3339() is the function the REST API formats these same columns with, so
+ * a client that already reads WordPress dates gets the identical string here - local
+ * wall-clock time with NO offset suffix, which is all post_date stores.
+ *
+ * TWO GUARDS, AND THEY ARE NOT THE SAME GUARD. The first is the named case: the exact
+ * string WordPress writes for a date-floating status. The second is everything else that
+ * is not a date - measured, mysql_to_rfc3339('0000-00-00 00:00:00') does not fail, it
+ * answers '-0001-11-30T00:00:00', and it answers false for an empty string - so any
+ * column a plugin has filtered into some other kind of nonsense comes back as null
+ * rather than as a year no client will question.
+ */
+function wpmcp_iso_date($value) {
+    $value = trim((string) $value);
+    if ($value === '' || str_starts_with($value, '0000-00-00')) { return null; }
+
+    $out = mysql_to_rfc3339($value);
+    return (!is_string($out) || $out === '' || str_starts_with($out, '-')) ? null : $out;
+}
+
+/**
+ * A caller-supplied ISO 8601 date or datetime, normalised for WP_Date_Query - or null
+ * when the shape is wrong, which list-posts turns into wpmcp_bad_arg.
+ *
+ * Deliberately strict and deliberately small: `YYYY-MM-DD`, optionally followed by a
+ * `T` or a space and `HH:MM` or `HH:MM:SS`. NO offset and no trailing `Z`, because
+ * WP_Date_Query compares against post_date, which is site-local wall-clock time with
+ * no offset stored anywhere - accepting '+05:00' would mean silently ignoring it and
+ * answering with a window five hours away from the one that was asked for.
+ *
+ * strtotime() is not used on purpose. It accepts 'next tuesday', 'now', '@1700000000'
+ * and '2026-13-45' (which it rolls over into 2027), so it cannot tell a caller that
+ * their date is malformed - and a filter that silently means something else is the
+ * failure this whole tool is trying not to have.
+ */
+function wpmcp_parse_iso_datetime($value) {
+    $value = trim((string) $value);
+
+    if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/', $value, $m)) {
+        return null;
+    }
+    if (!checkdate((int) $m[2], (int) $m[3], (int) $m[1])) { return null; }
+    if (!isset($m[4])) { return $m[1] . '-' . $m[2] . '-' . $m[3]; }
+
+    $hour   = (int) $m[4];
+    $minute = (int) $m[5];
+    $second = isset($m[6]) ? (int) $m[6] : 0;
+
+    if ($hour > 23 || $minute > 59 || $second > 59) { return null; }
+
+    return sprintf('%s-%s-%s %02d:%02d:%02d', $m[1], $m[2], $m[3], $hour, $minute, $second);
+}
+
+/**
+ * The three orderings list-posts offers, and the COLUMN each one sorts on.
+ *
+ * post_date and post_modified, never the _gmt pair: every date-floating status carries
+ * '0000-00-00 00:00:00' in both GMT columns, so a merge that compared them would put
+ * every own draft behind every dated post and the page slice would drop them. The
+ * non-GMT columns are the ones WP_Query's own `orderby => date` and `=> modified` use,
+ * which is what keeps the merged comparator and the un-merged query in agreement.
+ */
+function wpmcp_list_orderby_columns() {
+    return array('date' => 'post_date', 'modified' => 'post_modified', 'title' => 'post_title');
+}
+
+/**
+ * The comparator that re-imposes ONE ordering across the two listing queries' merge.
+ *
+ * It has to follow the same column and the same direction the two WP_Query calls were
+ * given, or the merge silently reorders a listing the caller asked to be sorted some
+ * other way. Before this it was hard-coded to post_date descending, which was right
+ * only because there was nothing else to ask for.
+ *
+ * TIE-BREAK ON ID, in the same direction, because MySQL's sort is not stable: two posts
+ * sharing a post_date (a bulk import, a seeded fixture) could otherwise swap places
+ * between two identical calls, and a caller paging through them would see one twice and
+ * another never.
+ *
+ * strcasecmp FOR TITLES, not strcmp. MySQL sorts post_title under a *_ci collation, so
+ * 'apple' comes before 'Zebra'; PHP's strcmp is byte order, where every capital sorts
+ * before every lowercase. The half of the list that never went through the merge is
+ * already in the collation's order, so a byte-order comparator would interleave the two
+ * halves wrongly, and only on titles whose case differs - the kind of bug that reads as
+ * flakiness.
+ */
+function wpmcp_post_order_comparator($orderby, $order) {
+    $columns = wpmcp_list_orderby_columns();
+    $column  = isset($columns[$orderby]) ? $columns[$orderby] : 'post_date';
+    $sign    = (strtoupper((string) $order) === 'ASC') ? 1 : -1;
+
+    return function ($a, $b) use ($column, $sign) {
+        $left  = (string) $a->$column;
+        $right = (string) $b->$column;
+
+        $cmp = ($column === 'post_title') ? strcasecmp($left, $right) : strcmp($left, $right);
+
+        if ($cmp === 0) { $cmp = (int) $a->ID <=> (int) $b->ID; }
+
+        return $sign * $cmp;
+    };
+}
+
+/**
+ * The user id behind list-posts' `author` argument - an integer id or a user login -
+ * or 0 when there is no such user.
+ *
+ * 0 IS NOT AN ERROR. An unknown login has to answer exactly as a known one with nothing
+ * the caller may see does, or list-posts becomes a user-enumeration oracle: somebody
+ * could probe logins one at a time and read "no such user" off the difference. The
+ * value is never echoed back either.
+ *
+ * Login, not display name and not email. A display name is not unique, and an email is
+ * not something a read tool should confirm one guess at a time.
+ */
+function wpmcp_list_author_id($value) {
+    $raw = trim((string) $value);
+    if ($raw === '') { return 0; }
+
+    if (is_int($value) || ctype_digit($raw)) {
+        $user = get_userdata((int) $raw);
+        return $user ? (int) $user->ID : 0;
+    }
+
+    $user = get_user_by('login', $raw);
+    return $user ? (int) $user->ID : 0;
+}
+
+/**
+ * The term id behind a taxonomy plus a slug-or-id, or 0 when there is no such term ON A
+ * TAXONOMY THIS POST TYPE ACTUALLY USES.
+ *
+ * The taxonomy allow-list is wpmcp_post_type_ok()'s idea applied one level down: the
+ * taxonomy must exist, it must be VIEWABLE (is_taxonomy_viewable), and it must be
+ * attached to the post type being listed.
+ *
+ * VIEWABILITY IS THE CHECK WITH TEETH, and the only one of the three that WP_Query does
+ * not already enforce by accident. A private taxonomy is a plugin's or a theme's internal
+ * bookkeeping - customer segments, licence tiers, workflow states - and WP_Query will
+ * filter a perfectly ordinary post listing by one of its terms without complaint. This is
+ * what stops `term` being a way to read a taxonomy nobody publishes.
+ *
+ * ATTACHMENT AND EXISTENCE ARE AN ALLOW-LIST, NOT A BUG FIX, and this says so because the
+ * tempting claim is false. MEASURED ON WP 7.1: `cat` on a post type that has no category
+ * taxonomy is NOT ignored - WP_Query builds the term_relationships join anyway and
+ * returns nothing - and an unknown term id returns nothing too. Both checks are therefore
+ * belt and braces over behaviour that already happens to be right. They stay for two
+ * reasons: "nothing matched" becomes a decision this tool made rather than a property of
+ * a join that could change, and resolving here is what makes the OTHER shape impossible -
+ * silently DROPPING a filter that cannot be resolved, which answers a question about one
+ * category with every post on the site.
+ *
+ * 0 for all four misses - wrong taxonomy, unviewable taxonomy, unattached taxonomy,
+ * missing term - because the caller may learn nothing from any of them.
+ */
+function wpmcp_list_term_id($taxonomy, $slugOrId, $postType) {
+    $taxonomy = sanitize_key((string) $taxonomy);
+
+    if ($taxonomy === '' || !taxonomy_exists($taxonomy) || !is_taxonomy_viewable($taxonomy)) {
+        return 0;
+    }
+    if (!in_array($taxonomy, get_object_taxonomies($postType), true)) { return 0; }
+
+    $value = trim((string) $slugOrId);
+    if ($value === '') { return 0; }
+
+    $term = ctype_digit($value)
+        ? get_term((int) $value, $taxonomy)
+        : get_term_by('slug', $value, $taxonomy);
+
+    return ($term && !is_wp_error($term)) ? (int) $term->term_id : 0;
+}
+
+/**
+ * THE CLASS OF FILTER: every list-posts filter, built ONCE, as WP_Query arguments.
+ *
+ * ONE PLACE BUILDS THEM AND BOTH QUERIES CONSUME THEM. list-posts runs two WP_Query
+ * calls - the permitted-status one and the own-status one (see
+ * wpmcp_own_listable_statuses() for why it cannot be one query). A filter applied to
+ * one and not the other is a disclosure with a plausible shape: an Author filtering by
+ * `category` would get that category's published posts PLUS every one of their own
+ * drafts, in any category at all, and would read that as the filter working. So the
+ * arguments are assembled here and array_merge'd into both call sites, and nothing in
+ * the tool body builds a WP_Query argument except the three the STATUS SPLIT owns -
+ * post_status, the own-query author scope, and the row count. A filter added anywhere
+ * else is that bug.
+ *
+ * NO CALLER VALUE REACHES WP_Query UNSHAPED. Every filter is a NAMED tool argument that
+ * this function maps to exactly one allow-listed WP_Query key; the caller never names a
+ * WP_Query key, and no value is passed on without being validated, resolved against the
+ * database, or cast. The complete set of keys this may return is:
+ *
+ *     s  cat  tag_id  tax_query  author  date_query  orderby  order
+ *
+ * AND NO FILTER MAY WIDEN. The two status sets wpmcp_listable_statuses() and
+ * wpmcp_own_listable_statuses() decide from capabilities ARE the guard; filters only
+ * narrow inside it. Nothing here returns post_status, post_type, perm, post__in,
+ * author__in, meta_query or suppress_filters - and a future filter that needs one of
+ * those needs the capability argument that goes with it, made here, in this docblock,
+ * and not in a caller's argument.
+ *
+ * THREE ANSWERS, and the difference between them IS the disclosure rule:
+ *
+ *   array()    the filters, for both queries.
+ *   false      NOTHING CAN MATCH: an unknown category, tag, term, taxonomy, or author.
+ *              The tool answers with an empty list - byte-identical to the answer for a
+ *              real category that happens to hold nothing, and to the answer for a
+ *              category holding only another author's draft. "There is no such thing",
+ *              "it is empty" and "it is not yours to see" have to be ONE answer, or the
+ *              filter is an oracle for the site's user logins and term names.
+ *   WP_Error   the argument's SHAPE is wrong: a date that is not a date, an orderby
+ *              that is not one of three words. That is the caller's own mistake about
+ *              this protocol, it says nothing whatever about the site, and an agent
+ *              answered with an empty list instead concludes the site is empty and
+ *              stops.
+ *
+ * @return array|false|WP_Error
+ */
+function wpmcp_list_posts_filters($args, $postType) {
+    $query = array();
+
+    // ORDERING FIRST, because it is the one filter always present: both queries are
+    // given it explicitly so neither can pick an ordering of its own. `s` is why that
+    // matters - WP_Query switches to relevance ordering the moment a search term
+    // appears, and it would switch on only one of the two halves.
+    //
+    // THE TWO REFUSALS BELOW ARE BELT AND BRACES, and deliberately so. Over the wire the
+    // dispatcher's always-on schema validation runs first and the `enum` on these two
+    // arguments answers an unknown value before this function is entered, which is why
+    // the integration test sees the validator's message rather than these. They stay
+    // because this function's contract is that NOTHING reaches WP_Query unshaped, and a
+    // contract that holds only while somebody else's validator is switched on is not one:
+    // `wpmcp_tools` is a filter, and a plugin that replaces this inputSchema would
+    // otherwise be handing an arbitrary string to WP_Query's ORDER BY builder.
+    $columns = wpmcp_list_orderby_columns();
+    $orderby = isset($args['orderby']) ? strtolower(trim((string) $args['orderby'])) : 'date';
+
+    if (!isset($columns[$orderby])) {
+        return new WP_Error(
+            'wpmcp_bad_arg',
+            'orderby must be one of: ' . implode(', ', array_keys($columns)) . '.'
+        );
+    }
+
+    $order = isset($args['order']) ? strtolower(trim((string) $args['order'])) : 'desc';
+
+    if ($order !== 'asc' && $order !== 'desc') {
+        return new WP_Error('wpmcp_bad_arg', 'order must be one of: asc, desc.');
+    }
+
+    $query['orderby'] = $orderby;
+    $query['order']   = strtoupper($order);
+
+    // SEARCH. WP_Query's own `s`, which matches post_title, post_excerpt and
+    // post_content - no author email, no comment, no column outside the posts table.
+    // It searches only within the rows the status split already allowed.
+    if (isset($args['search'])) {
+        $search = trim((string) $args['search']);
+        if ($search !== '') { $query['s'] = $search; }
+    }
+
+    // AUTHOR. Resolved to an id HERE so the own-status query can compare it against
+    // get_current_user_id() and skip itself when they differ - see the tool body.
+    if (isset($args['author']) && trim((string) $args['author']) !== '') {
+        $author = wpmcp_list_author_id($args['author']);
+        if ($author === 0) { return false; }
+        $query['author'] = $author;
+    }
+
+    // CATEGORY and TAG, the two shorthands. `cat` and `tag_id` take term IDS, so a slug
+    // has to be resolved here whatever else is true. A miss ENDS the query; it does not
+    // quietly drop the filter, which is the shape that would answer a question about one
+    // category with every post on the site.
+    if (isset($args['category']) && trim((string) $args['category']) !== '') {
+        $term = wpmcp_list_term_id('category', $args['category'], $postType);
+        if ($term === 0) { return false; }
+        $query['cat'] = $term;
+    }
+
+    if (isset($args['tag']) && trim((string) $args['tag']) !== '') {
+        $term = wpmcp_list_term_id('post_tag', $args['tag'], $postType);
+        if ($term === 0) { return false; }
+        $query['tag_id'] = $term;
+    }
+
+    // ANY OTHER TAXONOMY, as one string "taxonomy:slug". One argument rather than two so
+    // the pair cannot arrive half-specified; a string with no colon resolves to the
+    // empty taxonomy, which is not a taxonomy, which is an empty list - the same answer
+    // a private taxonomy gets.
+    if (isset($args['term']) && trim((string) $args['term']) !== '') {
+        $raw   = trim((string) $args['term']);
+        $colon = strpos($raw, ':');
+        $tax   = $colon === false ? '' : substr($raw, 0, $colon);
+        $slug  = $colon === false ? '' : substr($raw, $colon + 1);
+
+        $term = wpmcp_list_term_id($tax, $slug, $postType);
+        if ($term === 0) { return false; }
+
+        $query['tax_query'] = array(array(
+            'taxonomy' => sanitize_key($tax),
+            'field'    => 'term_id',
+            'terms'    => array($term),
+        ));
+    }
+
+    // AFTER / BEFORE, inclusive, on post_date.
+    //
+    // post_date and not post_date_gmt, for the same measured reason the merge sorts on
+    // it: the GMT column is '0000-00-00 00:00:00' for every draft, so a date window on
+    // it would quietly exclude the caller's own unpublished work from every dated
+    // search - the one thing the second query exists to include.
+    //
+    // WP_Date_Query's `inclusive` turns its `>` and `<` into `>=` and `<=` AND fills a
+    // date-only bound out to the correct end of the day (00:00:00 for after, 23:59:59
+    // for before), so `before: "2026-01-31"` means all of the 31st.
+    $dateQuery = array('column' => 'post_date', 'inclusive' => true);
+
+    foreach (array('after', 'before') as $bound) {
+        if (!isset($args[$bound]) || trim((string) $args[$bound]) === '') { continue; }
+
+        $parsed = wpmcp_parse_iso_datetime($args[$bound]);
+
+        if ($parsed === null) {
+            return new WP_Error(
+                'wpmcp_bad_arg',
+                $bound . ' must be an ISO 8601 date or datetime, e.g. 2026-01-31 or'
+                . ' 2026-01-31T14:30:00.'
+            );
+        }
+
+        $dateQuery[$bound] = $parsed;
+    }
+
+    if (isset($dateQuery['after']) || isset($dateQuery['before'])) {
+        $query['date_query'] = array($dateQuery);
+    }
+
+    return $query;
+}
+
+/**
+ * The taxonomy terms on a post, keyed by taxonomy, for get-post.
+ *
+ * VIEWABLE TAXONOMIES ONLY, and only the ones attached to this post type - the same
+ * allow-list wpmcp_list_term_id() applies to the filter side, so a caller cannot read
+ * through get-post what they cannot filter on. A private taxonomy is a plugin's or a
+ * theme's internal bookkeeping; its term names are frequently customer segments,
+ * licence tiers or workflow states, and none of that is the post's content.
+ *
+ * Every allowed taxonomy gets a key even when the post has no terms in it, so the shape
+ * of the answer does not depend on the data; an empty object rather than an empty array
+ * when there are none at all, because PHP's [] and {} are the same value and a client
+ * reading `terms.category` should not have to cope with a list (KB 9.2).
+ */
+function wpmcp_post_terms($post) {
+    $found = array();
+
+    foreach (get_object_taxonomies($post->post_type) as $taxonomy) {
+        if (!is_taxonomy_viewable($taxonomy)) { continue; }
+
+        $found[$taxonomy] = array();
+        $terms            = get_the_terms($post, $taxonomy);
+
+        if (is_wp_error($terms) || !$terms) { continue; }
+
+        foreach ($terms as $term) {
+            $found[$taxonomy][] = array(
+                'id'   => (int) $term->term_id,
+                'name' => $term->name,
+                'slug' => $term->slug,
+            );
+        }
+    }
+
+    return $found === array() ? new stdClass() : $found;
+}
 
 /**
  * Statuses that count as publishing, so they need publish_posts rather than merely
@@ -576,6 +961,16 @@ function wpmcp_core_tools() {
                 );
             },
         ),
+        /**
+         * FILTERS NARROW; THE STATUS SPLIT GUARDS. Read wpmcp_list_posts_filters()
+         * before adding anything here: every filter is a named argument mapped by our
+         * code to one allow-listed WP_Query key, built in that ONE function, and
+         * merged into BOTH queries. A filter that reaches only one of them hands an
+         * Author their own drafts back under somebody else's category, and it looks
+         * like the filter working. A filter that reaches WP_Query unshaped is a query
+         * argument the caller chose. Neither is possible while this body builds only
+         * post_status, the own-query author scope, and the row count.
+         */
         'list-posts' => array(
             'write' => false,
             'annotations' => array(
@@ -584,11 +979,31 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'List recent content the caller is allowed to see. Args: post_type (default "post"), status (default: every status the caller may see), limit (default 20, max 100).',
+            'description' => 'Find content the caller may see. Filter and page it.'
+                . ' Args: post_type (default "post"), status (default: every status the'
+                . ' caller may see), search (title, excerpt and content), category and'
+                . ' tag (slug or id), term ("taxonomy:slug" for any other taxonomy),'
+                . ' author (id or login), after and before (ISO 8601 date or datetime,'
+                . ' inclusive), orderby ("date", "modified" or "title"; default "date"),'
+                . ' order ("asc" or "desc"; default "desc"), limit (default 20, max 100)'
+                . ' and page (default 1, max 100). A filter naming something that does'
+                . ' not exist, or something the caller may not see, returns an empty'
+                . ' list rather than an error. Returns count, page, limit, has_more and'
+                . ' items; there is no total.',
             'inputSchema' => array('type' => 'object', 'properties' => array(
-                'post_type' => array('type' => 'string'),
-                'status'    => array('type' => 'string'),
-                'limit'     => array('type' => 'integer'),
+                'post_type' => array('type' => 'string', 'description' => 'Post type to list. Default "post".'),
+                'status'    => array('type' => 'string', 'description' => 'One post status. Default: every status the caller may see.'),
+                'search'    => array('type' => 'string', 'description' => 'Match title, excerpt or content.'),
+                'category'  => array('type' => 'string', 'description' => 'Category slug or term id.'),
+                'tag'       => array('type' => 'string', 'description' => 'Tag slug or term id.'),
+                'term'      => array('type' => 'string', 'description' => 'Any other taxonomy, as "taxonomy:slug".'),
+                'author'    => array('type' => 'string', 'description' => 'Author user id or login.'),
+                'after'     => array('type' => 'string', 'description' => 'Posted on or after this ISO 8601 date or datetime.'),
+                'before'    => array('type' => 'string', 'description' => 'Posted on or before this ISO 8601 date or datetime.'),
+                'orderby'   => array('type' => 'string', 'enum' => array('date', 'modified', 'title'), 'description' => 'Sort column. Default "date".'),
+                'order'     => array('type' => 'string', 'enum' => array('asc', 'desc'), 'description' => 'Sort direction. Default "desc".'),
+                'limit'     => array('type' => 'integer', 'description' => 'Items per page. Clamped to 1-100. Default 20.'),
+                'page'      => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100. Default 1.'),
             )),
             'run' => function ($args) {
                 $type = isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post';
@@ -598,6 +1013,7 @@ function wpmcp_core_tools() {
                     return new WP_Error('wpmcp_bad_type', 'Not a listable post type: ' . $type);
                 }
                 $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
+                $page  = isset($args['page']) ? min(100, max(1, (int) $args['page'])) : 1;
 
                 // 'any' is never handed to WP_Query: it takes a branch where `perm` is
                 // not consulted at all, so it lists every author's private and draft
@@ -615,50 +1031,77 @@ function wpmcp_core_tools() {
                     $own       = array_values(array_intersect($own, array($asked)));
                 }
 
+                $filters = wpmcp_list_posts_filters($args, $type);
+                // A malformed argument SHAPE - not a thing that cannot be found. See
+                // wpmcp_list_posts_filters() for why those are two different answers.
+                if (is_wp_error($filters)) { return $filters; }
+                // `false` is "nothing can match": an unknown term, taxonomy or author.
+                // Both queries are skipped and the empty page is returned below, which
+                // is the same answer a real-but-empty filter produces.
+                $matchable = $filters !== false;
+
+                // HOW DEEP EACH QUERY HAS TO GO for the merge to be able to fill page
+                // $page and still know whether a page after it exists. Any row in the
+                // global first N must be in one list's own first N, so N rows from each
+                // side is exactly enough - and the +1 is the has_more probe, which is
+                // why no total is needed and `no_found_rows` can stay on. `page` is
+                // capped at 100 alongside `limit`, so this is bounded at 10,001 rows.
+                $depth = $page * $limit + 1;
+
                 $posts = array();
-                if ($permitted) {
-                    $q = new WP_Query(array(
+                if ($matchable && $permitted) {
+                    $q = new WP_Query(array_merge($filters, array(
                         'post_type'      => $type,
                         'post_status'    => $permitted,
-                        'posts_per_page' => $limit,
+                        'posts_per_page' => $depth,
                         'no_found_rows'  => true,
                         // Belt and braces over the list above: on an explicit status
                         // list this also scopes `private` to the user's own posts when
                         // they lack read_private_posts.
                         'perm'           => 'readable',
-                    ));
+                    )));
                     $posts = $q->posts;
                 }
+
                 // Own unpublished work, which the first query cannot reach - see
                 // wpmcp_own_listable_statuses(). Disjoint status sets, so no duplicates.
-                if ($own) {
-                    $q2 = new WP_Query(array(
+                //
+                // AN `author` FILTER NAMING SOMEBODY ELSE SKIPS THIS QUERY ENTIRELY.
+                // It is author-scoped to the current user by construction, so letting
+                // the base array overwrite the filter's author would answer "the
+                // Editor's posts" with the Author's own drafts - a filter that returns
+                // what was not asked for, which is the same failure as a leak from the
+                // reader's side.
+                $me = get_current_user_id();
+                $runOwn = $matchable && $own
+                    && (!isset($filters['author']) || (int) $filters['author'] === (int) $me);
+
+                if ($runOwn) {
+                    $q2 = new WP_Query(array_merge($filters, array(
                         'post_type'      => $type,
                         'post_status'    => $own,
-                        'author'         => get_current_user_id(),
-                        'posts_per_page' => $limit,
+                        'author'         => $me,
+                        'posts_per_page' => $depth,
                         'no_found_rows'  => true,
-                    ));
-                    $posts = array_merge($posts, $q2->posts);
-                    // Re-impose WP_Query's own ordering across the merge, then the
-                    // limit, so `limit` still means what it says.
-                    //
-                    // post_date, NOT post_date_gmt. Every status registered with
-                    // date_floating - draft, pending, auto-draft - is stored by
-                    // wp_insert_post with post_date_gmt AND post_modified_gmt set to
-                    // '0000-00-00 00:00:00' (measured on WP 7.1; only the non-GMT
-                    // columns are populated). Sorting on either GMT column therefore
-                    // puts every own draft behind every dated post, and the slice
-                    // below drops them first - so on any site with `limit` published
-                    // posts or more, the own-draft case this merge exists for failed.
-                    // post_date is also the column WP_Query's own `orderby => date`
-                    // uses, so both halves stay in the order they arrived in.
-                    usort($posts, function ($a, $b) {
-                        $cmp = strcmp((string) $b->post_date, (string) $a->post_date);
-                        return $cmp !== 0 ? $cmp : ((int) $b->ID - (int) $a->ID);
-                    });
-                    $posts = array_slice($posts, 0, $limit);
+                    )));
+
+                    if ($q2->posts) {
+                        $posts = array_merge($posts, $q2->posts);
+                        // Re-impose ONE ordering across the merge - the same column and
+                        // the same direction both queries were given, which is what
+                        // wpmcp_post_order_comparator() exists to guarantee. Sorted
+                        // only when there is something to merge: a single query's rows
+                        // are already in the collation's order, and re-sorting them in
+                        // PHP could only disagree with it.
+                        usort($posts, wpmcp_post_order_comparator($filters['orderby'], $filters['order']));
+                    }
                 }
+
+                // The extra row, before the slice eats it. `has_more` and not a total:
+                // a count is a fact about posts the caller has not been shown, and on
+                // the own-status side it would be a count of somebody's drafts.
+                $hasMore = count($posts) > $page * $limit;
+                $posts   = array_slice($posts, ($page - 1) * $limit, $limit);
 
                 $items = array();
                 foreach ($posts as $p) {
@@ -667,7 +1110,13 @@ function wpmcp_core_tools() {
                         'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
                     );
                 }
-                return array('count' => count($items), 'items' => $items);
+                return array(
+                    'count'    => count($items),
+                    'page'     => $page,
+                    'limit'    => $limit,
+                    'has_more' => $hasMore,
+                    'items'    => $items,
+                );
             },
         ),
         'get-post' => array(
@@ -678,9 +1127,18 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'Get title/status/raw content for a post or page. Args: id (integer, required).',
+            'description' => 'Read one post or page in full. Args: id (integer,'
+                . ' required). Returns id, title, type, status, slug, link, raw content,'
+                . ' raw excerpt, author {id, name}, date, date_gmt, modified and'
+                . ' modified_gmt as ISO 8601 (null where the column is unset, which is'
+                . ' every draft\'s GMT pair), featured_image {id, url} or null, terms'
+                . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
+                . ' entry {id, name, slug}, and revisions - the number of stored'
+                . ' revisions, or null when the caller may read the post but not edit'
+                . ' it. A post the caller may not read, a post that is not there, and an'
+                . ' id of the wrong kind of thing all answer identically.',
             'inputSchema' => array('type' => 'object',
-                'properties' => array('id' => array('type' => 'integer')),
+                'properties' => array('id' => array('type' => 'integer', 'description' => 'Post ID.')),
                 'required' => array('id')),
             'run' => function ($args) {
                 $id = isset($args['id']) ? (int) $args['id'] : 0;
@@ -701,9 +1159,48 @@ function wpmcp_core_tools() {
                 if (!wpmcp_post_type_ok($p->post_type)) {
                     return new WP_Error('wpmcp_not_found', 'No post with that ID.');
                 }
+
+                // THE AUTHOR IS A DISPLAY NAME AND AN ID, AND NOTHING ELSE. Not the
+                // login, which is half of a credential and the thing a brute-forcer is
+                // missing; not the email, which is the other half of a password reset.
+                // wp-admin shows a display name on the post list for exactly this
+                // reason, and that is the ceiling a read tool should copy.
+                $author = get_userdata((int) $p->post_author);
+
+                // REVISIONS ARE EDITORIAL DATA, so they follow the editorial
+                // capability. wp-admin puts the revisions panel behind edit_post; a
+                // reader who may see the published text has no business knowing how
+                // many times it was rewritten, or - through the count alone - that it
+                // was rewritten at all. Null rather than 0: 0 would be a claim.
+                //
+                // IDS ONLY. `fields => ids` means the bodies never load, so the count
+                // costs one small query and no revision text can escape through here.
+                $revisions = null;
+                if (current_user_can('edit_post', $p->ID)) {
+                    $revisions = count(wp_get_post_revisions($p->ID, array('fields' => 'ids')));
+                }
+
+                $thumbnail = (int) get_post_thumbnail_id($p);
+                $thumbnailUrl = $thumbnail ? wp_get_attachment_url($thumbnail) : false;
+
                 return array(
                     'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
-                    'status' => $p->post_status, 'slug' => $p->post_name, 'content' => $p->post_content,
+                    'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
+                    'content' => $p->post_content,
+                    'excerpt' => $p->post_excerpt,
+                    'author' => array(
+                        'id'   => (int) $p->post_author,
+                        'name' => $author ? $author->display_name : null,
+                    ),
+                    'date'         => wpmcp_iso_date($p->post_date),
+                    'date_gmt'     => wpmcp_iso_date($p->post_date_gmt),
+                    'modified'     => wpmcp_iso_date($p->post_modified),
+                    'modified_gmt' => wpmcp_iso_date($p->post_modified_gmt),
+                    'featured_image' => $thumbnail
+                        ? array('id' => $thumbnail, 'url' => $thumbnailUrl === false ? null : $thumbnailUrl)
+                        : null,
+                    'terms'     => wpmcp_post_terms($p),
+                    'revisions' => $revisions,
                 );
             },
         ),
