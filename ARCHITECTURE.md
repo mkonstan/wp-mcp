@@ -37,7 +37,7 @@ saying whether it writes, and a function:
 ```php
 'list-posts' => array(
     'write'       => false,
-    'description' => 'List recent content the caller is allowed to see. Args: ...',
+    'description' => 'Find content the caller may see. Filter and page it. Args: ...',
     'annotations' => array(
         'readOnlyHint' => true, 'destructiveHint' => false,
         'idempotentHint' => true, 'openWorldHint' => false,

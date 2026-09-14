@@ -186,6 +186,63 @@ other tool's reach stops at this site's database and active theme.
 a wrong type or an unknown key comes back as an error naming the field, and the tool never
 executes.
 
+### Finding content
+
+`list-posts` is the search surface. Every argument is optional:
+
+| Argument | Takes | Default |
+|---|---|---|
+| `post_type` | one post type this tool serves | `post` |
+| `status` | one post status | every status the caller may see |
+| `search` | text matched against title, excerpt and content | - |
+| `category`, `tag` | a slug or a term id | - |
+| `term` | `"taxonomy:slug"`, for any other taxonomy | - |
+| `author` | a user id or a user login | - |
+| `after`, `before` | `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`, both inclusive | - |
+| `orderby` | `date`, `modified` or `title` | `date` |
+| `order` | `asc` or `desc` | `desc` |
+| `limit` | 1-100 | 20 |
+| `page` | 1-100 | 1 |
+
+It answers with `count`, `page`, `limit`, `has_more` and `items`. There is no total, on
+purpose: a total is a count of posts the caller has not been shown, and on the
+own-unpublished side it would be a count of somebody's drafts. Page until `has_more` is
+`false`.
+
+**A filter that names something the caller may not see returns an empty list, not an
+error.** An unknown category, a tag holding only somebody else's draft, an author who has
+published nothing, a term in a taxonomy that is not public, and a taxonomy nobody
+registered all give the same answer as a real category with nothing in it. That is
+deliberate: three different answers would let a caller probe the site's term names and
+user logins one guess at a time.
+
+The two things that *are* errors are a date that is not a date and an `orderby` that is
+not one of the three. Those are mistakes about this protocol rather than facts about your
+site, and an agent told "no results" would conclude the site is empty and stop.
+
+A filter never widens what a token may see. The statuses a caller is allowed to list are
+decided from their capabilities first; filters only narrow inside that.
+
+`get-post {id}` returns the whole post: `title`, `type`, `status`, `slug`, `link`,
+`content` and `excerpt` as stored, `author` as `{id, name}`, `date`, `date_gmt`,
+`modified` and `modified_gmt` as ISO 8601, `featured_image` as `{id, url}` or `null`,
+`terms` keyed by taxonomy with `{id, name, slug}` entries, and `revisions`.
+
+Three details in that list are decisions rather than data:
+
+- The author is a **display name** and an id. Never the login, which is half of a
+  credential, and never the email.
+- A `0000-00-00` date column comes back as **`null`**. WordPress stores drafts, pending
+  and scheduled posts with both GMT columns zeroed; formatting that yields
+  `-0001-11-30T00:00:00`, which a client parses without complaint.
+- `revisions` is a **count**, and only for a caller who can edit the post. Anyone else
+  gets `null` rather than `0`, because how many times something was rewritten is
+  editorial - wp-admin puts the revisions panel behind the same capability.
+
+`terms` lists only taxonomies that are attached to the post type and public. A private
+taxonomy is a plugin's internal bookkeeping, and its term names are often customer
+segments or workflow states rather than anything the post says.
+
 ## HTTPS enforcement depends on your proxy
 
 The endpoint refuses any request that is not over HTTPS with 403, before the token is

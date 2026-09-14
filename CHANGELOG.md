@@ -121,6 +121,63 @@ admin can renew them for thirty days from when they were minted - see below.
 - New option `wpmcp_sql_enabled`, removed on uninstall. No schema change. The catalog is
   23 tools.
 
+### New: `list-posts` can find things, and `get-post` returns the rest of the post
+
+- **`list-posts` gains nine filters**: `search` (title, excerpt and content), `category`
+  and `tag` (slug or term id), `term` (`"taxonomy:slug"`, for any other taxonomy),
+  `author` (user id or login), `after` and `before` (ISO 8601 date or datetime, both
+  inclusive), and `orderby` (`date`, `modified` or `title`; default `date`) with `order`
+  (`asc` or `desc`; default `desc`).
+- **A filter that names something you may not see returns an empty list, not an error.**
+  An unknown category, a tag holding only somebody else's draft, an author with nothing
+  published, a term in a private taxonomy and a taxonomy nobody registered all answer
+  identically: `count: 0`, no items, no message. "There is no such thing", "it is empty"
+  and "it is not yours" have to be one answer, or the filter is an oracle for the site's
+  user logins and term names.
+- **Only a malformed argument SHAPE is an error** (`wpmcp_bad_arg`): a date that is not a
+  date, an `orderby` that is not one of the three. Those are the caller's own mistake
+  about the protocol, they say nothing about the site, and an agent answered with an
+  empty list instead concludes the site is empty and stops looking. Dates are matched
+  against `YYYY-MM-DD[THH:MM[:SS]]` rather than passed to `strtotime()`, which would
+  have accepted `next tuesday` and rolled `2021-13-45` over into 2022.
+- **A taxonomy has to be `is_taxonomy_viewable()` and attached to the post type.** A
+  private taxonomy is a plugin's internal bookkeeping - customer segments, workflow
+  states - and WP_Query will filter an ordinary post listing by one of its terms without
+  complaint; `term` is not a way to read one. Attachment and existence are an allow-list
+  rather than a fix: measured, WP_Query does *not* ignore `cat` on a post type with no
+  categories, it joins and returns nothing. What all of it buys is that a filter which
+  cannot be resolved ENDS the query instead of being quietly dropped - that shape is the
+  one that answers a question about one category with every post on the site.
+- **Paging.** `page` (1-100, default 1) on top of `limit` (1-100, default 20). The result
+  now carries `page`, `limit` and `has_more` beside `count` and `items`. There is still no
+  total: a total is a count of posts the caller has not been shown, and on the
+  own-unpublished side it would be a count of somebody's drafts.
+- **One ordering across the merge.** list-posts runs two queries - everything you may see,
+  plus your own unpublished work, which WP_Query cannot express in one - and both are now
+  given the same explicit `orderby`/`order`, with the merge comparator following the same
+  column and direction and tie-breaking on ID. Before this the merge was hard-coded to
+  `post_date` descending, and a `search` would also have switched one half of the listing
+  into relevance ordering on its own.
+- **No filter can widen what a token may see.** The two capability-decided status sets are
+  still the guard; every filter narrows inside it. The filters are built in one function,
+  `wpmcp_list_posts_filters()`, from named arguments mapped to an allow-list of eight
+  WP_Query keys, and both queries consume the same array - a filter applied to one and not
+  the other would hand an Author their own drafts back under somebody else's category.
+- **`get-post` returns `excerpt`, `link`, `author` `{id, name}`, `date`, `date_gmt`,
+  `modified`, `modified_gmt`, `featured_image` `{id, url}` or `null`, `terms` keyed by
+  taxonomy (each `{id, name, slug}`), and `revisions`.** The author is a display name and
+  an id - never the login, which is half of a credential, and never the email.
+- **Dates are ISO 8601, and a `0000-00-00` column is `null`.** Every date-floating status
+  (draft, pending, auto-draft) is stored with `post_date_gmt` and `post_modified_gmt` set
+  to zero; formatting that produces `-0001-11-30T00:00:00`, which a client parses without
+  complaint.
+- **`revisions` is a count, and only for a caller who can `edit_post`** - `null`
+  otherwise, not `0`. Revisions are editorial data and wp-admin puts the panel behind the
+  same capability; the ids are counted with `fields => ids`, so no revision body is loaded.
+- The three `get-post` refusals - missing id, unreadable post, wrong kind of thing - are
+  still one byte-identical message, and they still run before any of the above.
+- No schema change, no new option, and the catalog is still 23 tools.
+
 ### Breaking: the token travels in a header, and only in a header
 
 - The route whose path carried the token, `/wp-json/wpmcp/mcp/<token>`, **is gone**. A URL
