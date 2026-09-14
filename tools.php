@@ -409,6 +409,12 @@ function wpmcp_own_listable_statuses($post_type) {
  * '-0001-11-30T00:00:00', which a client will happily parse as the year 1 BC. It is
  * reported as null instead, so "this post has no GMT date" is sayable.
  *
+ * NOT EVERY DRAFT, SINCE SPRINT 11. A draft GIVEN a `date` carries a real post_date_gmt -
+ * wp_insert_post stores a supplied non-empty GMT whatever the status, which is what
+ * Gutenberg's fixed-date picker does too - so the zeroed pair now means "a draft nobody
+ * dated" rather than "a draft". The guard is unchanged; only the sentence describing when
+ * it fires was.
+ *
  * mysql_to_rfc3339() is the function the REST API formats these same columns with, so
  * a client that already reads WordPress dates gets the identical string here - local
  * wall-clock time with NO offset suffix, which is all post_date stores.
@@ -464,9 +470,10 @@ function wpmcp_parse_iso_datetime($value) {
 /**
  * The three orderings list-posts offers, and the COLUMN each one sorts on.
  *
- * post_date and post_modified, never the _gmt pair: every date-floating status carries
- * '0000-00-00 00:00:00' in both GMT columns, so a merge that compared them would put
- * every own draft behind every dated post and the page slice would drop them. The
+ * post_date and post_modified, never the _gmt pair: an UNDATED draft, pending or
+ * auto-draft carries '0000-00-00 00:00:00' in both GMT columns (one given an explicit
+ * date does not - see wpmcp_iso_date), so a merge that compared them would put those
+ * drafts behind every dated post and the page slice would drop them. The
  * non-GMT columns are the ones WP_Query's own `orderby => date` and `=> modified` use,
  * which is what keeps the merged comparator and the un-merged query in agreement.
  */
@@ -1074,11 +1081,17 @@ function wpmcp_parse_post_date($value) {
  *                   wp-admin's dropdown lists exactly those users - and a user who
  *                   cannot, or who is not there at all, gets one message that says
  *                   nothing else about them.
- *   featured_image  edit_post ON THE ATTACHMENT. Measured on WP 7.1: an attachment's
- *                   edit_post maps through its own author and its parent, so an Author
- *                   holds it on their own upload (parented or not) and not on another
- *                   user's, parented or not; an Editor holds it on every one. That is
- *                   the difference between "add a picture to my post" and "reach into
+ *   featured_image  edit_post ON THE ATTACHMENT, which resolves through the attachment's
+ *                   OWN AUTHOR exactly as a post's does - THE PARENT PLAYS NO PART.
+ *                   map_meta_cap consults post_parent only when the post type is
+ *                   `revision` (wp-includes/capabilities.php:215-221, WP 7.1); for an
+ *                   attachment it takes the ordinary own-vs-others' branch, and an
+ *                   attachment's `inherit` status is none of publish/future/private, so
+ *                   the answer is edit_posts for the owner and edit_others_posts for
+ *                   everybody else. MEASURED, four roles by four attachments: an Author
+ *                   holds it on their own upload, parented or not, and on nobody else's,
+ *                   parented or not; an Editor holds it on every one. That is the
+ *                   difference between "add a picture to my post" and "reach into
  *                   somebody else's media library".
  *
  * WHY `after` IS SEPARATE FROM `insert`. set_post_thumbnail() needs a post id, which on
@@ -1133,6 +1146,18 @@ function wpmcp_post_fields($a, $postType) {
     if (isset($a['author'])) {
         if (!$pto || !current_user_can($pto->cap->edit_others_posts)) {
             return wpmcp_cannot('set the author of ' . $postType . ' content');
+        }
+
+        // THE SHAPE, CHECKED HERE BECAUSE THE SCHEMA CANNOT SAY IT. This argument
+        // declares no `type` - the dialect SchemaValidator enforces has no way to say
+        // "integer or string" - so the validator lets a boolean or a float through, and
+        // `wpmcp_list_author_id(true)` resolved `(string) true === '1'` to user 1. A
+        // silent cast to whoever installed the site is not an answer to `author: true`.
+        if (!is_int($a['author']) && !(is_string($a['author']) && trim($a['author']) !== '')) {
+            return new WP_Error(
+                'wpmcp_bad_arg',
+                'author must be a user id (integer) or a user login (non-empty string).'
+            );
         }
 
         $authorId = wpmcp_list_author_id($a['author']);
@@ -1269,6 +1294,11 @@ function wpmcp_meta_keys_normalise($value) {
         $key = trim((string) $item);
 
         if ($key === '' || in_array($key, $keys, true)) { continue; }
+        // A BACKSLASH IS DROPPED BEFORE THE PROTECTED TEST, not after it, and it is the
+        // same reason wpmcp_meta_key_allowed() refuses one: the meta API unslashes the
+        // key on the way in, so `\_thumbnail_id` is not protected by this test and is
+        // `_thumbnail_id` by the time it reaches the database.
+        if (strpos($key, '\\') !== false) { continue; }
         if (is_protected_meta($key, 'post')) { continue; }
 
         $keys[] = $key;
@@ -1311,6 +1341,20 @@ function wpmcp_meta_key_allowed($key) {
 
     if ($key === '') {
         return new WP_Error('wpmcp_bad_arg', 'key must be a post meta key.');
+    }
+    // BEFORE THE PROTECTED CHECK, because it is what makes the protected check true.
+    // The meta API unslashes the key it is given (meta.php:62, :220, :420), so
+    // `\_thumbnail_id` is not protected here - is_protected_meta() sees a leading
+    // backslash, not a leading underscore - and arrives at the database as
+    // `_thumbnail_id`. wp_slash() at the write sites closes that on its own; this closes
+    // it again, independently, so a call site that forgets to slash cannot reopen it.
+    // No legitimate post meta key contains a backslash.
+    if (strpos($key, '\\') !== false) {
+        return new WP_Error(
+            'wpmcp_forbidden',
+            'A post meta key may not contain a backslash, so these tools never read or'
+            . ' write one.'
+        );
     }
     if (is_protected_meta($key, 'post')) {
         return new WP_Error(
@@ -1580,8 +1624,8 @@ function wpmcp_core_tools() {
             'description' => 'Read one post or page in full. Args: id (integer,'
                 . ' required). Returns id, title, type, status, slug, link, raw content,'
                 . ' raw excerpt, author {id, name}, date, date_gmt, modified and'
-                . ' modified_gmt as ISO 8601 (null where the column is unset, which is'
-                . ' every draft\'s GMT pair), featured_image {id, url} or null, terms'
+                . ' modified_gmt as ISO 8601, or null where the column holds no date -'
+                . ' a draft nobody dated. featured_image {id, url} or null, terms'
                 . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
                 . ' entry {id, name, slug}, and revisions - the number of stored'
                 . ' revisions, or null when the caller may read the post but not edit'
@@ -1726,7 +1770,16 @@ function wpmcp_content_tools() {
             if (is_wp_error($fields)) { return $fields; }
 
             $postarr = array_merge($postarr, $fields['insert']);
-            $changed = $fields['changed'];
+            // `changed` IS THE FIELDS THIS CALL NAMED, on both tools and in the same
+            // order. It used to be seeded from the shared step alone here, so a create
+            // that set a title and a date reported `["date"]` - and README says `changed`
+            // is what the call touched. title, content and status are the three this tool
+            // handles itself; everything else comes from the shared step.
+            $changed = array();
+            if (isset($a['title']))   { $changed[] = 'title'; }
+            if (isset($a['content'])) { $changed[] = 'content'; }
+            if (isset($a['status']))  { $changed[] = 'status'; }
+            $changed = array_merge($changed, $fields['changed']);
 
             $id = wp_insert_post($postarr, true);
             if (is_wp_error($id)) { return $id; }
@@ -1911,8 +1964,8 @@ function wpmcp_meta_tools() {
         'description' => 'Read a post\'s custom fields. Args: id (required), key'
             . ' (optional). Returns `meta` as an object of key to value for every meta key'
             . ' this site allows MCP to touch that has a value on the post - one value when'
-            . ' the key holds one row, a list when it holds several - or just the one key'
-            . ' you name. An administrator sets which keys those are in Settings > WP MCP;'
+            . ' the key holds ONE row, a list of N values when it holds N rows - or just'
+            . ' the one key you name. An administrator sets which keys those are in Settings > WP MCP;'
             . ' a key outside that list is refused by name and nothing else about the'
             . ' site\'s other keys is said. A post the caller may not read, a post that is'
             . ' not there, and an id of the wrong kind of thing all answer identically.',
@@ -1983,10 +2036,13 @@ function wpmcp_meta_tools() {
         ),
         'description' => 'Write one of a post\'s custom fields. Args: id, key and value,'
             . ' all required. The value REPLACES every row under that key: send a JSON'
-            . ' scalar for one row, a flat list of scalars for several, or null to delete'
-            . ' the key. An object, or a list holding one, is refused. The key must be one'
-            . ' an administrator allowed in Settings > WP MCP, and you need to be able to'
-            . ' edit the post. WordPress stores meta as text, so a number or a boolean'
+            . ' scalar for ONE row, a flat list of N scalars for N SEPARATE rows, or null'
+            . ' to delete the key. A field that expects one serialised array rather than'
+            . ' several rows - an ACF repeater or gallery, or any key registered'
+            . ' single=true - is not writable this way. An object, a list holding one, and'
+            . ' an empty list or object are all refused; only null deletes. The key must be'
+            . ' one an administrator allowed in Settings > WP MCP, and you need to be able'
+            . ' to edit the post. WordPress stores meta as text, so a number or a boolean'
             . ' comes back as its string form. Returns id, key and the value as re-read.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id'  => array('type' => 'integer', 'description' => 'Post ID.'),
@@ -1995,7 +2051,7 @@ function wpmcp_meta_tools() {
             // flat list of them, or null, and the dialect SchemaValidator enforces has
             // no way to say that. The shaping and the refusal are in the run body, where
             // they can name what was actually wrong.
-            'value' => array('description' => 'A JSON scalar, a flat list of scalars, or null to delete the key.'),
+            'value' => array('description' => 'A JSON scalar (one meta row), a non-empty flat list of scalars (one row per element), or null to delete the key. An object, or an empty list or object, is refused.'),
         ), 'required' => array('id', 'key', 'value')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
@@ -2021,35 +2077,57 @@ function wpmcp_meta_tools() {
 
             $value = array_key_exists('value', $a) ? $a['value'] : null;
 
+            // EVERYTHING BELOW GOES IN SLASHED, because the meta API takes slashed input
+            // and unslashes it: add_metadata(), update_metadata() and delete_metadata()
+            // each open with `// expected_slashed ($meta_key)` and then
+            // `wp_unslash($meta_key); wp_unslash($meta_value);`
+            // (wp-includes/meta.php:61-63, :218-222, :419-421, WP 7.1). Core's own REST
+            // meta layer therefore slashes at every one of its five call sites
+            // (class-wp-rest-meta-fields.php). Handing raw JSON straight in silently ate
+            // one backslash from every value that had one - `C:\Users\max` stored as
+            // `C:Usersmax`, `\d+` as `d+` - and, worse, turned a key `\_thumbnail_id`
+            // that passed the protected-key check into the protected row `_thumbnail_id`
+            // on the way to the database. The key check below refuses a backslash outright
+            // as well: two independent answers, because a future call site that forgets
+            // wp_slash() must not reopen that door.
+            $slashedKey = wp_slash($key);
+
             if ($value === null) {
-                delete_post_meta($id, $key);
+                delete_post_meta($id, $slashedKey);
             } elseif (is_scalar($value)) {
-                update_post_meta($id, $key, $value);
-            } elseif (is_array($value) && array_is_list($value)) {
+                update_post_meta($id, $slashedKey, wp_slash($value));
+            } elseif (is_array($value) && array_is_list($value) && $value !== array()) {
                 foreach ($value as $element) {
                     if (!is_scalar($element)) {
                         return new WP_Error(
                             'wpmcp_bad_arg',
-                            'value must be a JSON scalar, a flat list of scalars, or null.'
-                            . ' One element of the list is neither.'
+                            'value must be a JSON scalar, a non-empty flat list of scalars,'
+                            . ' or null. One element of the list is neither.'
                         );
                     }
                 }
                 // Replace, not append: delete every row first, then add one per element.
                 // update_post_meta() cannot express "these N rows" at all - it rewrites
                 // the first row and leaves the rest - so this is the only honest shape.
-                delete_post_meta($id, $key);
+                delete_post_meta($id, $slashedKey);
 
                 foreach ($value as $element) {
-                    add_post_meta($id, $key, $element, false);
+                    add_post_meta($id, $slashedKey, wp_slash($element), false);
                 }
             } else {
+                // AN EMPTY LIST AND AN EMPTY OBJECT ARE THE SAME THING HERE and both are
+                // refused. `json_decode($body, true)` turns `{}` into `[]`, and
+                // `array_is_list([])` is true, so `value: {}` used to take the list branch,
+                // delete every row and add none - an agent that sent an empty object
+                // meaning "an empty object" silently deleted the field. There is exactly
+                // one way to delete, and it is `null`.
                 return new WP_Error(
                     'wpmcp_bad_arg',
-                    'value must be a JSON scalar, a flat list of scalars, or null.'
-                    . ' An object is not one of those - post meta has no schema, so a'
-                    . ' nested structure would be stored as PHP-serialised text that only'
-                    . ' this site can read back.'
+                    'value must be a JSON scalar, a non-empty flat list of scalars, or'
+                    . ' null to delete the key. An object is not one of those - post meta'
+                    . ' has no schema, so a nested structure would be stored as'
+                    . ' PHP-serialised text that only this site can read back - and an'
+                    . ' empty list or object is not a value; send null to delete.'
                 );
             }
 
