@@ -1494,8 +1494,8 @@ function wpmcp_code_tools() {
                     'reason'   => $row->reason,
                     // A LOGIN AND NOT AN EMAIL. The only audience for this listing is a
                     // person deciding what to put back, an id tells them nothing, and no
-                    // other tool on this surface returns an address. '' is a user who has
-                    // since been deleted; 'system' is the upgrade sweep, which had none.
+                    // other tool on this surface returns an address. See
+                    // wpmcp_version_author_login() for the two values that are not logins.
                     'saved_by' => wpmcp_version_author_login((int) $row->saved_by),
                 );
             }

@@ -256,7 +256,7 @@ the same jail and denylist a caller's path goes through, versions the current co
 first (so a restore can itself be undone), applies the same parse check, and tells you
 whether the bytes it wrote match the stored hash. A deleted file comes back this way.
 
-Twenty versions are kept per path; the twenty-first write drops the oldest. Change that
+Twenty versions are kept per path; storing a twenty-first drops the oldest. Change that
 with the `wpmcp_file_versions_keep` filter. The table is dropped when the plugin is
 deleted.
 
