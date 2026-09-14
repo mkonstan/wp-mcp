@@ -40,18 +40,29 @@ jobs:
           done
           exit $status
 
-      - name: Guard - the PHP parse check is still wired into both writers
-        # WAS an occurrence count of the old backup-path helper, which is gone with the
-        # sibling files it guarded (schema revision 4 - the version table). The subject
-        # of this guard was never those files: it was the AUTO-REVERT, which they used
-        # to be half of. The marker that must not silently disappear is the parse check
-        # itself, and there are three of it - the definition, code-write, code-restore.
-        # A fourth writer of PHP without a parse check makes this red, which is the
-        # point.
+      - name: Guard - the parse check and the version-first rule are still wired in
+        # TWO MARKERS, because the tools make two promises and one count cannot hold
+        # both. The first WAS a count of the old backup-path helper, gone with the
+        # sibling files it guarded (schema revision 4 - the version table); its subject
+        # was never those files but the AUTO-REVERT, which they used to be half of.
+        #
+        #   wpmcp_php_parse_ok       x3  definition, code-write, code-restore
+        #   wpmcp_code_version_current x4  definition, code-write, code-delete,
+        #                                code-restore
+        #
+        # The second is the sprint-8 review's correction: the old guard's third site was
+        # code-delete, which the parse-check count does not reach (it deletes rather than
+        # writing PHP), so nothing was left guarding "every mutation versions first" -
+        # the promise the whole version table exists to keep. A new writer or deleter
+        # added without one of the two makes this red, which is the point.
         run: |
-          count=$(grep -c "wpmcp_php_parse_ok" tools.php)
-          echo "wpmcp_php_parse_ok occurrences: $count (expected 3)"
-          test "$count" -eq 3
+          parse=$(grep -c "wpmcp_php_parse_ok" tools.php)
+          echo "wpmcp_php_parse_ok occurrences: $parse (expected 3)"
+          test "$parse" -eq 3
+
+          versioned=$(grep -c "wpmcp_code_version_current" tools.php)
+          echo "wpmcp_code_version_current occurrences: $versioned (expected 4)"
+          test "$versioned" -eq 4
 
   phpunit-unit:
     name: PHPUnit unit (PHP ${{ matrix.php }})
@@ -202,7 +213,7 @@ jobs:
           zip -r wp-mcp.zip wp-mcp -x '*.bak' '*.log'
           cd ..
 
-      - name: GATE - extracted content matches source, lints clean, parse check wired
+      - name: GATE - extracted content matches source, lints clean, both guards wired
         run: |
           mkdir -p verify
           unzip -q dist/wp-mcp.zip -d verify
@@ -219,11 +230,15 @@ jobs:
           for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php $(ls src/*.php); do
             php -l "verify/wp-mcp/$f" || fail=1
           done
-          # The same marker the lint job guards, asserted on the EXTRACTED copy: the
-          # question here is whether what is about to be published is what was tested.
+          # The same two markers the lint job guards, asserted on the EXTRACTED copy:
+          # the question here is whether what is about to be published is what was
+          # tested.
           parse=$(grep -c "wpmcp_php_parse_ok" verify/wp-mcp/tools.php)
           echo "wpmcp_php_parse_ok in zip: $parse (expected 3)"
           test "$parse" -eq 3 || fail=1
+          versioned=$(grep -c "wpmcp_code_version_current" verify/wp-mcp/tools.php)
+          echo "wpmcp_code_version_current in zip: $versioned (expected 4)"
+          test "$versioned" -eq 4 || fail=1
           if [ "$fail" -ne 0 ]; then echo "GATE FAILED - not releasing"; exit 1; fi
           echo "GATE PASSED"
 

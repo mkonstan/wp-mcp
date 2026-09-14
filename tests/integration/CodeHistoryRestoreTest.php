@@ -27,8 +27,8 @@ namespace WpMcp\Tests\Integration;
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
 use WpMcp\Tests\Support\MuPlugin;
-use WpMcp\Tests\Support\ToolResult;
 use WpMcp\Tests\Support\WpCli;
+use WpMcp\Tests\Support\ToolResult;
 
 final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
 {
@@ -46,6 +46,13 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
     private static function deletedTarget(): string { return Fixtures::name('undelete') . '.css'; }
     private static function untouchedTarget(): string { return Fixtures::name('untouched') . '.css'; }
     private static function guardedTarget(): string { return Fixtures::name('guarded') . '.css'; }
+
+    /** Written through two spellings; one history is the claim. */
+    private static function spellingTarget(): string { return Fixtures::name('spelling') . '.css'; }
+
+    /** A row planted under a theme that is not the active one. */
+    private static function otherThemeTarget(): string { return Fixtures::name('othertheme') . '.css'; }
+    private static function otherThemeSlug(): string { return Fixtures::name('a-theme-that-is-not-active'); }
 
     /** A version id no row can have, for the "unknown id" case. */
     private const UNKNOWN_VERSION_ID = 2147483600;
@@ -98,6 +105,8 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
             self::deletedTarget(),
             self::untouchedTarget(),
             self::guardedTarget(),
+            self::spellingTarget(),
+            self::otherThemeTarget(),
         ] as $file) {
             Fixtures::deleteThemeFile($file);
         }
@@ -382,6 +391,138 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
                 . ' would pass with the check removed. Message: ' . $result->text
             );
         }
+    }
+
+
+    /**
+     * ONE FILE, ONE HISTORY, however the caller spelled it - end to end, over HTTP.
+     *
+     * `tests/unit/CodePathCanonicalTest.php` holds the rule at the jail. This holds the
+     * consequence the rule exists for: `rel` is the version table's key and the group the
+     * twenty-version cap counts within, so before it was canonicalised `./x.css` and
+     * `x.css` were two histories of one file with two caps, and `code-history x.css`
+     * after a `code-write ./x.css` came back empty.
+     *
+     * @group sprint-8
+     */
+    public function testTwoSpellingsOfOnePathShareOneHistory(): void
+    {
+        Fixtures::writeThemeFile(self::spellingTarget(), "/* wpmcp-test v0 */\n");
+
+        $mcp = $this->mcp(self::$adminToken);
+
+        foreach ([
+            ['./' . self::spellingTarget(), 'v1'],
+            [self::spellingTarget(), 'v2'],
+            ['.\\' . self::spellingTarget(), 'v3'],
+        ] as [$spelling, $body]) {
+            $written = $mcp->callTool('code-write', [
+                'path'    => $spelling,
+                'content' => "/* wpmcp-test {$body} */\n",
+            ]);
+
+            self::assertFalse($written->isError, "code-write {$spelling} failed: " . $written->text);
+            self::assertSame(
+                self::spellingTarget(),
+                $written->data()['path'],
+                "code-write reported the path as the caller spelled it ('{$spelling}')."
+                . ' That string is the version table key, so every spelling would get a'
+                . ' history of its own.'
+            );
+        }
+
+        // THREE VERSIONS IN ONE HISTORY, and the same three whichever spelling asks.
+        foreach ([self::spellingTarget(), './' . self::spellingTarget()] as $spelling) {
+            $history = $mcp->callTool('code-history', ['path' => $spelling]);
+
+            self::assertFalse($history->isError, 'code-history failed: ' . $history->text);
+
+            $versions = $history->data()['versions'];
+
+            self::assertCount(
+                3,
+                $versions,
+                "code-history '{$spelling}' returned " . count($versions) . ' versions,'
+                . ' not the three writes that happened to that one file.'
+            );
+            self::assertSame(
+                [
+                    hash('sha256', "/* wpmcp-test v2 */\n"),
+                    hash('sha256', "/* wpmcp-test v1 */\n"),
+                    hash('sha256', "/* wpmcp-test v0 */\n"),
+                ],
+                array_column($versions, 'sha256'),
+                "code-history '{$spelling}' does not return this file's three states."
+            );
+        }
+    }
+
+    /**
+     * A version taken from another theme is neither listed nor restorable.
+     *
+     * WHY IT MATTERS. The jail is "the active theme", so `style.css` names a different
+     * file once the theme changes. Without the theme on the row, `code-history style.css`
+     * listed the old theme's versions as though they were this theme's, and code-restore
+     * would write the old theme's bytes into the new theme's file under the same name.
+     *
+     * THE ROW IS PLANTED, NOT PRODUCED BY SWITCHING THE THEME. Switching the active theme
+     * on the site under test is not something this suite may do - on the stress site that
+     * is a real client's live theme. A `wp eval` that filters `stylesheet` for the length
+     * of one save writes exactly the row a theme switch would have left behind, and the
+     * filter dies with the process.
+     *
+     * @group sprint-8
+     */
+    public function testAVersionFromAnotherThemeIsNeitherListedNorRestorable(): void
+    {
+        Fixtures::writeThemeFile(self::otherThemeTarget(), "/* wpmcp-test live */\n");
+
+        $foreignId = (int) WpCli::evaluate(sprintf(
+            'add_filter("stylesheet", static function () { return %s; }, 99);'
+            . ' $id = wpmcp_file_version_save(%s, "/* wpmcp-test from another theme */", "write", 0, null);'
+            . ' echo $id === false ? "0" : (int) $id;',
+            self::phpString(self::otherThemeSlug()),
+            self::phpString(self::otherThemeTarget())
+        ));
+
+        self::assertGreaterThan(0, $foreignId, 'Could not plant a foreign-theme version row.');
+
+        $mcp = $this->mcp(self::$adminToken);
+
+        // NOT LISTED. The file exists and the path is right; only the theme differs.
+        $history = $mcp->callTool('code-history', ['path' => self::otherThemeTarget()]);
+
+        self::assertFalse($history->isError, 'code-history failed: ' . $history->text);
+        self::assertSame(
+            [],
+            $history->data()['versions'],
+            'code-history listed a version belonging to a theme that is not active. An'
+            . ' agent reading it would believe those are this theme\'s bytes.'
+        );
+
+        // NOT RESTORABLE, and refused for the RIGHT reason - the row plainly exists, so
+        // "no such version" would be a lie and "denied" would send the operator to the
+        // denylist.
+        $restored = $mcp->callTool('code-restore', ['version_id' => $foreignId]);
+
+        self::assertTrue($restored->isError, 'code-restore wrote another theme\'s bytes.');
+        self::assertStringContainsString(
+            self::otherThemeSlug(),
+            $restored->text,
+            'code-restore refused, but without naming the theme the version came from,'
+            . ' so this test would pass on any refusal at all. Message: ' . $restored->text
+        );
+
+        self::assertSame(
+            "/* wpmcp-test live */\n",
+            Fixtures::readThemeFile(self::otherThemeTarget()),
+            'The refused restore changed the file anyway.'
+        );
+    }
+
+    private static function phpString(string $value): string
+    {
+        return "'" . addcslashes($value, "'\\") . "'";
     }
 
     /** See WriteToolCapabilityTest: a filter, not the option, so two runners cannot race. */

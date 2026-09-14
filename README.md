@@ -235,8 +235,11 @@ that read and write files inside the active theme. The file API is fenced:
 
 - Confined to the active theme directory. `..` traversal and symlinks pointing out are
   rejected on read, write and delete.
+- **One file has one spelling.** Every path is resolved to its canonical form before
+  anything acts on it, so `./inc/x.php`, `inc//x.php` and `inc/x.php` are the same file to
+  the denylist, to the history and to the retention cap.
 - A configurable denylist (default `functions.php`, `index.php`, `inc/`, `includes/`,
-  `lib/`) is never read or written.
+  `lib/`) is never read or written, under any spelling.
 - Text extensions only, size-capped per write at 512 KB.
 - **Every change is versioned into the database first.** Before `code-write` overwrites a
   file or `code-delete` removes one, the bytes that are there go into
@@ -256,17 +259,35 @@ the same jail and denylist a caller's path goes through, versions the current co
 first (so a restore can itself be undone), applies the same parse check, and tells you
 whether the bytes it wrote match the stored hash. A deleted file comes back this way.
 
-Twenty versions are kept per path; storing a twenty-first drops the oldest. Change that
-with the `wpmcp_file_versions_keep` filter. The table is dropped when the plugin is
-deleted.
+Every version records **which theme it was taken from**. The code tools' jail is the
+active theme, so `style.css` is a different file once you switch themes: `code-history`
+lists only the active theme's versions, and `code-restore` refuses a version belonging to
+another theme and names it. Switch back to that theme to restore it.
+
+Twenty versions are kept per theme and path; storing a twenty-first drops the oldest.
+Change that with the `wpmcp_file_versions_keep` filter. The table is dropped when the
+plugin is deleted.
 
 **Upgrading from 1.0.x.** Earlier versions backed a file up by writing a copy of it beside
 the original inside the active theme. That copy is under your document root with an
 extension nothing executes and nothing blocks, so its URL served the complete source of a
 theme file to anybody who asked for it. Schema revision 4 walks the active theme on the
-first request after the upgrade, moves every one of those files into the versions table,
-and deletes it. It runs whether or not code editing is switched on, and running it twice
-does nothing the second time.
+first request after the upgrade, moves those files into the versions table and deletes
+them. It runs whether or not code editing is switched on, and running it twice does
+nothing the second time.
+
+It takes only what the code tools could give back: the original name (the one without the
+backup extension) has to be a text extension this plugin writes, and the file has to be
+inside the 512 KB cap. **Anything else is left exactly where it is** - including a backup
+larger than the cap, and one that cannot be read. The upgrade writes a single line to your
+PHP error log naming what it moved and what it left, so check it once after upgrading and
+deal with anything still on disk yourself: those files are still being served.
+
+One case is worth knowing about. A backup of `functions.php` **is** collected - `.php` is
+a text extension - but `functions.php` itself is on the default denylist, so
+`code-restore` will refuse to write it back. The bytes are in the table and the log line
+gives the version id. Leaving the complete source of your theme's functions file readable
+over HTTP is the worse of the two options.
 
 What that fence does and does not cover is in [SECURITY.md](SECURITY.md). Read it before
 enabling this: an admin token with code editing on can run PHP on your server.

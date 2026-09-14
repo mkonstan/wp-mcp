@@ -25,12 +25,39 @@ final class WordPressRuntime
     {
         require_once __DIR__ . '/wp-runtime-stubs.php';
 
-        $GLOBALS['wpmcp_test_wp'] = ['current_user_id' => 0, 'users' => [], 'caps' => [], 'actions' => []];
+        $GLOBALS['wpmcp_test_wp'] = [
+            'current_user_id' => 0,
+            'users'           => [],
+            'caps'            => [],
+            'actions'         => [],
+            'options'         => [],
+            'stylesheet_dir'  => '',
+            'stylesheet'      => '',
+        ];
 
         $wpdb = new FakeWpdb();
         $GLOBALS['wpdb'] = $wpdb;
 
         return $wpdb;
+    }
+
+    /** Make get_option($name) return $value. Anything else keeps the caller's default. */
+    public static function setOption(string $name, $value): void
+    {
+        $GLOBALS['wpmcp_test_wp']['options'][$name] = $value;
+    }
+
+    /**
+     * Point the code tools' jail at $directory and name the active theme $slug.
+     *
+     * The directory is a real one the test built, because the jail is realpath() and
+     * is_link() and file_exists() - every one of which answers about the filesystem and
+     * cannot be faked by a return value.
+     */
+    public static function setTheme(string $directory, string $slug = 'wpmcp-test-theme'): void
+    {
+        $GLOBALS['wpmcp_test_wp']['stylesheet_dir'] = $directory;
+        $GLOBALS['wpmcp_test_wp']['stylesheet']     = $slug;
     }
 
     /** Make get_userdata($id) return a user. */

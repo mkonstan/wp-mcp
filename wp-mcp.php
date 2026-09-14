@@ -145,8 +145,18 @@ function wpmcp_activate() {
  * Hooked on plugins_loaded rather than admin_init because an MCP call is a REST
  * request: it can easily be the first thing that touches the site after an update,
  * and it must not run against a table that is missing user_id.
+ *
+ * PRIORITY 11, AND THE NUMBER IS LOAD-BEARING. The default auth-event listener is
+ * attached by another plugins_loaded callback at priority 10 (see
+ * wpmcp_attach_default_auth_log), and at the same priority registration order decides -
+ * this file registers the upgrade first, so the upgrade used to run while nothing was
+ * listening. Measured by the sprint-8 review on sample: a single front-end request that
+ * performed the revision-4 upgrade and swept a planted backup file added ZERO lines to
+ * the log, while a 401 in the very next request added one. The only report the operator
+ * gets of what the sweep took was being thrown away on the path almost every upgrade
+ * takes. Nothing in the plugin reads the database between priority 10 and 11.
  */
-add_action('plugins_loaded', 'wpmcp_maybe_upgrade');
+add_action('plugins_loaded', 'wpmcp_maybe_upgrade', 11);
 function wpmcp_maybe_upgrade() {
     if ((int) get_option(WPMCP_DB_VER_OPTION, 1) >= WPMCP_DB_VER) { return; }
     wpmcp_install();
@@ -190,6 +200,14 @@ function wpmcp_install() {
     // Revision 4's table. One `path` may hold many versions, and the only question ever
     // asked of it is "the versions of this path, newest first", so that pair is the key.
     //
+    // `theme` IS THE STYLESHEET SLUG THAT WAS ACTIVE WHEN THE ROW WAS WRITTEN, and it is
+    // not decoration: the code tools' jail is "the active theme", so `style.css` names a
+    // different file on Monday and Tuesday if the theme changed in between. Without it
+    // code-history listed the old theme's versions of `style.css` as though they were
+    // this theme's, and code-restore wrote the old theme's bytes into the new theme's
+    // file - recoverable, because the write is versioned first, but nothing said a word.
+    // Every read is scoped by it and code-restore refuses a row that belongs elsewhere.
+    //
     // `content` is a LONGBLOB and not a TEXT column on purpose: a theme file is bytes,
     // not characters. A BLOB column also makes $wpdb treat the whole table as binary, so
     // it never runs its invalid-text stripper over a value on the way in.
@@ -201,6 +219,7 @@ function wpmcp_install() {
     // modern MySQL creates but plenty of older sites still carry.
     $versions = "CREATE TABLE " . $wpdb->prefix . WPMCP_VERSIONS_TABLE . " (
   id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  theme varchar(191) NOT NULL DEFAULT '',
   path varchar(255) NOT NULL DEFAULT '',
   content longblob NOT NULL,
   size int(10) unsigned NOT NULL DEFAULT 0,
@@ -240,6 +259,11 @@ function wpmcp_install() {
     // and the next request tries again.
     if (!wpmcp_versions_table_exists()) { return false; }
 
+    // And the column that scopes every read of it. Same reasoning as the three token
+    // columns above: without it `SELECT ... WHERE theme = %s` is an error, so the code
+    // tools are dead rather than merely narrower. Fail closed and retryable.
+    if (!wpmcp_versions_column_exists('theme')) { return false; }
+
     // Only now, with somewhere to put them, are the stale sibling backups collected. It
     // does not gate the stamp - see wpmcp_migrate_sweep_stale_backups() for why.
     wpmcp_migrate_sweep_stale_backups();
@@ -272,6 +296,22 @@ function wpmcp_versions_table_exists() {
     $table = wpmcp_versions_table();
     $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
     return $found === $table;
+}
+
+/**
+ * Does the file-versions table really have this column?
+ *
+ * A SECOND FUNCTION RATHER THAN A TABLE ARGUMENT on the token one, because the two
+ * tables are checked for different reasons at different points and the token version's
+ * name says which table it means at every call site.
+ */
+function wpmcp_versions_column_exists($column) {
+    global $wpdb;
+    $found = $wpdb->get_col($wpdb->prepare(
+        'SHOW COLUMNS FROM ' . wpmcp_versions_table() . ' LIKE %s',
+        $column
+    ));
+    return is_array($found) && $found !== array();
 }
 
 /** Does the tokens table really have this column? The upgrade gate, not decoration. */
@@ -360,24 +400,52 @@ function wpmcp_migrate_drop_address_column() {
  * find them.
  *
  * IDEMPOTENT because it is driven entirely by what is on disk: the second run walks the
- * same tree, finds nothing ending in the old suffix, and inserts nothing. wpmcp_install()
+ * same tree, finds nothing it is willing to take, and inserts nothing. wpmcp_install()
  * calls every migration on every schema bump for the rest of the plugin's life.
+ *
+ * IT TAKES ONLY WHAT THE CODE TOOLS COULD GIVE BACK, which is the correction the sprint-8
+ * review earned. The walker finds every name ending `.bak`, case-insensitively, and the
+ * old code moved all of them - including files this plugin never wrote. `README.BAK` was
+ * stored under `README` and `config.bak` under `config`, and code-restore then refuses
+ * both at the extension allow-list; the bytes were reachable only through SQL. So the
+ * ORIGINAL path (the name without the suffix) must pass wpmcp_code_ext_ok(), and the file
+ * must be inside the same 512KB cap code-write enforces. Anything else is LEFT WHERE IT
+ * IS and named in the report: a file this plugin cannot hand back is not a file it should
+ * be taking, and an operator who can see the name can move it themselves.
+ *
+ * (`functions.php.bak` is taken - `.php` is an allowed extension - and code-restore will
+ * then refuse it, because `functions.php` is on the default denylist. That is deliberate
+ * and the report says so: leaving the complete source of the theme's functions file
+ * readable over HTTP is worse than storing it somewhere only an administrator can reach.)
  *
  * IT DOES NOT GATE THE SCHEMA STAMP, for the same reason the column drop does not: the
  * plugin is correct without it. A theme directory the web server owns and PHP may not
  * write is a real hosting shape, and a site that cannot remove the files is still fully
  * upgraded - refusing to stamp would put it in a dbDelta-per-request loop forever. What
- * it does instead is say so once, with a count.
+ * it does instead is say so once, with the counts AND the paths, through
+ * wpmcp_auth_event() - see the priority note on wpmcp_maybe_upgrade for why that line
+ * reaches the log at all.
  *
  * SYMLINKS ARE NOT FOLLOWED, at either level: a linked directory is not descended into
  * and a linked file is not read or removed. The jail the code tools enforce on a caller's
  * path is the same rule, and a migration walking a tree unattended is not the place to
  * relax it.
  *
- * @return array{found:int,stored:int,removed:int,skipped:int}
+ * @return array{found:int,moved:int,skipped_extension:int,skipped_unreadable:int,
+ *               skipped_too_big:int,skipped_undeletable:int,skipped_paths:list<string>,
+ *               moved_paths:list<string>}
  */
 function wpmcp_migrate_sweep_stale_backups() {
-    $tally = array('found' => 0, 'stored' => 0, 'removed' => 0, 'skipped' => 0);
+    $tally = array(
+        'found'               => 0,
+        'moved'               => 0,
+        'skipped_extension'   => 0,
+        'skipped_unreadable'  => 0,
+        'skipped_too_big'     => 0,
+        'skipped_undeletable' => 0,
+        'skipped_paths'       => array(),
+        'moved_paths'         => array(),
+    );
 
     if (!function_exists('wpmcp_code_root')) { return $tally; }
 
@@ -395,38 +463,86 @@ function wpmcp_migrate_sweep_stale_backups() {
     $tally['found'] = count($stale);
 
     foreach ($stale as $abs) {
-        $rel = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
+        $found = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
         // The original path: the same name without the suffix the old code appended.
-        $rel = substr($rel, 0, -strlen($suffix));
+        $rel = substr($found, 0, -strlen($suffix));
+
+        // The same allow-list code-write applies, on the ORIGINAL name. A file whose
+        // original this plugin could never write is a file it could never give back.
+        if (!wpmcp_code_ext_ok($rel)) {
+            $tally['skipped_extension']++;
+            $tally['skipped_paths'][] = $found . ' (not a text extension this plugin writes)';
+            continue;
+        }
 
         $content = @file_get_contents($abs);
 
-        if ($content === false || strlen($content) > wpmcp_version_max_bytes()) {
-            $tally['skipped']++;
+        if ($content === false) {
+            $tally['skipped_unreadable']++;
+            $tally['skipped_paths'][] = $found . ' (could not be read)';
+            continue;
+        }
+
+        if (strlen($content) > wpmcp_version_max_bytes()) {
+            $tally['skipped_too_big']++;
+            $tally['skipped_paths'][] = $found . ' (' . strlen($content) . ' bytes, over the 512KB cap)';
             continue;
         }
 
         // saved_by 0 and token_id NULL: nobody did this, the upgrade did.
-        if (wpmcp_file_version_save($rel, $content, 'sweep', 0, null) === false) {
-            $tally['skipped']++;
+        $id = wpmcp_file_version_save($rel, $content, 'sweep', 0, null);
+
+        if ($id === false) {
+            $tally['skipped_unreadable']++;
+            $tally['skipped_paths'][] = $found . ' (could not be stored)';
             continue;
         }
 
-        $tally['stored']++;
+        if (!@unlink($abs)) {
+            $tally['skipped_undeletable']++;
+            $tally['skipped_paths'][] = $found . ' (stored as version ' . $id . ' but could not be deleted)';
+            continue;
+        }
 
-        if (@unlink($abs)) { $tally['removed']++; } else { $tally['skipped']++; }
+        $tally['moved']++;
+        $tally['moved_paths'][] = $rel . ' (version ' . $id . ')';
     }
 
     if ($tally['found'] > 0) {
+        // THE PATHS, NOT JUST THE COUNTS. This is the only notice anybody gets that a
+        // file left their theme directory, and "3 files were collected" does not let an
+        // operator check whether one of them was theirs. Both lists are bounded because
+        // the log line is a log line; the table has the rest.
         wpmcp_auth_event('stale_backup_sweep', array(
-            'found'   => $tally['found'],
-            'stored'  => $tally['stored'],
-            'removed' => $tally['removed'],
-            'skipped' => $tally['skipped'],
+            'found'               => $tally['found'],
+            'moved'               => $tally['moved'],
+            'skipped_extension'   => $tally['skipped_extension'],
+            'skipped_unreadable'  => $tally['skipped_unreadable'],
+            'skipped_too_big'     => $tally['skipped_too_big'],
+            'skipped_undeletable' => $tally['skipped_undeletable'],
+            'moved_paths'         => wpmcp_sweep_path_sample($tally['moved_paths']),
+            'skipped_paths'       => wpmcp_sweep_path_sample($tally['skipped_paths']),
         ));
     }
 
     return $tally;
+}
+
+/**
+ * At most WPMCP_SWEEP_PATHS_LOGGED entries, with a count of what was left out.
+ *
+ * A theme with two hundred stale backups in it would otherwise put two hundred paths on
+ * one log line, and wpmcp_format_auth_event() would truncate the whole thing mid-path -
+ * which is worse than an honest "and 180 more", because a half-written path reads like a
+ * complete one.
+ */
+function wpmcp_sweep_path_sample(array $paths) {
+    if (count($paths) <= WPMCP_SWEEP_PATHS_LOGGED) { return $paths; }
+
+    $shown = array_slice($paths, 0, WPMCP_SWEEP_PATHS_LOGGED);
+    $shown[] = 'and ' . (count($paths) - WPMCP_SWEEP_PATHS_LOGGED) . ' more';
+
+    return $shown;
 }
 
 /**
@@ -555,6 +671,12 @@ function wpmcp_versions_table() {
     return $wpdb->prefix . WPMCP_VERSIONS_TABLE;
 }
 
+/**
+ * How many paths the sweep's one log line names before it says "and N more". The line
+ * has to be readable; the table holds everything it took.
+ */
+define('WPMCP_SWEEP_PATHS_LOGGED', 25);
+
 /** The largest file the store will take: the same 512KB cap code-write enforces. */
 function wpmcp_version_max_bytes() {
     return 524288;
@@ -593,7 +715,8 @@ function wpmcp_file_versions_keep() {
  * literal has no charset and cannot be misread; the cost is that the statement is twice
  * the size of the file, which at half a megabyte is nothing.
  *
- * @param string   $rel      path relative to the code root, as the tools spell it
+ * @param string   $rel      path relative to the code root, canonical (see
+ *                           wpmcp_code_resolve(): one file has one spelling)
  * @param string   $content  the bytes as they are on disk right now
  * @param string   $reason   write | delete | restore | sweep
  * @param int|null $userId   who caused it; null = the current user, 0 = nobody (the sweep)
@@ -606,6 +729,11 @@ function wpmcp_file_version_save($rel, $content, $reason, $userId = null, $token
     $content = (string) $content;
     if (strlen($content) > wpmcp_version_max_bytes()) { return false; }
 
+    // The theme this path is relative to, recorded at save time. Read once and used for
+    // both the insert and the prune, so a theme switch in between cannot make the row go
+    // into one group and be counted against another.
+    $theme = (string) get_stylesheet();
+
     if ($userId === null) { $userId = get_current_user_id(); }
     if ($tokenId === null) {
         $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
@@ -617,11 +745,12 @@ function wpmcp_file_version_save($rel, $content, $reason, $userId = null, $token
     // placeholder says - and '' in a bigint column is 0, which is a real token's id.
     // "No token was involved" and "token 0" must not be the same row.
     $sql = 'INSERT INTO ' . wpmcp_versions_table()
-        . ' (path, content, size, sha256, reason, saved_by, token_id, saved_at)'
-        . ' VALUES (%s, UNHEX(%s), %d, %s, %s, %d, '
+        . ' (theme, path, content, size, sha256, reason, saved_by, token_id, saved_at)'
+        . ' VALUES (%s, %s, UNHEX(%s), %d, %s, %s, %d, '
         . ($tokenId === null ? 'NULL' : '%d') . ', %s)';
 
     $args = array(
+        $theme,
         (string) $rel,
         bin2hex($content),
         strlen($content),
@@ -639,13 +768,18 @@ function wpmcp_file_version_save($rel, $content, $reason, $userId = null, $token
     if ($ok === false) { return false; }
 
     $id = (int) $wpdb->insert_id;
-    wpmcp_file_versions_prune($rel);
+    wpmcp_file_versions_prune($rel, $theme);
 
     return $id;
 }
 
 /**
- * Drop everything past the newest wpmcp_file_versions_keep() rows for one path.
+ * Drop everything past the newest wpmcp_file_versions_keep() rows for one path in one
+ * theme.
+ *
+ * SCOPED BY THEME as well as path, and it has to be: the cap is per file, and `style.css`
+ * in two themes is two files. Pruning on path alone would let a busy theme delete a
+ * dormant one's only copy of a same-named file.
  *
  * ORDERED BY saved_at AND THEN id, both here and in code-history, because saved_at has
  * one-second resolution and a agent editing a file writes several versions inside one
@@ -653,13 +787,14 @@ function wpmcp_file_version_save($rel, $content, $reason, $userId = null, $token
  * returning last, so the wrong version could be the one deleted - and the listing and
  * the pruner could disagree about which rows exist.
  */
-function wpmcp_file_versions_prune($rel) {
+function wpmcp_file_versions_prune($rel, $theme) {
     global $wpdb;
 
     $doomed = $wpdb->get_col($wpdb->prepare(
         'SELECT id FROM ' . wpmcp_versions_table()
-        . ' WHERE path = %s ORDER BY saved_at DESC, id DESC LIMIT %d, 4294967295',
+        . ' WHERE path = %s AND theme = %s ORDER BY saved_at DESC, id DESC LIMIT %d, 4294967295',
         (string) $rel,
+        (string) $theme,
         wpmcp_file_versions_keep()
     ));
 
@@ -676,7 +811,7 @@ function wpmcp_file_version_get($id) {
     global $wpdb;
 
     $row = $wpdb->get_row($wpdb->prepare(
-        'SELECT id, path, content, size, sha256, reason, saved_by, token_id, saved_at'
+        'SELECT id, theme, path, content, size, sha256, reason, saved_by, token_id, saved_at'
         . ' FROM ' . wpmcp_versions_table() . ' WHERE id = %d',
         (int) $id
     ));
@@ -685,8 +820,12 @@ function wpmcp_file_version_get($id) {
 }
 
 /**
- * Every stored version of one path, newest first. Without `content`: a listing is a
- * table of contents, and the bodies are up to half a megabyte each.
+ * Every stored version of one path IN THE ACTIVE THEME, newest first. Without `content`:
+ * a listing is a table of contents, and the bodies are up to half a megabyte each.
+ *
+ * The theme scope is the point of the column: `style.css` is a different file in a
+ * different theme, and a listing that mixed them would offer an agent an undo that
+ * silently replaces this theme's file with another theme's bytes.
  *
  * @return array list of row objects
  */
@@ -694,10 +833,11 @@ function wpmcp_file_versions_for($rel, $limit = 50) {
     global $wpdb;
 
     $rows = $wpdb->get_results($wpdb->prepare(
-        'SELECT id, path, size, sha256, reason, saved_by, token_id, saved_at'
+        'SELECT id, theme, path, size, sha256, reason, saved_by, token_id, saved_at'
         . ' FROM ' . wpmcp_versions_table()
-        . ' WHERE path = %s ORDER BY saved_at DESC, id DESC LIMIT %d',
+        . ' WHERE path = %s AND theme = %s ORDER BY saved_at DESC, id DESC LIMIT %d',
         (string) $rel,
+        (string) get_stylesheet(),
         (int) $limit
     ));
 
@@ -887,6 +1027,8 @@ function wpmcp_log_auth_event($type, $context) {
  */
 add_action('plugins_loaded', 'wpmcp_attach_default_auth_log');
 function wpmcp_attach_default_auth_log() {
+    // Priority 10 here and 11 on wpmcp_maybe_upgrade is what puts the schema upgrade's
+    // own events - the stale-backup sweep above all - inside earshot of this listener.
     add_action('wpmcp_auth_event', 'wpmcp_log_auth_event', 10, 2);
 }
 

@@ -128,6 +128,31 @@ function wpmcp_path_within($abs, $root) {
  * Resolve a user path inside the theme jail.
  * Returns array('ok'=>true,'abs'=>..,'rel'=>..) or array('ok'=>false,'error'=>..).
  * $mustExist true = file must already exist; false = only parent must be in jail.
+ *
+ * `rel` IS DERIVED FROM THE RESOLVED ABSOLUTE PATH, NOT FROM WHAT THE CALLER TYPED, and
+ * that is the whole of two defects at once.
+ *
+ * THE DENYLIST BYPASS. `wpmcp_code_denied()` matches a directory rule by prefix -
+ * `inc/` blocks anything starting `inc/`. This function used to hand it the caller's own
+ * spelling with nothing but a `..` and an absolute-path check applied, so `./inc/x.php`
+ * did not start with `inc/` and walked straight past the rule, while `inc/x.php` and
+ * `inc/./x.php` were both refused. Measured on jaygroup's live theme by the sprint-8
+ * review: `code-target('inc/ajax.php')` refused, `code-target('./inc/ajax.php')` allowed.
+ * The bare-filename rules (`functions.php`) were never affected, because those match on
+ * basename. Every code tool goes through here, so one canonical spelling closes it for
+ * all six rather than teaching the denylist about prefixes it might meet.
+ *
+ * THE SPELLING AS A DATABASE KEY. From sprint 8 `rel` is also the `path` column of the
+ * version table and the key `code-history` and the retention cap group by. The caller's
+ * raw string made `./style.css`, `style.css` and `style.//css` three histories of one
+ * file, each with its own cap of twenty, and the upgrade sweep - which keys on the
+ * on-disk name - a fourth. Deriving from the resolved path means one file has one
+ * history however the caller spells it.
+ *
+ * Both `abs` branches below are already canonical: `realpath()` of the target when it
+ * must exist, and `realpath()` of the parent plus the basename when it need not. So the
+ * derivation is a substring, not a second parser - and there is no second set of rules
+ * for a reviewer to check against the first.
  */
 function wpmcp_code_resolve($path, $mustExist) {
     $root = wpmcp_code_root();
@@ -169,6 +194,17 @@ function wpmcp_code_resolve($path, $mustExist) {
     if (!wpmcp_path_within($abs, $root)) {
         return array('ok' => false, 'error' => 'Path escapes the theme directory.');
     }
+
+    // THE CANONICAL SPELLING, and from here on the only one. See the docblock.
+    $rel = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
+
+    // Empty means the caller named the theme directory itself - `.`, `/`, `./`. There is
+    // no file there to read, write, delete or version, and an empty `path` column would
+    // be a version row belonging to nothing.
+    if ($rel === '') {
+        return array('ok' => false, 'error' => 'Path must name a file inside the theme, not the theme directory.');
+    }
+
     return array('ok' => true, 'abs' => $abs, 'rel' => $rel);
 }
 
@@ -1525,6 +1561,20 @@ function wpmcp_code_tools() {
 
             $row = wpmcp_file_version_get(isset($a['version_id']) ? (int) $a['version_id'] : 0);
             if (!$row) { return new WP_Error('wpmcp_not_found', 'No such version. Call code-history for the ids of a path.'); }
+
+            // A VERSION BELONGS TO THE THEME IT WAS TAKEN FROM. The jail is "the active
+            // theme", so the row's `path` means a different file once the theme changes -
+            // and restoring it would write one theme's bytes into another theme's file
+            // under the same name. Refused, and the message says which theme it wants,
+            // because "no such version" would be a lie about a row that plainly exists.
+            $theme = (string) get_stylesheet();
+            if ((string) $row->theme !== $theme) {
+                return new WP_Error(
+                    'wpmcp_other_theme',
+                    'That version was taken from the theme "' . $row->theme . '", and the active theme is "'
+                    . $theme . '". Switch to that theme to restore it.'
+                );
+            }
 
             // THE STORED PATH GOES THROUGH THE SAME JAIL AND DENYLIST AS A CALLER'S,
             // rather than being trusted because this server wrote it. A row is a value in

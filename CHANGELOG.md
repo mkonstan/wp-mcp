@@ -36,6 +36,29 @@ admin can renew them for thirty days from when they were minted - see below.
   `code-delete` now return an error rather than touching a file they could not back up
   first. The PHP parse-error revert writes back the bytes it just versioned, from memory.
 - `code-delete`'s `backup` return field is gone; both writers return `version_id` instead.
+- **The sweep takes only what the tools could give back.** A backup whose original name is
+  not a text extension this plugin writes, or that is over the 512 KB cap, or that cannot
+  be read, is left exactly where it is and named in the log line - a file `code-restore`
+  would refuse is a file the upgrade should not have taken. The report names every path it
+  moved and every path it left, and it now fires late enough on `plugins_loaded` for the
+  plugin's own log listener to hear it; before, on the path almost every upgrade takes, it
+  went nowhere at all.
+
+### Fixed: a leading `./` walked past the code-editing denylist
+
+- `code-read`, `code-write`, `code-delete` and the new tools resolved a caller's path but
+  matched the denylist against the caller's **spelling**, so `./inc/x.php` was allowed
+  where `inc/x.php` was refused. Directory rules (`inc/`, `includes/`, `lib/`) were
+  affected; bare-filename rules (`functions.php`) were not, because those match on
+  basename. Measured on a live theme by review. Every path is now canonicalised from its
+  resolved location before anything acts on it.
+- The same fix ends a second defect that arrived with the version table: the spelling was
+  its lookup key, so `./style.css` and `style.css` had separate histories and separate
+  retention caps, and `code-history style.css` after a `code-write ./style.css` returned
+  nothing.
+- **Versions record their theme.** The jail is the active theme, so `style.css` is a
+  different file after a theme switch. `code-history` lists only the active theme's
+  versions and `code-restore` refuses one belonging to another theme, naming it.
 
 ### New: `code-history` and `code-restore`
 

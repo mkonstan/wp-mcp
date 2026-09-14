@@ -160,9 +160,12 @@ the active theme, with path resolution and symlink checks on every operation, a 
 a text-extension and size cap, and a parse check that reverts a PHP file whose new content
 does not compile.
 
+Every path is canonicalised from its resolved location before the denylist, the extension
+check or the version table sees it, so one file has one spelling and one history.
+
 Every change is versioned first. Before a file is overwritten or removed, the bytes that
-are there go into a second table, `{prefix}wpmcp_file_versions`, and if they cannot be
-stored the change does not happen; `code-history` lists what is kept for a path and
+are there go into a second table, `{prefix}wpmcp_file_versions`, keyed by the active
+theme and that canonical path, and if they cannot be stored the change does not happen; `code-history` lists what is kept for a path and
 `code-restore` writes one back. A TABLE and not a file, because the active theme is inside
 the document root: the sibling backup this used to write had an extension nothing executes
 and nothing blocks, so its URL returned the complete source of a theme file to anyone who

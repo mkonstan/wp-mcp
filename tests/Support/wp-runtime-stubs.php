@@ -30,6 +30,18 @@
  * ADDED FOR SPRINT 2 (auth events). wpmcp_mint() now fires one, which reaches
  * do_action through wpmcp_auth_event() and apply_filters through wpmcp_client_ip().
  * do_action RECORDS rather than ignoring, because "the event fired" is the claim.
+ *
+ * ADDED FOR SPRINT 8 ROUND 2 (the path jail). wpmcp_code_resolve() is the first plugin
+ * function a unit test drives against the FILESYSTEM, and it needs exactly two more
+ * things: get_stylesheet_directory() to say where the jail is, and get_option() for the
+ * denylist. Both are backed by $GLOBALS['wpmcp_test_wp'] like everything else here, and
+ * a unit test points the first at a scratch directory it built itself - which is what
+ * lets "a denied directory reached through ./ is still denied" be a two-millisecond
+ * assertion over the real function rather than a live-site probe.
+ *
+ *   options          array<string, mixed>  what get_option() returns, by name
+ *   stylesheet_dir   string                what get_stylesheet_directory() returns
+ *   stylesheet       string                what get_stylesheet() returns
  */
 
 if (!isset($GLOBALS['wpmcp_test_wp'])) {
@@ -184,6 +196,37 @@ if (!function_exists('sanitize_text_field')) {
     function sanitize_text_field($str)
     {
         return trim(strip_tags((string) $str));
+    }
+}
+
+if (!function_exists('get_option')) {
+    /**
+     * Only what the test set, and the caller's default otherwise. Deliberately NOT a
+     * store that remembers writes: nothing in the unit tier calls update_option, and a
+     * stub that pretended to persist would make a test of the real option pass without
+     * one.
+     */
+    function get_option($option, $default = false)
+    {
+        $options = $GLOBALS['wpmcp_test_wp']['options'] ?? array();
+
+        return array_key_exists($option, $options) ? $options[$option] : $default;
+    }
+}
+
+if (!function_exists('get_stylesheet_directory')) {
+    /** The jail's root. A unit test points it at a scratch directory it built. */
+    function get_stylesheet_directory()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['stylesheet_dir'] ?? '');
+    }
+}
+
+if (!function_exists('get_stylesheet')) {
+    /** The active theme's slug, which sprint 8 writes into every version row. */
+    function get_stylesheet()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['stylesheet'] ?? '');
     }
 }
 

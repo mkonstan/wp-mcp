@@ -187,8 +187,9 @@ replaced first - so the restore can itself be undone - parse-checks PHP, and rev
 the restore would leave a syntax error. A file `code-delete` removed comes back the same
 way; its version is the last one in the list.
 
-Twenty versions are kept per file. Nothing is written next to the file in your theme, and
-the table goes when the plugin is deleted.
+Twenty versions are kept per file, per theme - a version knows which theme it was taken
+from, and `code-restore` refuses one from a theme that is not the active one. Nothing is
+written next to the file in your theme, and the table goes when the plugin is deleted.
 
 Write tools are not greyed out for a read token. They are not in the list at all, so the
 list you see is already what the token may do.
