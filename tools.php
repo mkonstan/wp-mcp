@@ -1368,6 +1368,14 @@ function wpmcp_code_tools() {
             if ($abs === false || !wpmcp_path_within($abs, $root) || !is_dir($abs)) {
                 return new WP_Error('wpmcp_not_found', 'No such directory.');
             }
+            // THE CANONICAL PREFIX, from the resolved directory and not from what the
+            // caller typed - the same derivation wpmcp_code_resolve() makes, for the same
+            // reason. `blocked` is a denylist answer, and the denylist matches a directory
+            // rule by prefix: listing `./inc` and asking about `./inc/x.php` said
+            // blocked=false for files code-read then refused. A label that disagrees with
+            // the gate it describes is worse than no label, because an agent believes it.
+            $rel = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
+
             $entries = array();
             foreach (scandir($abs) as $name) {
                 if ($name === '.' || $name === '..') { continue; }

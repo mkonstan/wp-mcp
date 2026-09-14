@@ -22,12 +22,13 @@ admin can renew them for thirty days from when they were minted - see below.
   the URL returned the complete source of a theme file to anybody who guessed it. It was
   also a backup of exactly one generation: the next write overwrote the only copy.
 - **Previous contents now go into a table**, `{prefix}wpmcp_file_versions`, which is the
-  one store WordPress never serves. Schema revision 4 creates it. Each row holds the
+  one store WordPress never serves. Schema revision 4 creates it and revision 5 adds the
+  `theme` column below. Each row holds the
   path, the bytes, the size, a SHA-256, why it was stored, who caused it and which token
   they were using. Twenty versions are kept per path - change that with the new
   `wpmcp_file_versions_keep` filter - and the table is dropped when the plugin is deleted.
 - **The upgrade collects what is already on disk.** On the first request after the plugin
-  files change, revision 4 walks the active theme for the old sibling backups, stores each
+  files change, the upgrade walks the active theme for the old sibling backups, stores each
   one under its original path with reason `sweep`, and deletes it. It follows no symlinks,
   it does not touch the live file next to a backup, it does not recreate a file whose
   deletion was deliberate, and running it again does nothing. It runs whether or not code

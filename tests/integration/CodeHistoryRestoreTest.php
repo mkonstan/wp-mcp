@@ -54,6 +54,17 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
     private static function otherThemeTarget(): string { return Fixtures::name('othertheme') . '.css'; }
     private static function otherThemeSlug(): string { return Fixtures::name('a-theme-that-is-not-active'); }
 
+    /**
+     * A directory of OUR OWN added to the denylist for this run, and a file in it.
+     *
+     * The shipped denylist names `inc/`, and jaygroup's active theme really has one - a
+     * real client's `inc/ajax.php` and friends. This suite does not read, list or write
+     * anything that was already in a theme, so the denylist gets a prefixed entry and the
+     * listing is done over a prefixed directory this run created.
+     */
+    private static function deniedDir(): string { return Fixtures::name('denied-dir'); }
+    private static function deniedFile(): string { return self::deniedDir() . '/' . Fixtures::name('inner') . '.php'; }
+
     /** A version id no row can have, for the "unknown id" case. */
     private const UNKNOWN_VERSION_ID = 2147483600;
 
@@ -107,9 +118,13 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
             self::guardedTarget(),
             self::spellingTarget(),
             self::otherThemeTarget(),
+            self::deniedFile(),
         ] as $file) {
             Fixtures::deleteThemeFile($file);
         }
+
+        // After its contents: rmdir only takes an empty directory.
+        Fixtures::deleteThemeDir(self::deniedDir());
 
         Fixtures::deleteTokensLabelled(self::adminLabel());
         Fixtures::deleteTokensLabelled(self::readLabel());
@@ -520,14 +535,85 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
         );
     }
 
+    /**
+     * code-list's `blocked` flag is computed from the canonical path, so it agrees with
+     * the gate it describes however the caller spelled the directory.
+     *
+     * It used to build each entry's relative path from the caller's own `path` argument,
+     * so listing `./<dir>` reported `blocked: false` for every file in a denylisted
+     * directory - files `code-read` then refused. `blocked` is the only thing an agent
+     * has to go on BEFORE it tries, so a false label sends it to spend a call finding
+     * out. Cosmetic in consequence, the same defect in kind as the one that let `./` past
+     * the denylist entirely.
+     *
+     * @group sprint-8
+     */
+    public function testCodeListReportsBlockedForADeniedDirectoryHoweverItIsSpelled(): void
+    {
+        Fixtures::makeThemeDir(self::deniedDir());
+        Fixtures::writeThemeFile(self::deniedFile(), "<?php\n// wpmcp-test\n");
+
+        $mcp  = $this->mcp(self::$adminToken);
+        $name = basename(self::deniedFile());
+
+        foreach ([self::deniedDir(), './' . self::deniedDir(), self::deniedDir() . '/'] as $spelling) {
+            $result = $mcp->callTool('code-list', ['path' => $spelling]);
+
+            self::assertFalse($result->isError, "code-list '{$spelling}' failed: " . $result->text);
+
+            $data = $result->data();
+
+            self::assertSame(
+                self::deniedDir(),
+                $data['path'],
+                "code-list '{$spelling}' echoed the caller's spelling back rather than the"
+                . ' canonical path.'
+            );
+
+            $blocked = [];
+
+            foreach ($data['entries'] as $entry) {
+                $blocked[$entry['name']] = $entry['blocked'];
+            }
+
+            self::assertArrayHasKey($name, $blocked, "for '{$spelling}': " . $result->text);
+            self::assertTrue(
+                $blocked[$name],
+                "code-list '{$spelling}' reports a file in a denylisted directory as not"
+                . ' blocked. code-read refuses it, so the flag is a lie.'
+            );
+        }
+
+        // The control, and it is what makes the three above mean anything: the denylist
+        // really is refusing the file, whichever way it is asked for.
+        foreach ([self::deniedFile(), './' . self::deniedFile()] as $spelling) {
+            $read = $mcp->callTool('code-read', ['path' => $spelling]);
+
+            self::assertTrue($read->isError, "code-read '{$spelling}' was allowed.");
+            self::assertStringContainsString('denylist', $read->text, "for '{$spelling}'");
+        }
+    }
+
     private static function phpString(string $value): string
     {
         return "'" . addcslashes($value, "'\\") . "'";
     }
 
-    /** See WriteToolCapabilityTest: a filter, not the option, so two runners cannot race. */
+    /**
+     * Turns the code tools on AND adds this run's own directory to the denylist.
+     *
+     * FILTERS, NOT OPTIONS, for the reason WriteToolCapabilityTest gives: two runners on
+     * one site cannot race over a value neither of them wrote. The shipped defaults are
+     * repeated rather than appended to whatever is stored, so this class's denylist
+     * assertions describe the denylist this class set up and not the operator's.
+     */
     private static function codeToolsSource(): string
     {
-        return "add_filter('pre_option_wpmcp_code_enabled', static function () { return 1; });\n";
+        $denied = self::deniedDir();
+
+        return "add_filter('pre_option_wpmcp_code_enabled', static function () { return 1; });\n"
+            . "add_filter('pre_option_wpmcp_code_denylist', static function () {\n"
+            . "    return array('functions.php', 'index.php', 'inc/', 'includes/', 'lib/', '{$denied}/');\n"
+            . "});\n";
     }
 }

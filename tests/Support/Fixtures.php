@@ -574,6 +574,68 @@ final class Fixtures
         ));
     }
 
+    /**
+     * Fixture-named DIRECTORIES in the active theme, of any run.
+     *
+     * Separate from leftoverThemeFiles() because an EMPTY one is invisible to a file
+     * listing, and an empty prefixed directory is exactly what a purge leaves behind
+     * after it has removed the prefixed files inside.
+     *
+     * @return array<string, string> relative path => basename
+     */
+    public static function leftoverThemeDirs(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$root = realpath(get_stylesheet_directory());'
+            . ' if (!$root) { return; }'
+            . ' foreach ((array) glob($root . "/" . %s . "*", GLOB_ONLYDIR) as $d) {'
+            . '  echo basename($d), "\n";'
+            . ' }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line, "\r\n ");
+
+            if ($line !== '' && str_starts_with($line, self::PREFIX)) {
+                $found[$line] = $line;
+            }
+        }
+
+        return $found;
+    }
+
+    /** Create a directory inside the active theme. Prefixed names only. */
+    public static function makeThemeDir(string $relative): string
+    {
+        self::assertPrefixed($relative);
+
+        $made = WpCli::evaluate(sprintf(
+            'echo (int) wp_mkdir_p(get_stylesheet_directory() . "/" . %s);',
+            self::phpString($relative)
+        ));
+
+        if ($made !== '1') {
+            throw new RuntimeException("Could not create the theme fixture directory {$relative}: {$made}");
+        }
+
+        return $relative;
+    }
+
+    /** Remove a directory from the active theme. Tolerant, and only if it is empty. */
+    public static function deleteThemeDir(string $relative): void
+    {
+        self::assertPrefixed(basename($relative));
+
+        WpCli::tryEvaluate(sprintf(
+            '$d = get_stylesheet_directory() . "/" . %s;'
+            . ' echo is_dir($d) ? (int) @rmdir($d) : 1;',
+            self::phpString($relative)
+        ));
+    }
+
     /** Remove one file from the active theme. Tolerant: it may already be gone. */
     public static function deleteThemeFile(string $relative): void
     {
@@ -673,6 +735,11 @@ final class Fixtures
             self::deleteThemeFile((string) $relative);
         }
 
+        // Directories AFTER the files, because rmdir only takes an empty one.
+        foreach (self::ours(self::leftoverThemeDirs()) as $relative => $name) {
+            self::deleteThemeDir((string) $relative);
+        }
+
         WpCli::tryEvaluate(sprintf(
             'if (!function_exists("wpmcp_versions_table")) { return; }'
             . ' global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
@@ -733,6 +800,10 @@ final class Fixtures
         // whose theme" is the whole of what a human needs to go and look.
         foreach (self::foreign(self::leftoverThemeFiles()) as $relative => $name) {
             $lines[] = '  theme file        ' . $relative;
+        }
+
+        foreach (self::foreign(self::leftoverThemeDirs()) as $relative => $name) {
+            $lines[] = '  theme dir         ' . $relative;
         }
 
         foreach (self::foreign(self::leftoverFileVersions()) as $id => $path) {

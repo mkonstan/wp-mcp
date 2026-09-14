@@ -271,9 +271,9 @@ plugin is deleted.
 **Upgrading from 1.0.x.** Earlier versions backed a file up by writing a copy of it beside
 the original inside the active theme. That copy is under your document root with an
 extension nothing executes and nothing blocks, so its URL served the complete source of a
-theme file to anybody who asked for it. Schema revision 4 walks the active theme on the
-first request after the upgrade, moves those files into the versions table and deletes
-them. It runs whether or not code editing is switched on, and running it twice does
+theme file to anybody who asked for it. The upgrade walks the active theme on the first
+request after the plugin files change, moves those files into the versions table and
+deletes them. It runs whether or not code editing is switched on, and running it twice does
 nothing the second time.
 
 It takes only what the code tools could give back: the original name (the one without the
@@ -358,7 +358,12 @@ listener that waits for an "ok" waits forever. The eleven types:
 | `content_type_deny` | the POST was not `application/json` | `content_type` |
 | `body_too_large` | `Content-Length` over the cap | `length` |
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
-| `stale_backup_sweep` | the 1.1 upgrade collected backup files an older version left in the active theme | `found`, `stored`, `removed`, `skipped` |
+| `stale_backup_sweep` | the 1.1 upgrade swept the active theme for backup files an older version left there | `found`, `moved`, `skipped_extension`, `skipped_unreadable`, `skipped_too_big`, `skipped_undeletable`, `moved_paths`, `skipped_paths` |
+
+`stale_backup_sweep` fires at most once in a site's life, on the request that performs the
+schema upgrade. `moved_paths` names each collected file with the version id it became and
+`skipped_paths` names each one left on disk with the reason; both are capped at 25 entries
+with an `and N more` tail, because the rest is in the table and this is one log line.
 
 `reason` on `validate_fail` is one of `missing`, `malformed`, `not_found`, `user_missing`,
 `dormant`, `expired`. The last two are the same `401` on the wire and different advice to

@@ -119,7 +119,14 @@ define('WPMCP_DEFAULT_LIFETIME', 30 * DAY_IN_SECONDS);
 //       code tools now put a file's previous contents instead of writing a sibling file
 //       the web server will serve. The upgrade also sweeps the active theme for the
 //       sibling files the old code left behind - see wpmcp_migrate_sweep_stale_backups().
-define('WPMCP_DB_VER', 4);
+//   5 = the `theme` column on that table, which arrived after revision 4 had already been
+//       stamped on the sites it was developed against. A column added to a revision that
+//       is already recorded reaches nobody: wpmcp_maybe_upgrade() runs the installer only
+//       when the stamp is BEHIND, so a site at 4 would keep a table without the column,
+//       every INSERT would fail, and all three code writers would fail closed. A schema
+//       change ships with a bump - the same rule the note above this list states, and the
+//       reason the activation hook alone is not enough.
+define('WPMCP_DB_VER', 5);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
 /* ============================================================

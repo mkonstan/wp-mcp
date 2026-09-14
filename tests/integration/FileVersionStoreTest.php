@@ -33,9 +33,18 @@ use WpMcp\Tests\Support\WpCli;
 
 final class FileVersionStoreTest extends FixtureIntegrationTestCase
 {
-    /** Every column the code and the tools read by name. */
+    /**
+     * Every column the code and the tools read by name.
+     *
+     * `theme` IS THE ONE THAT MATTERS MOST HERE. It arrived in a later commit than the
+     * table, and for one commit it arrived INSIDE the revision that had already been
+     * stamped - so a site carrying that stamp kept a table without the column, every
+     * INSERT failed, and all three code writers failed closed while reporting only
+     * "could not store a version". This list is what makes that a red test rather than a
+     * support thread. See the revision comment in wp-mcp.php.
+     */
     private const COLUMNS = [
-        'id', 'path', 'content', 'size', 'sha256',
+        'id', 'theme', 'path', 'content', 'size', 'sha256',
         'reason', 'saved_by', 'token_id', 'saved_at',
     ];
 
@@ -58,18 +67,24 @@ final class FileVersionStoreTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * The table is there, at the revision that creates it, with the columns everything
-     * else in this sprint selects by name.
+     * The table is there, past the revision that creates it, with every column the rest
+     * of this sprint selects by name.
+     *
+     * AT LEAST 4, NOT EXACTLY 4, for the reason the sprint-7 migration test learned: the
+     * claim is that the table shipped WITH a bump, which stays true at 5 and at 9.
+     * Pinning the number makes an unrelated later sprint red. What is NOT relaxed is the
+     * column list: a revision may move, a column the code selects by name may not go
+     * missing.
      *
      * @group sprint-8
      */
-    public function testTheSiteIsAtRevisionFourWithTheVersionsTable(): void
+    public function testTheSiteIsPastRevisionFourWithTheVersionsTableAndEveryColumn(): void
     {
-        self::assertSame(
-            '4',
-            WpCli::evaluate('echo (int) WPMCP_DB_VER;'),
-            'WPMCP_DB_VER is not 4, so the new table ships without a schema bump and'
-            . ' wpmcp_maybe_upgrade() will never create it on an existing site.'
+        self::assertGreaterThanOrEqual(
+            4,
+            (int) WpCli::evaluate('echo (int) WPMCP_DB_VER;'),
+            'WPMCP_DB_VER is below 4, so the versions table ships without a schema bump'
+            . ' and wpmcp_maybe_upgrade() will never create it on an existing site.'
         );
 
         self::assertSame(

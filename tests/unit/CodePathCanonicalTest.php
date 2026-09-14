@@ -211,6 +211,49 @@ final class CodePathCanonicalTest extends TestCase
     }
 
     /**
+     * code-list's `blocked` flag agrees with the gate it describes, whatever the caller
+     * typed. It built its entries' relative paths from the caller's own `path`, so
+     * listing `./inc` reported `blocked: false` for files code-read then refused - and
+     * `blocked` is the only thing an agent has to go on before it tries.
+     *
+     * @group sprint-8
+     */
+    public function testCodeListLabelsBlockedFromTheCanonicalPath(): void
+    {
+        WordPressRuntime::setCurrentUserId(7);
+        WordPressRuntime::addUser(7, 'wpmcp-test-admin');
+        WordPressRuntime::allowCap('edit_themes');
+
+        $tools = wpmcp_code_tools();
+
+        foreach (['inc', './inc', 'inc/', './inc/', '.\\inc'] as $spelling) {
+            $result = call_user_func($tools['code-list']['run'], ['path' => $spelling]);
+
+            self::assertIsArray($result, "code-list '{$spelling}' failed: "
+                . ($result instanceof \WP_Error ? $result->get_error_message() : ''));
+
+            self::assertSame(
+                'inc',
+                $result['path'],
+                "code-list '{$spelling}' echoed the caller's spelling back."
+            );
+
+            $blocked = [];
+
+            foreach ($result['entries'] as $entry) {
+                $blocked[$entry['name']] = $entry['blocked'];
+            }
+
+            self::assertArrayHasKey('x.php', $blocked, "for '{$spelling}'");
+            self::assertTrue(
+                $blocked['x.php'],
+                "code-list '{$spelling}' reports inc/x.php as not blocked, and the"
+                . ' denylist refuses it. An agent trusts that flag.'
+            );
+        }
+    }
+
+    /**
      * A scratch theme: style.css, assets/app.css, and the denied inc/x.php.
      *
      * UNDER `.phpunit.cache/` AND NOT `sys_get_temp_dir()`, which is measured rather than

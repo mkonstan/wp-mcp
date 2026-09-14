@@ -169,8 +169,8 @@ theme and that canonical path, and if they cannot be stored the change does not 
 `code-restore` writes one back. A TABLE and not a file, because the active theme is inside
 the document root: the sibling backup this used to write had an extension nothing executes
 and nothing blocks, so its URL returned the complete source of a theme file to anyone who
-asked. The database is the one store WordPress never serves. Schema revision 4 creates the
-table and sweeps any of those sibling files still on disk into it.
+asked. The database is the one store WordPress never serves. The schema upgrade creates
+the table and sweeps any of those sibling files still on disk into it.
 
 That fence is about accidents. It is not a security boundary, because a theme template is
 executable PHP and PHP can reach the database and the filesystem regardless of which file
