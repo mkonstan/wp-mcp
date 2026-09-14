@@ -26,6 +26,7 @@ namespace WpMcp\Tests\Integration;
 
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\IntegrationTestCase;
 use WpMcp\Tests\Support\MuPlugin;
 use WpMcp\Tests\Support\WpCli;
 use WpMcp\Tests\Support\ToolResult;
@@ -33,6 +34,9 @@ use WpMcp\Tests\Support\ToolResult;
 final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
 {
     private const CODE_SWITCH = 'code-on-history';
+
+    /** Defines DISALLOW_FILE_EDIT, for THIS run's requests only. See noEditSource(). */
+    private const NO_EDIT = 'no-file-edit';
 
     private static function adminLabel(): string { return Fixtures::name('codehist-admin'); }
     private static function readLabel(): string { return Fixtures::name('codehist-read'); }
@@ -109,6 +113,7 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
     private static function destroy(): void
     {
         MuPlugin::remove(self::CODE_SWITCH);
+        MuPlugin::remove(self::NO_EDIT);
 
         foreach ([
             self::historyTarget(),
@@ -592,6 +597,111 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
             self::assertTrue($read->isError, "code-read '{$spelling}' was allowed.");
             self::assertStringContainsString('denylist', $read->text, "for '{$spelling}'");
         }
+    }
+
+    /**
+     * A tool that can never run is not listed.
+     *
+     * MEASURED ON A REAL PUBLIC SITE, seosemia.net, with the code switch on and
+     * DISALLOW_FILE_EDIT true in wp-config: `tools/list` advertised all six code tools and
+     * `code-list` then answered "Theme file editing is disabled on this site
+     * (DISALLOW_FILE_EDIT)." The registry asked only wpmcp_code_enabled(); the constants
+     * were checked inside each run closure and nowhere else.
+     *
+     * Why it matters more than it looks. An agent reads a listing as a statement of what
+     * it may do and plans on it, so it spends one call per tool discovering otherwise -
+     * and the operator who set DISALLOW_FILE_EDIT on purpose has been told by their own
+     * server that theme editing is on offer.
+     *
+     * THE CONSTANT IS DEFINED FOR THIS RUN'S REQUESTS ONLY. A mu-plugin is loaded by every
+     * request the site serves, and defining DISALLOW_FILE_EDIT unconditionally would turn
+     * off the theme editor for the site while this class runs - on the stress site, a real
+     * client's. The body checks this run's request header first, exactly as the sweep
+     * witness does, so only calls from this suite ever see it.
+     *
+     * @group sprint-8
+     */
+    public function testTheCodeToolsAreNotListedWhenTheSiteForbidsFileEditing(): void
+    {
+        $mcp = $this->mcp(self::$adminToken);
+
+        // The control FIRST, and it is what makes the rest mean anything: with the switch
+        // on and no constant, the tools are there.
+        self::assertNotSame(
+            [],
+            self::codeToolsIn($mcp),
+            'The code tools are not listed even with the switch on, so the assertion below'
+            . ' would pass for the wrong reason.'
+        );
+
+        MuPlugin::drop(self::NO_EDIT, self::noEditSource());
+
+        try {
+            $listed = self::codeToolsIn($mcp);
+
+            self::assertSame(
+                [],
+                $listed,
+                'DISALLOW_FILE_EDIT is set and the code tools are still advertised: '
+                . implode(', ', $listed) . '. Every one of them refuses when called, so'
+                . ' the listing is telling an agent it may do something it may not.'
+            );
+
+            // And the switch itself is still on - otherwise this test would pass on a
+            // site where the code tools were simply disabled.
+            self::assertStringContainsString(
+                'list-posts',
+                (string) $mcp->post('tools/list')->getBody(),
+                'tools/list came back without the ordinary tools either, so something'
+                . ' other than the constant emptied it.'
+            );
+        } finally {
+            MuPlugin::remove(self::NO_EDIT);
+        }
+
+        // Removed again, and the tools come back: the mu-plugin is what did it.
+        self::assertNotSame([], self::codeToolsIn($mcp));
+    }
+
+    /**
+     * The names of the code tools in this token's tools/list.
+     *
+     * @return list<string>
+     */
+    private static function codeToolsIn(\WpMcp\Tests\Support\McpClient $mcp): array
+    {
+        $body = json_decode((string) $mcp->post('tools/list')->getBody(), true);
+        $tools = $body['result']['tools'] ?? [];
+
+        return array_values(array_filter(
+            array_map(static fn (array $t): string => (string) ($t['name'] ?? ''), $tools),
+            static fn (string $name): bool => str_starts_with($name, 'code-')
+        ));
+    }
+
+    /**
+     * A mu-plugin that defines DISALLOW_FILE_EDIT for this run's requests and nobody
+     * else's. mu-plugins load after wp-config, and every check in the plugin is a
+     * `defined()` at call time, so this is indistinguishable from the wp-config line.
+     */
+    private static function noEditSource(): string
+    {
+        $run    = Fixtures::runId();
+        $header = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
+
+        return <<<PHP
+/**
+ * wp-mcp sprint-8 DISALLOW_FILE_EDIT fixture for run {$run}. Dropped and removed by
+ * tests/integration/CodeHistoryRestoreTest.php. GATED ON THIS RUN'S REQUEST HEADER, so it
+ * changes nothing for anybody else. If you are reading this on a live site, the run that
+ * wrote it crashed; deleting the file is safe.
+ */
+if (isset(\$_SERVER['{$header}'])
+    && \$_SERVER['{$header}'] === '{$run}'
+    && !defined('DISALLOW_FILE_EDIT')) {
+    define('DISALLOW_FILE_EDIT', true);
+}
+PHP;
     }
 
     private static function phpString(string $value): string

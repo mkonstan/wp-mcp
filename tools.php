@@ -88,14 +88,43 @@ function wpmcp_code_enabled() {
  * of the three it was, and so it holds if that mapping ever moves.)
  */
 function wpmcp_code_forbidden() {
+    $constant = wpmcp_code_constants_forbid();
+    if ($constant) { return $constant; }
+    if (!current_user_can('edit_themes')) {
+        return wpmcp_cannot('edit theme files');
+    }
+    return null;
+}
+
+/**
+ * The half of the code gate that does not depend on who is asking: the two constants.
+ * A WP_Error naming which one it was, or null.
+ *
+ * SPLIT OUT SO THE LISTING AND THE RUN CANNOT DRIFT. wpmcp_tools() decides whether the
+ * code tools appear in tools/call and tools/list at all, and it used to ask only
+ * wpmcp_code_enabled() - so a site with the switch on and DISALLOW_FILE_EDIT true in
+ * wp-config ADVERTISED all six and refused every one of them. Measured on seosemia.net,
+ * a real public site: tools/list carried code-list, code-read, code-write, code-delete,
+ * code-history and code-restore, and code-list answered "Theme file editing is disabled
+ * on this site (DISALLOW_FILE_EDIT)."
+ *
+ * A tool that cannot run must not be listed. An agent reads a listing as a statement of
+ * what it may do, plans on it, and spends a call per tool discovering otherwise - and an
+ * operator who set DISALLOW_FILE_EDIT deliberately has just been told by their own server
+ * that theme editing is on offer.
+ *
+ * THE CAPABILITY HALF STAYS PER-REQUEST and out of here, because it is a property of the
+ * token's user rather than of the site: the registry is built once per request but the
+ * answer is the same for every caller, while `edit_themes` is not. Listing on the
+ * constants and refusing on the capability is the same split endpoint.php already makes
+ * between the scope gate and the capability checks inside each tool.
+ */
+function wpmcp_code_constants_forbid() {
     if (defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS) {
         return new WP_Error('wpmcp_forbidden', 'File modification is disabled on this site (DISALLOW_FILE_MODS).');
     }
     if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
         return new WP_Error('wpmcp_forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
-    }
-    if (!current_user_can('edit_themes')) {
-        return wpmcp_cannot('edit theme files');
     }
     return null;
 }
@@ -1341,7 +1370,12 @@ function wpmcp_comment_tools() {
 }
 
 /* ============================================================
- * Code-edit tools (admin scope; only listed when wpmcp_code_enabled())
+ * Code-edit tools. Listed only when the switch in Settings > WP MCP is on AND neither
+ * DISALLOW_FILE_EDIT nor DISALLOW_FILE_MODS is set - see wpmcp_code_constants_forbid(),
+ * which endpoint.php's wpmcp_tools() asks before it merges these in. The third gate,
+ * `edit_themes`, is per-caller and is checked by each run closure through
+ * wpmcp_code_forbidden(); a tool that this token's user may not use is still LISTED,
+ * because another token's user may.
  * ========================================================== */
 function wpmcp_code_tools() {
     return array(

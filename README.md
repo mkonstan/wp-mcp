@@ -231,7 +231,16 @@ location ^~ /wp-content/wpmcp/ { deny all; }
 ## Code editing (opt-in)
 
 Off by default. Switching it on in **Settings > WP MCP** gives an admin token six tools
-that read and write files inside the active theme. The file API is fenced:
+that read and write files inside the active theme.
+
+The switch is not the only thing that has to be true. If `DISALLOW_FILE_EDIT` or
+`DISALLOW_FILE_MODS` is set in your `wp-config.php`, the six are **not listed at all**,
+whatever the switch says - a tool that can never run is not advertised. Either constant
+also turns the feature off for every token, including one minted before you set it. The
+third gate is the token's user: they need `edit_themes`, and a token whose user does not
+have it sees the tools listed (another token's user may) and is refused when it calls one.
+
+The file API is fenced:
 
 - Confined to the active theme directory. `..` traversal and symlinks pointing out are
   rejected on read, write and delete.

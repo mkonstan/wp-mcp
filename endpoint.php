@@ -544,8 +544,18 @@ function wpmcp_tools() {
     foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
         if (function_exists($fn)) { $tools = array_merge($tools, $fn()); }
     }
-    // Code tools are exposed only when explicitly enabled in Settings > WP MCP.
-    if (function_exists('wpmcp_code_tools') && function_exists('wpmcp_code_enabled') && wpmcp_code_enabled()) {
+    // Code tools are exposed only when the switch in Settings > WP MCP is on AND the site
+    // does not forbid file editing outright. BOTH, because a tool that can never run must
+    // not be listed: on a site with the switch on and DISALLOW_FILE_EDIT true in
+    // wp-config, tools/list advertised all six and every one of them then refused.
+    // Measured on a real public site. wpmcp_code_constants_forbid() is the same check the
+    // run closures make through wpmcp_code_forbidden(), which is why it is a function and
+    // not two more `defined()` calls here - two copies of a gate drift.
+    if (function_exists('wpmcp_code_tools')
+        && function_exists('wpmcp_code_enabled')
+        && function_exists('wpmcp_code_constants_forbid')
+        && wpmcp_code_enabled()
+        && !wpmcp_code_constants_forbid()) {
         $tools = array_merge($tools, wpmcp_code_tools());
     }
 
