@@ -162,10 +162,18 @@ jobs:
           # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
           # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
           # for the same reason: both gates had closed and neither was asserted anywhere
-          # but on the machine that ran them. sprint-9 was added in Sprint 9, and
-          # sprint-10 in Sprint 10, each on the day its gate closed. A new sprint adds
-          # its group here on the day its gate closes, and the commit that adds it
-          # watches this job.
+          # but on the machine that ran them. sprint-9 was added in Sprint 9,
+          # sprint-10 in Sprint 10 and sprint-11 in Sprint 11, each on the day its gate
+          # closed. A new sprint adds its group here on the day its gate closes, and the
+          # commit that adds it watches this job.
+          #
+          # sprint-11 is the first group whose expectations depend on the SITE'S TIMEZONE:
+          # create-post's `date` stores post_date in local time and post_date_gmt in UTC,
+          # and the tests compute the second from the first through get_gmt_from_date() on
+          # the site rather than from a constant. Both Local sites and this container sit
+          # at UTC, so the case that actually exercises the conversion sends an explicit
+          # +05:30 offset. A red sprint-11 here on a green local run would be a wp-env
+          # whose timezone_string is not what this container has always had.
           #
           # sprint-10 is the first group that is mostly about ORDERING and PAGING, so it
           # is the first a different COLLATION could move: list-posts compares titles in
@@ -177,7 +185,7 @@ jobs:
           # sql-select spells its session statement timeout one way on MySQL and another
           # on MariaDB, and this container is the only MariaDB anyone on this project can
           # reach. A red sprint-9 here on a green local run is very likely that.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
