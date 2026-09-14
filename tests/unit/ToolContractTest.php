@@ -168,6 +168,13 @@ final class ToolContractTest extends TestCase
             'code-read'        => [false, true,  false],
             'code-write'       => [true,  false, false],
             'code-delete'      => [true,  true,  false],
+            // Sprint 8. code-history only reads, and reads nothing it could destroy.
+            'code-history'     => [false, true,  false],
+            // code-restore overwrites a theme file with something else, which is the act
+            // code-write performs and carries the same judgement. NOT idempotent for
+            // code-write's reason: the file ends up the same, the history does not - a
+            // second call stores another version of what it replaced.
+            'code-restore'     => [true,  false, false],
         ];
 
         $catalog = WireSerializationTest::catalog();

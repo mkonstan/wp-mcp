@@ -1460,5 +1460,140 @@ function wpmcp_code_tools() {
         },
     ),
 
+    'code-history' => array(
+        // `write` IS THE ADMIN-SCOPE GATE in this plugin, which is why a tool that only
+        // reads carries it - exactly as code-list and code-read do. The theme is source
+        // code, not content, and a listing of who changed which file when is the shape of
+        // it. readOnlyHint stays the inverse of the gate, so it is false here and the
+        // README's paragraph about that covers one more row.
+        'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'List stored versions of a theme file. Args: path (required). Newest first, with id, saved_at, size, sha256, reason (write, delete, restore or sweep) and saved_by. A path with no stored versions returns an empty list, which is not an error. Pass an id to code-restore to put that version back.',
+        'inputSchema' => array('type' => 'object',
+            'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
+        'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
+            // mustExist FALSE: a deleted file has versions and is the case most worth
+            // asking about. The jail and the denylist still apply.
+            $r = wpmcp_code_target($a, false);
+            if (is_wp_error($r)) { return $r; }
+
+            $versions = array();
+            foreach (wpmcp_file_versions_for($r['rel']) as $row) {
+                $versions[] = array(
+                    'id'       => (int) $row->id,
+                    'saved_at' => $row->saved_at,
+                    'size'     => (int) $row->size,
+                    'sha256'   => $row->sha256,
+                    'reason'   => $row->reason,
+                    // A LOGIN AND NOT AN EMAIL. The only audience for this listing is a
+                    // person deciding what to put back, an id tells them nothing, and no
+                    // other tool on this surface returns an address. '' is a user who has
+                    // since been deleted; 'system' is the upgrade sweep, which had none.
+                    'saved_by' => wpmcp_version_author_login((int) $row->saved_by),
+                );
+            }
+
+            return array('path' => $r['rel'], 'versions' => $versions);
+        },
+    ),
+
+    'code-restore' => array(
+        'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            // It overwrites a theme file with something else. That is the same act
+            // code-write performs and it carries the same hint.
+            'destructiveHint' => true,
+            // False for code-write's reason: the file ends up the same, the history does
+            // not - a second restore stores another version of what it replaced.
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Restore a stored version of a theme file. Args: version_id (required), from code-history. Writes the stored bytes back to the path the version was taken from; the current contents are stored as a version first. PHP is parse-checked and auto-reverted on a syntax error. Returns path, bytes, sha256 and whether the bytes written match the stored hash.',
+        'inputSchema' => array('type' => 'object',
+            'properties' => array('version_id' => array('type' => 'integer')), 'required' => array('version_id')),
+        'run' => function ($a) {
+            $denied = wpmcp_code_forbidden();
+            if ($denied) { return $denied; }
+
+            $row = wpmcp_file_version_get(isset($a['version_id']) ? (int) $a['version_id'] : 0);
+            if (!$row) { return new WP_Error('wpmcp_not_found', 'No such version. Call code-history for the ids of a path.'); }
+
+            // THE STORED PATH GOES THROUGH THE SAME JAIL AND DENYLIST AS A CALLER'S,
+            // rather than being trusted because this server wrote it. A row is a value in
+            // a database, and the denylist can be widened after a version was stored - in
+            // which case restoring it is exactly what the operator has just forbidden.
+            $r = wpmcp_code_target(array('path' => $row->path), false);
+            if (is_wp_error($r)) { return $r; }
+            if (!wpmcp_code_ext_ok($r['rel'])) { return new WP_Error('wpmcp_ext', 'Only text files may be written.'); }
+
+            $content = (string) $row->content;
+
+            $existed   = is_file($r['abs']);
+            $prior     = null;
+            $versionId = null;
+            if ($existed) {
+                $saved = wpmcp_code_version_current($r['abs'], $r['rel'], 'restore');
+                if (is_wp_error($saved)) { return $saved; }
+                $prior     = $saved['content'];
+                $versionId = $saved['id'];
+            }
+
+            $bytes = file_put_contents($r['abs'], $content);
+            if ($bytes === false) { return new WP_Error('wpmcp_write_failed', 'Could not write file.'); }
+
+            $reverted = false; $perr = null;
+            if (strtolower(pathinfo($r['rel'], PATHINFO_EXTENSION)) === 'php') {
+                $chk = wpmcp_php_parse_ok($content);
+                if ($chk !== true) {
+                    $perr = $chk;
+                    if ($existed) { file_put_contents($r['abs'], $prior); } else { @unlink($r['abs']); }
+                    $reverted = true;
+                }
+            }
+
+            // HASHED FROM THE DISK, not from the string that was about to be written.
+            // "the bytes match the stored version" is a claim about the file, and hashing
+            // the variable would make it a claim about this function's own arithmetic.
+            $written = $reverted ? null : @file_get_contents($r['abs']);
+            $sha     = is_string($written) ? hash('sha256', $written) : '';
+
+            $out = array(
+                'path'       => $r['rel'],
+                'bytes'      => $reverted ? 0 : (int) $bytes,
+                'sha256'     => $sha,
+                'matched'    => ($sha !== '' && $sha === $row->sha256),
+                'created'    => ($existed ? false : !$reverted),
+                'reverted'   => $reverted,
+                'version_id' => $versionId,
+            );
+            if ($perr !== null) { $out['error'] = 'PHP parse error (reverted): ' . $perr; }
+            return $out;
+        },
+    ),
+
     );
+}
+
+/**
+ * The name to show against a stored version: a login, never an email address.
+ *
+ * Two values are not logins and say so plainly. `system` is saved_by 0, which only the
+ * upgrade sweep writes - nobody did that, the upgrade did. `(deleted user 7)` is a row
+ * whose author has since been removed from the site, which is worth seeing rather than
+ * silently blank: it is the difference between "nobody" and "somebody who is gone".
+ */
+function wpmcp_version_author_login($userId) {
+    if ($userId <= 0) { return 'system'; }
+
+    $user = get_userdata($userId);
+
+    return $user ? $user->user_login : '(deleted user ' . $userId . ')';
 }

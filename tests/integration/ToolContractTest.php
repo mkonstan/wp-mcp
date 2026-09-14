@@ -13,7 +13,7 @@
  *   - `create-post` with a key nobody declared must leave no post behind. Same claim,
  *     against a real built-in and a real database.
  *
- * AND THE REGRESSION GATE IS NOT IN THIS FILE. "All 20 tools still pass their existing
+ * AND THE REGRESSION GATE IS NOT IN THIS FILE. "All 22 tools still pass their existing
  * Sprint 1-4 tests under the validator" is asserted by those tests continuing to be
  * green, which is the whole point of running the suite rather than this group alone.
  *
