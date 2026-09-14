@@ -35,6 +35,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
  * wpmcp_sql_enabled         the sql-select switch
+ * wpmcp_meta_keys           the post meta keys the meta tools may read and write
  */
 $wpmcp_options = array(
     'wpmcp_db_ver',
@@ -44,6 +45,7 @@ $wpmcp_options = array(
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
     'wpmcp_sql_enabled',
+    'wpmcp_meta_keys',
 );
 
 /** Every transient. Deleted through the API, because an object cache holds them too. */

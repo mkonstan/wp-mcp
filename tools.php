@@ -979,6 +979,382 @@ function wpmcp_apply_terms($post_id, $terms) {
     return array('assigned' => $assigned, 'refused' => $refused, 'failed' => $failed);
 }
 
+/**
+ * An ISO 8601 date or datetime, with or without a UTC offset, as the PAIR of MySQL
+ * strings WordPress stores - or null when it is not one.
+ *
+ * WITHOUT AN OFFSET IT IS SITE-LOCAL TIME. `2026-03-04T09:30:00` means half past nine on
+ * the wall clock of whoever runs this site, because that is what `post_date` holds and
+ * what the operator sees in wp-admin. With an offset - `Z`, `+02:00`, `-0500` - the
+ * instant is fixed by the caller and the site's zone only decides how it is written down.
+ * Both branches end at the same place: one instant, expressed twice.
+ *
+ * WHY NOT strtotime(), AND WHY NOT wpmcp_parse_iso_datetime(). strtotime() accepts 'next
+ * tuesday', '@1700000000' and '2026-13-45' (which it rolls into 2027), so it cannot tell a
+ * caller their date is malformed - the exact failure this plugin's `after`/`before` filter
+ * already refuses to have. wpmcp_parse_iso_datetime() is that refusal, but it rejects an
+ * offset outright, which is right for a date FILTER (a window on stored local columns) and
+ * wrong for a date a caller is SETTING. Two shapes, two parsers, and neither loosened.
+ *
+ * THE CONVERSION IS get_gmt_from_date()'S OWN - `wp_timezone()` to UTC - done once on the
+ * parsed instant rather than by formatting to local and re-parsing that. A round trip
+ * through a local string is lossy exactly where it matters: in the repeated hour of a DST
+ * fall-back, two different instants share one local spelling, so re-parsing picks one of
+ * them and an offset-bearing input can land an hour away from the instant it named.
+ *
+ * @return array{local: string, gmt: string}|null
+ */
+function wpmcp_parse_post_date($value) {
+    $value = trim((string) $value);
+
+    if (!preg_match(
+        '/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?(Z|z|[+-]\d{2}:?\d{2})?$/',
+        $value,
+        $m
+    )) {
+        return null;
+    }
+    if (!checkdate((int) $m[2], (int) $m[3], (int) $m[1])) { return null; }
+
+    $hour   = isset($m[4]) && $m[4] !== '' ? (int) $m[4] : 0;
+    $minute = isset($m[5]) && $m[5] !== '' ? (int) $m[5] : 0;
+    $second = isset($m[6]) && $m[6] !== '' ? (int) $m[6] : 0;
+
+    if ($hour > 23 || $minute > 59 || $second > 59) { return null; }
+
+    $stamp  = sprintf('%s-%s-%s %02d:%02d:%02d', $m[1], $m[2], $m[3], $hour, $minute, $second);
+    $offset = isset($m[7]) ? $m[7] : '';
+
+    if ($offset !== '') {
+        if ($offset === 'Z' || $offset === 'z') {
+            $offset = '+00:00';
+        } elseif (strlen($offset) === 5) {
+            $offset = substr($offset, 0, 3) . ':' . substr($offset, 3);
+        }
+        // +25:00 parses in PHP and means nothing. The real range is -12:00..+14:00.
+        if ((int) substr($offset, 1, 2) > 14 || (int) substr($offset, 4, 2) > 59) { return null; }
+
+        $stamp .= $offset;
+    }
+
+    try {
+        // The second argument is consulted ONLY when the string carries no offset of its
+        // own, which is precisely the site-local branch.
+        $dt = new DateTimeImmutable($stamp, wp_timezone());
+    } catch (Exception $e) {
+        return null;
+    }
+
+    return array(
+        'local' => $dt->setTimezone(wp_timezone())->format('Y-m-d H:i:s'),
+        'gmt'   => $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s'),
+    );
+}
+
+/**
+ * THE ONE PLACE create-post AND update-post SHAPE AND GATE A POST FIELD.
+ *
+ * Every argument here maps to exactly one wp_insert_post field or one core setter, is
+ * shaped by this code rather than passed through, and carries the capability WordPress
+ * itself puts in front of that field in wp-admin. Both write tools call this, so the two
+ * cannot drift: before it, `excerpt` and `slug` were written out twice, once per tool,
+ * and a third field would have been written out twice again.
+ *
+ * REFUSALS ARE LOUD, which is the established rule for writes (see wpmcp_cannot): the
+ * caller already named the thing it wants to change, so there is nothing left to
+ * disclose, and an agent needs "not allowed" to be distinguishable from "gone".
+ *
+ * THE THREE GATES, AND WHOSE THEY ARE:
+ *
+ *   date            none of its own. Scheduling IS publishing, and `future` is already
+ *                   in wpmcp_publishing_statuses(), so the publish_posts gate each tool
+ *                   applies to `status` is the gate. A malformed date is wpmcp_bad_arg.
+ *   author          $pto->cap->edit_others_posts, the capability wp-admin gates the
+ *                   Author box on. The TARGET must be able to edit_posts of this type -
+ *                   wp-admin's dropdown lists exactly those users - and a user who
+ *                   cannot, or who is not there at all, gets one message that says
+ *                   nothing else about them.
+ *   featured_image  edit_post ON THE ATTACHMENT. Measured on WP 7.1: an attachment's
+ *                   edit_post maps through its own author and its parent, so an Author
+ *                   holds it on their own upload (parented or not) and not on another
+ *                   user's, parented or not; an Editor holds it on every one. That is
+ *                   the difference between "add a picture to my post" and "reach into
+ *                   somebody else's media library".
+ *
+ * WHY `after` IS SEPARATE FROM `insert`. set_post_thumbnail() needs a post id, which on
+ * create does not exist until wp_insert_post() has run - but its capability check does
+ * not, so the refusal happens here, before anything is written, and only the writing is
+ * deferred. A create that would have been refused for its featured image therefore does
+ * not leave a post behind.
+ *
+ * @param array        $a        the tool's arguments
+ * @param string       $postType the type the row will have
+ * @return array{insert: array, after: array, changed: list<string>}|WP_Error
+ */
+function wpmcp_post_fields($a, $postType) {
+    $pto     = get_post_type_object($postType);
+    $insert  = array();
+    $after   = array();
+    $changed = array();
+
+    if (isset($a['excerpt'])) {
+        $insert['post_excerpt'] = (string) $a['excerpt'];
+        $changed[] = 'excerpt';
+    }
+
+    if (isset($a['slug'])) {
+        $insert['post_name'] = sanitize_title((string) $a['slug']);
+        $changed[] = 'slug';
+    }
+
+    if (array_key_exists('date', $a)) {
+        $date = wpmcp_parse_post_date($a['date']);
+
+        if ($date === null) {
+            return new WP_Error(
+                'wpmcp_bad_arg',
+                'date must be an ISO 8601 date or datetime: 2026-03-04,'
+                . ' 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset'
+                . " it is read as this site's local time."
+            );
+        }
+
+        $insert['post_date']     = $date['local'];
+        $insert['post_date_gmt'] = $date['gmt'];
+        // MEASURED ON WP 7.1: wp_update_post() REPLACES the post_date of a draft,
+        // pending or auto-draft with the current time unless `edit_date` is set - the
+        // "drafts shouldn't be assigned a date unless the user did so" branch. Passing a
+        // date and not passing this is therefore a silent no-op, which is the worst
+        // possible shape for a scheduling argument. wp_insert_post ignores the key.
+        $insert['edit_date']     = true;
+        $changed[] = 'date';
+    }
+
+    if (isset($a['author'])) {
+        if (!$pto || !current_user_can($pto->cap->edit_others_posts)) {
+            return wpmcp_cannot('set the author of ' . $postType . ' content');
+        }
+
+        $authorId = wpmcp_list_author_id($a['author']);
+        $target   = $authorId ? get_userdata($authorId) : null;
+
+        // ONE MESSAGE FOR BOTH MISSES. "no such user" and "that user cannot write here"
+        // are two facts about somebody's account, and an id-or-login argument is exactly
+        // the shape that would be used to enumerate them one guess at a time.
+        if (!$target || !user_can($target, $pto->cap->edit_posts)) {
+            return new WP_Error(
+                'wpmcp_bad_arg',
+                'author is not an eligible author for this post type.'
+            );
+        }
+
+        $insert['post_author'] = $authorId;
+        $after['author']       = $authorId;
+        $changed[]             = 'author';
+    }
+
+    if (isset($a['featured_image'])) {
+        $thumb = (int) $a['featured_image'];
+
+        // The same sentence for "no such id", "not an attachment" and "not an image", so
+        // that probing ids through this argument learns nothing a caller did not send.
+        $notAnImage = new WP_Error(
+            'wpmcp_bad_arg',
+            'featured_image must be 0, or the id of an image attachment on this site.'
+        );
+
+        if ($thumb < 0) { return $notAnImage; }
+
+        if ($thumb > 0) {
+            $att = get_post($thumb);
+
+            if (!$att || $att->post_type !== 'attachment') { return $notAnImage; }
+            if (!current_user_can('edit_post', $thumb)) {
+                return wpmcp_cannot('use attachment ' . $thumb . ' as a featured image');
+            }
+            if (!wp_attachment_is_image($thumb)) { return $notAnImage; }
+        }
+
+        $after['featured_image'] = $thumb;
+        $changed[]               = 'featured_image';
+    }
+
+    return array('insert' => $insert, 'after' => $after, 'changed' => $changed);
+}
+
+/**
+ * Apply the deferred setters, and report back what the ROW now says.
+ *
+ * READ BACK, NEVER ECHOED. Everything here is re-read from the post after the write,
+ * because core is entitled to have done something else with what it was given - and for
+ * `date` it routinely has. MEASURED ON WP 7.1:
+ *
+ *   status publish + a future date   ->  core stores `future`. It is a schedule.
+ *   status future  + a past date     ->  core stores `publish`. It is published now.
+ *
+ * Both are core's own branch in wp_insert_post(), and both are silent. `status` in the
+ * result is what says which one happened, and `date` next to it is what it happened at.
+ *
+ * @param list<string> $changed the field names wpmcp_post_fields() shaped
+ * @return array the fragment to merge into the tool's result
+ */
+function wpmcp_apply_post_fields($postId, $after, $changed) {
+    $out = array();
+
+    if (array_key_exists('featured_image', $after)) {
+        if ($after['featured_image'] > 0) {
+            set_post_thumbnail($postId, $after['featured_image']);
+        } else {
+            delete_post_thumbnail($postId);
+        }
+    }
+
+    $p = get_post($postId);
+
+    if (array_key_exists('featured_image', $after)) {
+        $thumb = (int) get_post_thumbnail_id($postId);
+        $url   = $thumb ? wp_get_attachment_url($thumb) : false;
+
+        $out['featured_image'] = $thumb
+            ? array('id' => $thumb, 'url' => $url === false ? null : $url)
+            : null;
+    }
+
+    if (array_key_exists('author', $after)) {
+        // display_name and the id, never the login or the email - the same ceiling
+        // get-post reports an author at, for the same reason.
+        $user = $p ? get_userdata((int) $p->post_author) : null;
+
+        $out['author'] = array(
+            'id'   => $p ? (int) $p->post_author : 0,
+            'name' => $user ? $user->display_name : null,
+        );
+    }
+
+    if (in_array('date', $changed, true) && $p) {
+        $out['date']     = wpmcp_iso_date($p->post_date);
+        $out['date_gmt'] = wpmcp_iso_date($p->post_date_gmt);
+    }
+
+    return $out;
+}
+
+/**
+ * The post meta keys the meta tools may read and write on THIS site, normalised.
+ *
+ * AN OPERATOR'S DECLARATION, NOT A DISCOVERY. Post meta is where a WordPress site keeps
+ * everything that is not a post field - ACF values, page-builder payloads, a plugin's
+ * internal bookkeeping, `_edit_lock` - and there is no capability that separates the
+ * three. So the tools do not enumerate: an administrator writes the exact key names into
+ * Settings > WP MCP, one per line, and those are the only keys that exist for MCP. A bare
+ * site has an empty list, and on a bare site these tools do not appear at all.
+ *
+ * NORMALISED ON EVERY READ AS WELL AS ON SAVE. The option is an ordinary row that wp-cli,
+ * another plugin or a restored backup can write, so the rules cannot live only in the
+ * settings form: blanks and duplicates are dropped, and so is any key
+ * `is_protected_meta()` refuses - core's own rule, which is "leading underscore" plus
+ * whatever the site's plugins add to it. `_thumbnail_id` is a post field with a tool of
+ * its own (`featured_image`); `_edit_lock` is wp-admin's; neither is content.
+ *
+ * @param array|string $value the stored array, or the textarea's text
+ * @return list<string>
+ */
+function wpmcp_meta_keys_normalise($value) {
+    $items = is_array($value) ? $value : preg_split('/\r\n|\r|\n/', (string) $value);
+    $keys  = array();
+
+    foreach ((array) $items as $item) {
+        if (!is_scalar($item)) { continue; }
+
+        $key = trim((string) $item);
+
+        if ($key === '' || in_array($key, $keys, true)) { continue; }
+        if (is_protected_meta($key, 'post')) { continue; }
+
+        $keys[] = $key;
+    }
+
+    return $keys;
+}
+
+/** This site's meta allow-list. */
+function wpmcp_meta_keys() {
+    return wpmcp_meta_keys_normalise(get_option('wpmcp_meta_keys', array()));
+}
+
+/**
+ * Can the meta tools do anything at all here?
+ *
+ * With an empty allow-list every call would be refused, so endpoint.php's wpmcp_tools()
+ * asks this before it merges the group in and the tools are absent from tools/list -
+ * the same invariant the code tools and sql-select follow: a tool that cannot run is not
+ * listed, and calling it by name answers the "Unknown tool" every unregistered name gets.
+ */
+function wpmcp_meta_enabled() {
+    return wpmcp_meta_keys() !== array();
+}
+
+/**
+ * May these tools touch $key on this site? true, or the refusal that says why.
+ *
+ * NAMES ONLY THE KEY THE CALLER SENT. Never the list, never a count, never "try one of
+ * these" - the allow-list is the operator's configuration, and a caller that guessed a
+ * key wrong has no business learning what the right ones are.
+ *
+ * PROTECTED FIRST, and it is a separate answer rather than a fold into "not allowed",
+ * because it is a different fact: `_secret` is refused on a site where somebody typed it
+ * into the settings box, and the honest sentence says so. The normaliser drops it on save
+ * as well; both, because the option is writable from outside the settings form.
+ */
+function wpmcp_meta_key_allowed($key) {
+    $key = trim((string) $key);
+
+    if ($key === '') {
+        return new WP_Error('wpmcp_bad_arg', 'key must be a post meta key.');
+    }
+    if (is_protected_meta($key, 'post')) {
+        return new WP_Error(
+            'wpmcp_forbidden',
+            'The meta key ' . $key . ' is protected by WordPress, so these tools never'
+            . ' read or write it.'
+        );
+    }
+    if (!in_array($key, wpmcp_meta_keys(), true)) {
+        return new WP_Error(
+            'wpmcp_forbidden',
+            'The meta key ' . $key . " is not on this site's allow-list for MCP."
+            . ' An administrator adds keys in Settings > WP MCP.'
+        );
+    }
+
+    return true;
+}
+
+/**
+ * One stored meta value, as something JSON can carry.
+ *
+ * get_post_meta() has already run maybe_unserialize(), so what arrives is a string, or
+ * whatever a plugin serialised into that row - an array, or an object of a class this
+ * request may not even have loaded. Scalars pass through, a list of scalars passes
+ * through, and anything else becomes null rather than being coerced into a shape that
+ * would misrepresent it.
+ */
+function wpmcp_meta_value($value) {
+    if ($value === null || is_scalar($value)) { return $value; }
+
+    if (is_array($value)) {
+        $out = array();
+
+        foreach ($value as $k => $v) {
+            $out[$k] = ($v === null || is_scalar($v)) ? $v : null;
+        }
+
+        return $out;
+    }
+
+    return null;
+}
+
 /** Resolve an editable post by id, or a WP_Error. $badTypeMsg is the bad_type message. */
 function wpmcp_get_editable_post($id, $badTypeMsg) {
     $id = (int) $id;
@@ -1295,12 +1671,28 @@ function wpmcp_content_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Create a post or page. Args: title, content, post_type (default post), status (default draft), excerpt, slug, terms {taxonomy:[id or name]}.',
+        'description' => 'Create a post or page. Args: title, content, post_type'
+            . ' (default "post"), status (default "draft"), excerpt, slug, terms'
+            . ' {taxonomy: [id or name]}, date, author and featured_image. `date` is ISO'
+            . ' 8601; without a UTC offset it means this site\'s local time. To SCHEDULE,'
+            . ' send a future date with status "future" - status "publish" plus a future'
+            . ' date becomes "future" anyway, and "future" plus a past date publishes now,'
+            . ' so read `status` and `date` in the result for what actually happened.'
+            . ' `author` is a user id or login and needs the capability to edit others\''
+            . ' posts. `featured_image` is an image attachment id you may edit, or 0 for'
+            . ' none. Returns id, link, status and changed.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'title' => array('type' => 'string'), 'content' => array('type' => 'string'),
             'post_type' => array('type' => 'string'), 'status' => array('type' => 'string'),
             'excerpt' => array('type' => 'string'), 'slug' => array('type' => 'string'),
             'terms' => array('type' => 'object'),
+            'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Pair a future date with status "future" to schedule.'),
+            // NO `type`, because there is no way to say "integer or string" in the
+            // dialect SchemaValidator enforces and a declared type it cannot express is
+            // worse than none: `type: string` would refuse the integer id an agent
+            // naturally sends. Shaped by wpmcp_list_author_id(), which takes either.
+            'author' => array('description' => 'User id (integer) or user login (string). Needs the capability to edit other people\'s posts of this type, and the target must be able to write them.'),
+            'featured_image' => array('type' => 'integer', 'description' => 'Attachment id of an image you are allowed to edit, or 0 for no featured image.'),
         )),
         'run' => function ($a) {
             $postarr = array(
@@ -1325,20 +1717,32 @@ function wpmcp_content_tools() {
                 && !current_user_can($pto->cap->publish_posts)) {
                 return wpmcp_cannot('publish ' . $postarr['post_type'] . ' content');
             }
-            if (isset($a['excerpt'])) { $postarr['post_excerpt'] = (string) $a['excerpt']; }
-            if (isset($a['slug']))    { $postarr['post_name'] = sanitize_title((string) $a['slug']); }
+            // THE SHARED STEP. excerpt, slug, date, author and featured_image are shaped
+            // and gated in wpmcp_post_fields() so that this tool and update-post cannot
+            // disagree about any of them - see its docblock for whose capability each one
+            // carries. It refuses BEFORE anything is written, so a create that cannot
+            // have its featured image leaves no post behind.
+            $fields = wpmcp_post_fields($a, $postarr['post_type']);
+            if (is_wp_error($fields)) { return $fields; }
+
+            $postarr = array_merge($postarr, $fields['insert']);
+            $changed = $fields['changed'];
+
             $id = wp_insert_post($postarr, true);
             if (is_wp_error($id)) { return $id; }
             $out = array('id' => (int) $id, 'link' => get_permalink($id));
             if (!empty($a['terms']) && is_array($a['terms'])) {
                 $t = wpmcp_apply_terms($id, $a['terms']);
+                $changed[] = 'terms';
                 // Reported, not swallowed: a caller that asked for three categories
                 // and got two has to be able to see which one did not happen.
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
                 if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
+            $out = array_merge($out, wpmcp_apply_post_fields($id, $fields['after'], $changed));
             $p = get_post($id);
-            $out['status'] = $p ? $p->post_status : null;
+            $out['status']  = $p ? $p->post_status : null;
+            $out['changed'] = $changed;
             return $out;
         },
     ),
@@ -1358,12 +1762,26 @@ function wpmcp_content_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Update a post/page. Args: id (required) plus any of title, content, status, excerpt, slug, terms. Set status=publish to publish.',
+        'description' => 'Update a post or page. Args: id (required) plus any of title,'
+            . ' content, status, excerpt, slug, terms, date, author and featured_image.'
+            . ' Only the fields you send change, and each REPLACES what was there. Set'
+            . ' status "publish" to publish. `date` is ISO 8601; without a UTC offset it'
+            . ' means this site\'s local time, and it is kept even on a draft. To SCHEDULE,'
+            . ' send a future date with status "future" - status "publish" plus a future'
+            . ' date becomes "future" anyway, and "future" plus a past date publishes now,'
+            . ' so read `status` and `date` in the result. `author` is a user id or login'
+            . ' and needs the capability to edit others\' posts. `featured_image` is an'
+            . ' image attachment id you may edit, or 0 to remove it.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
             'content' => array('type' => 'string'), 'status' => array('type' => 'string'),
             'excerpt' => array('type' => 'string'), 'slug' => array('type' => 'string'),
             'terms' => array('type' => 'object'),
+            'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Kept on a draft, which WordPress would otherwise re-date.'),
+            // See create-post: no `type` because the dialect cannot say "integer or
+            // string", and this argument is honestly both.
+            'author' => array('description' => 'User id (integer) or user login (string). Needs the capability to edit other people\'s posts of this type, and the target must be able to write them.'),
+            'featured_image' => array('type' => 'integer', 'description' => 'Attachment id of an image you are allowed to edit, or 0 to remove the featured image.'),
         ), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
@@ -1396,8 +1814,16 @@ function wpmcp_content_tools() {
                     return wpmcp_cannot('trash post ' . $id);
                 }
             }
-            if (isset($a['excerpt'])) { $upd['post_excerpt'] = (string) $a['excerpt']; $changed[] = 'excerpt'; }
-            if (isset($a['slug']))    { $upd['post_name'] = sanitize_title((string) $a['slug']); $changed[] = 'slug'; }
+            // THE SHARED STEP - the same one create-post calls, which is what keeps the
+            // two tools' idea of excerpt, slug, date, author and featured_image identical.
+            // It runs AFTER the edit_post gate above, so a caller who may not touch this
+            // post at all is never handed a verdict about an attachment or a user.
+            $fields = wpmcp_post_fields($a, $p0->post_type);
+            if (is_wp_error($fields)) { return $fields; }
+
+            $upd     = array_merge($upd, $fields['insert']);
+            $changed = array_merge($changed, $fields['changed']);
+
             $r = wp_update_post($upd, true);
             if (is_wp_error($r)) { return $r; }
             $out = array('id' => $id, 'link' => get_permalink($id));
@@ -1407,6 +1833,7 @@ function wpmcp_content_tools() {
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
                 if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
+            $out = array_merge($out, wpmcp_apply_post_fields($id, $fields['after'], $changed));
             $p = get_post($id);
             $out['status']  = $p->post_status;
             $out['changed'] = $changed;
@@ -1439,6 +1866,207 @@ function wpmcp_content_tools() {
             $r = wp_delete_post($id, $force);
             if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => $force, 'trashed' => !$force);
+        },
+    ),
+
+    );
+}
+
+/* ============================================================
+ * Post meta tools (get-post-meta / set-post-meta)
+ *
+ * THE ALLOW-LIST IS THE WHOLE DESIGN. Post meta has no capability of its own that
+ * separates "the subtitle a marketing user writes" from "_edit_lock" or from a plugin's
+ * private state, so nothing here discovers keys: an administrator names them in Settings
+ * > WP MCP and those are the only keys these tools can see. With an empty list neither
+ * tool can succeed, so wpmcp_tools() does not list either - the same rule sql-select and
+ * the code tools follow, and the reason a bare site sees no meta tools at all.
+ *
+ * ACF, WHICH IS WHY THIS EXISTS. An ACF field's value is an ordinary meta row under the
+ * field NAME, so `set-post-meta {key: "video_url"}` writes the field. ACF also keeps a
+ * reference row `_video_url` holding the field KEY, and these tools write only the value.
+ * MEASURED on a site running ACF Pro (WP 7.1), reading in a LATER request than the write:
+ *
+ *   field that has been set through ACF before   get_field() returns our new value,
+ *   (reference row present)                      formatted by the field type. Correct.
+ *   field that never had a value                 get_field() returns the raw string. For
+ *   (no reference row)                           text/url that is right; for an image or
+ *                                                a relationship the caller gets the id as
+ *                                                a string instead of the shaped array.
+ *
+ * No ACF-specific code, by decision: it is one vendor's convention and the plugin does
+ * not carry vendor conventions. README says the limitation out loud instead.
+ * ========================================================== */
+function wpmcp_meta_tools() {
+    return array(
+
+    'get-post-meta' => array(
+        'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Read a post\'s custom fields. Args: id (required), key'
+            . ' (optional). Returns `meta` as an object of key to value for every meta key'
+            . ' this site allows MCP to touch that has a value on the post - one value when'
+            . ' the key holds one row, a list when it holds several - or just the one key'
+            . ' you name. An administrator sets which keys those are in Settings > WP MCP;'
+            . ' a key outside that list is refused by name and nothing else about the'
+            . ' site\'s other keys is said. A post the caller may not read, a post that is'
+            . ' not there, and an id of the wrong kind of thing all answer identically.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id'  => array('type' => 'integer', 'description' => 'Post ID.'),
+            'key' => array('type' => 'string', 'description' => 'One allowed meta key. Omit for every allowed key that has a value.'),
+        ), 'required' => array('id')),
+        'run' => function ($a) {
+            $id = isset($a['id']) ? (int) $a['id'] : 0;
+            $p  = $id ? get_post($id) : null;
+
+            // BYTE-IDENTICAL TO get-post's THREE REFUSALS, and deliberately so: this tool
+            // reads the same object behind the same capability, so a caller must not be
+            // able to learn from the meta tool what the post tool refuses to tell it.
+            if (!$p) { return new WP_Error('wpmcp_not_found', 'No post with that ID.'); }
+            if (!current_user_can('read_post', $id)) {
+                return new WP_Error('wpmcp_not_found', 'No post with that ID.');
+            }
+            if (!wpmcp_post_type_ok($p->post_type)) {
+                return new WP_Error('wpmcp_not_found', 'No post with that ID.');
+            }
+
+            $keys = wpmcp_meta_keys();
+
+            if (isset($a['key'])) {
+                $allowed = wpmcp_meta_key_allowed($a['key']);
+                if (is_wp_error($allowed)) { return $allowed; }
+
+                $keys = array(trim((string) $a['key']));
+            }
+
+            $meta = array();
+
+            foreach ($keys as $key) {
+                // `false` for the third argument: every row, not the first. A key with
+                // two rows is a list, and reporting only one of them would be a quiet
+                // lie about what the post holds.
+                $rows = get_post_meta($id, $key, false);
+
+                if (!is_array($rows) || $rows === array()) { continue; }
+
+                $meta[$key] = count($rows) === 1
+                    ? wpmcp_meta_value($rows[0])
+                    : array_map('wpmcp_meta_value', array_values($rows));
+            }
+
+            return array(
+                'id' => $p->ID,
+                // stdClass so that "no allowed key has a value" serialises as {} and not
+                // as []. An empty PHP array is a list to json_encode, and a client that
+                // reads meta as an object would see the type change under it.
+                'meta' => $meta === array() ? new stdClass() : $meta,
+            );
+        },
+    ),
+
+    'set-post-meta' => array(
+        'write' => true,
+        'annotations' => array(
+            'readOnlyHint' => false,
+            // TRUE. This REPLACES the key: every row under it is removed and what you
+            // sent is written, so a key holding three rows and given one scalar keeps
+            // one. destructiveHint: false is MCP's promise that an update is additive,
+            // and this is not additive - the same reasoning update-post carries.
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Write one of a post\'s custom fields. Args: id, key and value,'
+            . ' all required. The value REPLACES every row under that key: send a JSON'
+            . ' scalar for one row, a flat list of scalars for several, or null to delete'
+            . ' the key. An object, or a list holding one, is refused. The key must be one'
+            . ' an administrator allowed in Settings > WP MCP, and you need to be able to'
+            . ' edit the post. WordPress stores meta as text, so a number or a boolean'
+            . ' comes back as its string form. Returns id, key and the value as re-read.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id'  => array('type' => 'integer', 'description' => 'Post ID.'),
+            'key' => array('type' => 'string', 'description' => 'One meta key this site allows MCP to write.'),
+            // NO `type`: the point of this argument is that it is any JSON scalar, a
+            // flat list of them, or null, and the dialect SchemaValidator enforces has
+            // no way to say that. The shaping and the refusal are in the run body, where
+            // they can name what was actually wrong.
+            'value' => array('description' => 'A JSON scalar, a flat list of scalars, or null to delete the key.'),
+        ), 'required' => array('id', 'key', 'value')),
+        'run' => function ($a) {
+            $id = isset($a['id']) ? (int) $a['id'] : 0;
+            $p0 = wpmcp_get_editable_post($id, 'That item is not an editable content type.');
+            if (is_wp_error($p0)) { return $p0; }
+
+            // THREE GATES, NOT ONE. edit_post is the post; edit_post_meta is the KEY on
+            // that post, which is the meta cap core's own REST meta fields check and the
+            // one a plugin filters to protect a key it owns; the allow-list is the
+            // operator's. All three, in that order, so the most general refusal comes
+            // first and a caller who cannot edit the post learns nothing about its keys.
+            if (!current_user_can('edit_post', $id)) {
+                return wpmcp_cannot('edit post ' . $id);
+            }
+
+            $key     = isset($a['key']) ? trim((string) $a['key']) : '';
+            $allowed = wpmcp_meta_key_allowed($key);
+            if (is_wp_error($allowed)) { return $allowed; }
+
+            if (!current_user_can('edit_post_meta', $id, $key)) {
+                return wpmcp_cannot('edit the meta key ' . $key . ' on post ' . $id);
+            }
+
+            $value = array_key_exists('value', $a) ? $a['value'] : null;
+
+            if ($value === null) {
+                delete_post_meta($id, $key);
+            } elseif (is_scalar($value)) {
+                update_post_meta($id, $key, $value);
+            } elseif (is_array($value) && array_is_list($value)) {
+                foreach ($value as $element) {
+                    if (!is_scalar($element)) {
+                        return new WP_Error(
+                            'wpmcp_bad_arg',
+                            'value must be a JSON scalar, a flat list of scalars, or null.'
+                            . ' One element of the list is neither.'
+                        );
+                    }
+                }
+                // Replace, not append: delete every row first, then add one per element.
+                // update_post_meta() cannot express "these N rows" at all - it rewrites
+                // the first row and leaves the rest - so this is the only honest shape.
+                delete_post_meta($id, $key);
+
+                foreach ($value as $element) {
+                    add_post_meta($id, $key, $element, false);
+                }
+            } else {
+                return new WP_Error(
+                    'wpmcp_bad_arg',
+                    'value must be a JSON scalar, a flat list of scalars, or null.'
+                    . ' An object is not one of those - post meta has no schema, so a'
+                    . ' nested structure would be stored as PHP-serialised text that only'
+                    . ' this site can read back.'
+                );
+            }
+
+            // RE-READ, never echoed. WordPress stores meta as text and sanitises it on
+            // the way in, so what came back out is the only truthful answer about what
+            // is now on the post.
+            $rows = get_post_meta($id, $key, false);
+
+            if (!is_array($rows) || $rows === array()) {
+                $stored = null;
+            } elseif (count($rows) === 1) {
+                $stored = wpmcp_meta_value($rows[0]);
+            } else {
+                $stored = array_map('wpmcp_meta_value', array_values($rows));
+            }
+
+            return array('id' => $id, 'key' => $key, 'value' => $stored);
         },
     ),
 

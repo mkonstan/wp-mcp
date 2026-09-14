@@ -534,7 +534,7 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         mean to extend a tool, but it cannot do it by overwriting the
  *                         entry whose `write` flag is the gate.
  *
- * The built-in tools all carry `'write' => true|false` explicitly - 23 of them, one
+ * The built-in tools all carry `'write' => true|false` explicitly - 25 of them, one
  * per entry - so the checks apply uniformly rather than trusting "ours" over "theirs".
  * If a future built-in forgets the key it disappears from the listing and the log says
  * so, which is the loud failure.
@@ -574,6 +574,18 @@ function wpmcp_tools() {
         && function_exists('wpmcp_sql_enabled')
         && wpmcp_sql_enabled()) {
         $tools = array_merge($tools, wpmcp_sql_tools());
+    }
+
+    // The post-meta tools are exposed only when the operator has declared at least one
+    // meta key in Settings > WP MCP, and the rule is the third instance of the same one:
+    // a tool that cannot run must not be listed. With an empty allow-list every
+    // get-post-meta and set-post-meta call is refused by definition, so on a bare site -
+    // which is what this plugin is built toward - the pair simply does not exist, and
+    // calling either by name answers the "Unknown tool" -32602 an unregistered name gets.
+    if (function_exists('wpmcp_meta_tools')
+        && function_exists('wpmcp_meta_enabled')
+        && wpmcp_meta_enabled()) {
+        $tools = array_merge($tools, wpmcp_meta_tools());
     }
 
     // What the plugin itself registered, to compare the filter's output against.

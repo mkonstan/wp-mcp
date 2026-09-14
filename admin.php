@@ -102,6 +102,34 @@ function wpmcp_format_duration($seconds) {
     return max(1, (int) round($seconds / MINUTE_IN_SECONDS)) . ' m';
 }
 
+/**
+ * Write the one settings form's four values. $post is the UNSLASHED $_POST.
+ *
+ * SPLIT OUT OF THE PAGE, and not for tidiness: the page body is 200 lines of HTML that
+ * cannot be run outside an admin request, so while the save lived inside it the only way
+ * to test that the textarea round-trips was to test the normaliser and hope. This is the
+ * code the form actually posts to, and a test can call it.
+ *
+ * THE NONCE IS NOT IN HERE. check_admin_referer() is a statement about the REQUEST, and
+ * it stays at the call site where a request exists; this function is the write.
+ */
+function wpmcp_save_settings($post) {
+    update_option('wpmcp_code_enabled', !empty($post['code_enabled']) ? 1 : 0);
+    update_option('wpmcp_sql_enabled', !empty($post['sql_enabled']) ? 1 : 0);
+
+    $lines = isset($post['denylist']) ? (string) $post['denylist'] : '';
+    $list  = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $lines))));
+    update_option('wpmcp_code_denylist', $list);
+
+    // NORMALISED HERE AND AGAIN ON EVERY READ. wpmcp_meta_keys_normalise() drops blanks,
+    // duplicates and any key WordPress calls protected - so a `_secret` typed into the
+    // box is gone the moment Save is pressed, and wpmcp_meta_key_allowed() refuses it at
+    // call time as well, because this option is an ordinary row that wp-cli or a restored
+    // backup can write without ever passing through this form.
+    $keys = isset($post['meta_keys']) ? (string) $post['meta_keys'] : '';
+    update_option('wpmcp_meta_keys', wpmcp_meta_keys_normalise($keys));
+}
+
 function wpmcp_render_admin() {
     if (!current_user_can('manage_options')) { wp_die('Insufficient permissions.'); }
 
@@ -150,22 +178,18 @@ function wpmcp_render_admin() {
               . ' The token itself did not change, so the client needs no edit.';
     }
 
-    // Handle the code-editing + SQL settings save.
+    // Handle the code-editing + SQL + meta settings save.
     //
-    // ONE FORM, ONE NONCE, and the SQL switch rides in it rather than getting a second
-    // form of its own. Both switches turn on a surface that an admin-scope token can
-    // reach and neither is on by default, so an operator decides about them in one place
-    // and one submit; a second form would be a second nonce and a second way for a
-    // checkbox to be silently left at its old value because the other form was the one
-    // that posted.
+    // ONE FORM, ONE NONCE, and the SQL switch and the meta allow-list ride in it rather
+    // than getting forms of their own. Every one of them turns on a surface that an
+    // admin-scope token can reach and none is on by default, so an operator decides about
+    // them in one place and one submit; a second form would be a second nonce and a
+    // second way for a checkbox to be silently left at its old value because the other
+    // form was the one that posted.
     if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'code_settings') {
         check_admin_referer('wpmcp_code');
-        update_option('wpmcp_code_enabled', !empty($_POST['code_enabled']) ? 1 : 0);
-        update_option('wpmcp_sql_enabled', !empty($_POST['sql_enabled']) ? 1 : 0);
-        $lines = isset($_POST['denylist']) ? (string) wp_unslash($_POST['denylist']) : '';
-        $list  = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $lines))));
-        update_option('wpmcp_code_denylist', $list);
-        $notice = 'Code-editing and SQL settings saved.';
+        wpmcp_save_settings(wp_unslash($_POST));
+        $notice = 'Code-editing, SQL and post-meta settings saved.';
     }
 
     global $wpdb;
@@ -365,7 +389,7 @@ function wpmcp_render_admin() {
         </tbody>
       </table>
 
-      <h2>Code editing and SQL reads</h2>
+      <h2>Code editing, SQL reads and post meta</h2>
       <form method="post">
         <?php wp_nonce_field('wpmcp_code'); ?>
         <input type="hidden" name="wpmcp_action" value="code_settings">
@@ -404,8 +428,23 @@ function wpmcp_render_admin() {
                 admin tokens.</p>
             </td>
           </tr>
+          <tr>
+            <th scope="row"><label for="wpmcp-meta-keys">Post meta keys</label></th>
+            <td>
+              <textarea name="meta_keys" id="wpmcp-meta-keys" rows="6" class="large-text code"><?php echo esc_textarea(implode("\n", wpmcp_meta_keys())); ?></textarea>
+              <p class="description">Post meta keys the tools may read and write, one per
+                line. Empty by default, and while it is empty <code>get-post-meta</code>
+                and <code>set-post-meta</code> are not exposed at all. Exact key names, not
+                patterns. Keys WordPress treats as protected &mdash; anything starting with
+                an underscore, such as <code>_thumbnail_id</code> or <code>_edit_lock</code>
+                &mdash; are dropped when you save and refused if called anyway. An
+                <a href="https://www.advancedcustomfields.com/" target="_blank" rel="noopener">ACF</a>
+                field is stored under its field name, so naming the field here is what lets
+                a token read and write it.</p>
+            </td>
+          </tr>
         </table>
-        <?php submit_button('Save code and SQL settings'); ?>
+        <?php submit_button('Save code, SQL and meta settings'); ?>
       </form>
       <p style="margin-top:24px;color:#666;font-size:12px">
         ☕ Like WP MCP? <a href="https://github.com/sponsors/mkonstan" target="_blank" rel="noopener">Sponsor the project</a> &mdash; it stays free either way.
