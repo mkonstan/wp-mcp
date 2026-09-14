@@ -482,10 +482,19 @@ function wpmcp_list_orderby_columns() {
  * other way. Before this it was hard-coded to post_date descending, which was right
  * only because there was nothing else to ask for.
  *
- * TIE-BREAK ON ID, in the same direction, because MySQL's sort is not stable: two posts
- * sharing a post_date (a bulk import, a seeded fixture) could otherwise swap places
- * between two identical calls, and a caller paging through them would see one twice and
- * another never.
+ * IT READS THE ARGUMENT THE QUERIES WERE GIVEN, not a second copy of the decision.
+ * wpmcp_list_posts_filters() hands WP_Query the ARRAY form of `orderby` -
+ * array('title' => 'ASC', 'ID' => 'ASC') - and this function takes the first key and its
+ * direction straight out of that array. There is therefore no way for the SQL to sort on
+ * one column and the merge on another; before this the two were written out separately and
+ * a future edit to one would not have touched the other.
+ *
+ * TIE-BREAK ON ID, in the same direction - and the SQL now does it too, which is the half
+ * that was missing. MySQL's sort is not stable, so for rows tied on the sort column a
+ * `LIMIT 21` and a `LIMIT 41` may return a different relative order AND a different SUBSET
+ * of the tied group. Paging over an import that shares a post_date to the second could then
+ * show one row twice and another never - which the comparator alone cannot fix, because it
+ * only ever sees the rows the LIMIT already chose.
  *
  * strcasecmp FOR TITLES, not strcmp. MySQL sorts post_title under a *_ci collation, so
  * 'apple' comes before 'Zebra'; PHP's strcmp is byte order, where every capital sorts
@@ -495,6 +504,15 @@ function wpmcp_list_orderby_columns() {
  * flakiness.
  */
 function wpmcp_post_order_comparator($orderby, $order) {
+    // WP_Query's array form, which is what both queries are actually given. The first key is
+    // the column, its value is that key's direction; the scalar form stays supported so the
+    // function can be reasoned about on its own.
+    if (is_array($orderby)) {
+        $keys    = array_keys($orderby);
+        $order   = reset($orderby);
+        $orderby = isset($keys[0]) ? (string) $keys[0] : 'date';
+    }
+
     $columns = wpmcp_list_orderby_columns();
     $column  = isset($columns[$orderby]) ? $columns[$orderby] : 'post_date';
     $sign    = (strtoupper((string) $order) === 'ASC') ? 1 : -1;
@@ -602,6 +620,11 @@ function wpmcp_list_term_id($taxonomy, $slugOrId, $postType) {
  *
  *     s  cat  tag_id  tax_query  author  date_query  orderby  order
  *
+ * The arguments that are true of every listing WHATEVER the caller said - the row count,
+ * `no_found_rows`, `ignore_sticky_posts` and `update_post_meta_cache` - are NOT here. They
+ * are not filters and nothing the caller sends can change them, so they live in
+ * wpmcp_list_query_guards(), which both queries also merge.
+ *
  * AND NO FILTER MAY WIDEN. The two status sets wpmcp_listable_statuses() and
  * wpmcp_own_listable_statuses() decide from capabilities ARE the guard; filters only
  * narrow inside it. Nothing here returns post_status, post_type, perm, post__in,
@@ -658,12 +681,23 @@ function wpmcp_list_posts_filters($args, $postType) {
         return new WP_Error('wpmcp_bad_arg', 'order must be one of: asc, desc.');
     }
 
-    $query['orderby'] = $orderby;
+    // THE ARRAY FORM, WITH ID AS THE SECONDARY KEY. A scalar `orderby` becomes
+    // `ORDER BY post_date DESC` with no tie-break, and the depth fetch means page 1 runs
+    // LIMIT 21 and page 2 LIMIT 41 - two statements MySQL may answer with a different
+    // relative order, and a different subset, of any group of rows tied on that column. The
+    // ID is unique, so it turns the ordering into a total one and the page windows line up.
+    // wpmcp_post_order_comparator() reads this same array, so the merge cannot disagree.
+    $query['orderby'] = array($orderby => strtoupper($order), 'ID' => strtoupper($order));
     $query['order']   = strtoupper($order);
 
     // SEARCH. WP_Query's own `s`, which matches post_title, post_excerpt and
     // post_content - no author email, no comment, no column outside the posts table.
     // It searches only within the rows the status split already allowed.
+    //
+    // ITS SYNTAX COMES WITH IT, and the description says so rather than stripping it: core's
+    // parse_search() reads a leading `-` on a term as EXCLUDE, so `search: "-2021"` means
+    // "posts that do not contain 2021". Stripping it would silently turn an exclusion into
+    // its opposite, which is the one thing worse than a syntax an agent has to be told about.
     if (isset($args['search'])) {
         $search = trim((string) $args['search']);
         if ($search !== '') { $query['s'] = $search; }
@@ -746,6 +780,45 @@ function wpmcp_list_posts_filters($args, $postType) {
     }
 
     return $query;
+}
+
+/**
+ * The WP_Query arguments EVERY listing query carries, whatever the caller asked for.
+ *
+ * SEPARATE FROM wpmcp_list_posts_filters() ON PURPOSE, and the separation is the point.
+ * That function maps CALLER arguments to query keys and its allow-list is a security
+ * boundary. These three are the opposite: no caller argument can reach them, and each one
+ * has to be on EVERY listing query or the listing stops meaning what it says. One named
+ * array, merged by both call sites, so a third query cannot be added without them.
+ *
+ * ignore_sticky_posts IS THE ONE THAT WAS A BUG, and it is worth the paragraph. WP_Query
+ * decides `is_home` from the QUERY VARS, not from the request: a query is `is_home` unless
+ * something marks it as singular, an archive, a search or a feed. `s`, `cat`, `tag_id`,
+ * `tax_query` and `author` all mark it; `date_query`, `post_status`, `orderby`,
+ * `posts_per_page`, `no_found_rows` and `perm` mark NOTHING. So a listing filtered only by
+ * `after`/`before`, `status` or `orderby` is a home query, and on a home query at page 1
+ * core SPLICES EVERY STICKY POST IN AT THE FRONT - fetched by post__in with
+ * post_status => 'publish', with no date, status or ordering condition from the original
+ * query (class-wp-query.php 3582-3629, measured against WP 7.1).
+ *
+ * The result was an answer that was not false about permissions but was false about the
+ * question: `after: "2030-01-01"` returned every sticky post on the site, and `status:
+ * "draft"` on an Editor's token returned the drafts PLUS every published sticky. This tool
+ * exists to not do that, and the tool never passes `paged`, so page 1 is every page.
+ *
+ * update_post_meta_cache IS A SIZE FUSE. The depth fetch is page * limit + 1, up to 10,001
+ * rows, on each query - and WP_Query primes the postmeta cache for every row it returns.
+ * The listing reads ID, title, type, status, slug and the permalink and no meta at all, so
+ * on a site carrying ACF or SEO meta that priming is a memory-exhaustion shape rather than a
+ * slow one, for data nobody looks at. The TERM cache stays ON: get_permalink() reads it on a
+ * %category% permalink structure, and switching it off would trade one query for N.
+ */
+function wpmcp_list_query_guards() {
+    return array(
+        'no_found_rows'          => true,
+        'ignore_sticky_posts'    => true,
+        'update_post_meta_cache' => false,
+    );
 }
 
 /**
@@ -969,7 +1042,9 @@ function wpmcp_core_tools() {
          * Author their own drafts back under somebody else's category, and it looks
          * like the filter working. A filter that reaches WP_Query unshaped is a query
          * argument the caller chose. Neither is possible while this body builds only
-         * post_status, the own-query author scope, and the row count.
+         * post_status, the own-query author scope, and the row count - and merges
+         * wpmcp_list_query_guards(), which is the other half of the same idea: the
+         * arguments no caller may touch, in one place, on every query.
          */
         'list-posts' => array(
             'write' => false,
@@ -981,7 +1056,8 @@ function wpmcp_core_tools() {
             ),
             'description' => 'Find content the caller may see. Filter and page it.'
                 . ' Args: post_type (default "post"), status (default: every status the'
-                . ' caller may see), search (title, excerpt and content), category and'
+                . ' caller may see), search (title, excerpt and content; a leading "-"'
+                . ' on a word EXCLUDES it), category and'
                 . ' tag (slug or id), term ("taxonomy:slug" for any other taxonomy),'
                 . ' author (id or login), after and before (ISO 8601 date or datetime,'
                 . ' inclusive), orderby ("date", "modified" or "title"; default "date"),'
@@ -993,7 +1069,7 @@ function wpmcp_core_tools() {
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string', 'description' => 'Post type to list. Default "post".'),
                 'status'    => array('type' => 'string', 'description' => 'One post status. Default: every status the caller may see.'),
-                'search'    => array('type' => 'string', 'description' => 'Match title, excerpt or content.'),
+                'search'    => array('type' => 'string', 'description' => 'Match title, excerpt or content. A leading "-" on a word excludes it.'),
                 'category'  => array('type' => 'string', 'description' => 'Category slug or term id.'),
                 'tag'       => array('type' => 'string', 'description' => 'Tag slug or term id.'),
                 'term'      => array('type' => 'string', 'description' => 'Any other taxonomy, as "taxonomy:slug".'),
@@ -1044,17 +1120,16 @@ function wpmcp_core_tools() {
                 // $page and still know whether a page after it exists. Any row in the
                 // global first N must be in one list's own first N, so N rows from each
                 // side is exactly enough - and the +1 is the has_more probe, which is
-                // why no total is needed and `no_found_rows` can stay on. `page` is
+                // why no total is needed and `no_found_rows` stays on. `page` is
                 // capped at 100 alongside `limit`, so this is bounded at 10,001 rows.
                 $depth = $page * $limit + 1;
 
                 $posts = array();
                 if ($matchable && $permitted) {
-                    $q = new WP_Query(array_merge($filters, array(
+                    $q = new WP_Query(array_merge($filters, wpmcp_list_query_guards(), array(
                         'post_type'      => $type,
                         'post_status'    => $permitted,
                         'posts_per_page' => $depth,
-                        'no_found_rows'  => true,
                         // Belt and braces over the list above: on an explicit status
                         // list this also scopes `private` to the user's own posts when
                         // they lack read_private_posts.
@@ -1077,12 +1152,11 @@ function wpmcp_core_tools() {
                     && (!isset($filters['author']) || (int) $filters['author'] === (int) $me);
 
                 if ($runOwn) {
-                    $q2 = new WP_Query(array_merge($filters, array(
+                    $q2 = new WP_Query(array_merge($filters, wpmcp_list_query_guards(), array(
                         'post_type'      => $type,
                         'post_status'    => $own,
                         'author'         => $me,
                         'posts_per_page' => $depth,
-                        'no_found_rows'  => true,
                     )));
 
                     if ($q2->posts) {
