@@ -63,14 +63,20 @@ function wpmcp_uninstall_site(array $options, array $transients) {
     foreach ($options as $option) { delete_option($option); }
     foreach ($transients as $transient) { delete_transient($transient); }
 
-    // The table name is built the same way wpmcp_install() builds it: $wpdb->prefix plus
-    // the bare name. On multisite $wpdb->prefix is the CURRENT site's prefix, which is why
-    // this runs inside the per-site loop below.
-    $table = $wpdb->prefix . 'wpmcp_tokens';
+    // The table names are built the same way wpmcp_install() builds them: $wpdb->prefix
+    // plus the bare name. On multisite $wpdb->prefix is the CURRENT site's prefix, which
+    // is why this runs inside the per-site loop below.
+    //
+    // BOTH TABLES. wpmcp_file_versions holds the previous contents of theme files the
+    // code tools changed - up to half a megabyte per row - so a plugin that left it
+    // behind would leave the largest thing it ever wrote.
+    foreach (array('wpmcp_tokens', 'wpmcp_file_versions') as $bare) {
+        $table = $wpdb->prefix . $bare;
 
-    // Interpolated rather than prepared: DROP TABLE takes no placeholders, and the only
-    // variable part is a prefix WordPress itself set.
-    $wpdb->query("DROP TABLE IF EXISTS `{$table}`"); // phpcs:ignore
+        // Interpolated rather than prepared: DROP TABLE takes no placeholders, and the
+        // only variable part is a prefix WordPress itself set.
+        $wpdb->query("DROP TABLE IF EXISTS `{$table}`"); // phpcs:ignore
+    }
 }
 
 /** Remove the trace log directory and everything the plugin put in it. */

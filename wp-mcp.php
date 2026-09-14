@@ -51,6 +51,24 @@ if (!defined('ABSPATH')) { exit; }
 
 define('WPMCP_VER', '1.1.0');
 define('WPMCP_TABLE', 'wpmcp_tokens');
+
+/**
+ * Where a theme file's previous contents go before code-write or code-delete changes
+ * it on disk.
+ *
+ * A TABLE AND NOT A FILE, and the reason is the web server. The code tools used to copy
+ * the file they were about to change to a SIBLING file beside it, with a backup extension
+ * appended - inside the active theme, which is inside the document root. The result is
+ * neither `.css` nor `.php`, so nothing executes it and nothing in a default server
+ * configuration refuses it: the URL returns the complete previous source of a theme file
+ * to anybody who asks. A saved copy of PHP that reads credentials is then a public file.
+ * The database is the one store WordPress never serves.
+ *
+ * That shape was also a backup of exactly ONE generation - the second write overwrote the
+ * only copy there was - and it left files behind that nothing ever collected. A table
+ * keeps a bounded history per path and is removed with the plugin.
+ */
+define('WPMCP_VERSIONS_TABLE', 'wpmcp_file_versions');
 /**
  * The two caps, because a token carries two timers.
  *
@@ -97,7 +115,11 @@ define('WPMCP_DEFAULT_LIFETIME', 30 * DAY_IN_SECONDS);
 //       it cannot drop, so the drop is an explicit ALTER in
 //       wpmcp_migrate_drop_address_column(). Existing rows are backfilled by
 //       wpmcp_migrate_token_lifetimes() so that they behave exactly as they did.
-define('WPMCP_DB_VER', 3);
+//   4 = file versions. Adds a SECOND table, WPMCP_VERSIONS_TABLE, which is where the
+//       code tools now put a file's previous contents instead of writing a sibling file
+//       the web server will serve. The upgrade also sweeps the active theme for the
+//       sibling files the old code left behind - see wpmcp_migrate_sweep_stale_backups().
+define('WPMCP_DB_VER', 4);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
 /* ============================================================
@@ -165,8 +187,35 @@ function wpmcp_install() {
   KEY active_until (active_until)
 ) $charset;";
 
+    // Revision 4's table. One `path` may hold many versions, and the only question ever
+    // asked of it is "the versions of this path, newest first", so that pair is the key.
+    //
+    // `content` is a LONGBLOB and not a TEXT column on purpose: a theme file is bytes,
+    // not characters. A BLOB column also makes $wpdb treat the whole table as binary, so
+    // it never runs its invalid-text stripper over a value on the way in.
+    //
+    // The index takes a 191-character PREFIX of `path`, which is what WordPress core does
+    // for every indexed varchar it owns (wp_posts.post_name is varchar(200) keyed on
+    // post_name(191)). The full 255 characters of utf8mb4 is 1020 bytes, which is over
+    // the 767-byte index limit of a table in the old COMPACT row format - a shape no
+    // modern MySQL creates but plenty of older sites still carry.
+    $versions = "CREATE TABLE " . $wpdb->prefix . WPMCP_VERSIONS_TABLE . " (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  path varchar(255) NOT NULL DEFAULT '',
+  content longblob NOT NULL,
+  size int(10) unsigned NOT NULL DEFAULT 0,
+  sha256 char(64) NOT NULL DEFAULT '',
+  reason varchar(16) NOT NULL DEFAULT '',
+  saved_by bigint(20) unsigned NOT NULL DEFAULT 0,
+  token_id bigint(20) unsigned DEFAULT NULL,
+  saved_at datetime NOT NULL,
+  PRIMARY KEY  (id),
+  KEY path_saved_at (path(191),saved_at)
+) $charset;";
+
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
+    dbDelta($versions);
 
     // Record the revision once the schema and the data are both actually there - see the
     // comment on the drop below for the one step that is deliberately not a precondition.
@@ -183,6 +232,17 @@ function wpmcp_install() {
     if (!wpmcp_token_column_exists('window_secs')) { return false; }
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
     if (wpmcp_migrate_token_lifetimes() === false) { return false; }
+
+    // THE VERSIONS TABLE IS A PRECONDITION, exactly like the three columns above and
+    // unlike the cosmetic drop below. code-write and code-delete refuse to touch a file
+    // they cannot version first, so a site whose second CREATE TABLE failed has working
+    // read tools and dead code tools. Fail closed and retryable: leave the option behind
+    // and the next request tries again.
+    if (!wpmcp_versions_table_exists()) { return false; }
+
+    // Only now, with somewhere to put them, are the stale sibling backups collected. It
+    // does not gate the stamp - see wpmcp_migrate_sweep_stale_backups() for why.
+    wpmcp_migrate_sweep_stale_backups();
 
     // THE DROP IS THE ONE STEP THAT DOES NOT GATE THE STAMP, and the difference is
     // whether the plugin is CORRECT without it. The three columns and the two backfills
@@ -204,6 +264,14 @@ function wpmcp_install() {
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
     return true;
+}
+
+/** Is the file-versions table really there? The upgrade gate, not decoration. */
+function wpmcp_versions_table_exists() {
+    global $wpdb;
+    $table = wpmcp_versions_table();
+    $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+    return $found === $table;
 }
 
 /** Does the tokens table really have this column? The upgrade gate, not decoration. */
@@ -272,6 +340,127 @@ function wpmcp_migrate_drop_address_column() {
     }
 
     return $dropped;
+}
+
+/**
+ * Revision 4: collect the sibling backup files the old code tools left in the theme.
+ *
+ * Every version of this plugin up to 1.1.0 answered code-write by copying the file it
+ * was about to overwrite to `<file>.bak` beside it, and code-delete by renaming the file
+ * to `<file>.bak`. Those files are inside the active theme, which is inside the document
+ * root, and their extension is neither `.php` nor anything a default server config
+ * refuses - so each one is a URL that returns the complete source of a theme file to
+ * anybody who guesses it. Deleting the code that writes them does nothing about the ones
+ * already on disk, so the upgrade collects them: the bytes go into the versions table
+ * under the ORIGINAL path with reason `sweep`, and the file on disk is removed.
+ *
+ * IT RUNS WHETHER OR NOT CODE EDITING IS ENABLED. The switch decides whether the tools
+ * are offered; it has nothing to do with whether an earlier session already left files
+ * behind, and the operator who turned the switch off is exactly the one who will never
+ * find them.
+ *
+ * IDEMPOTENT because it is driven entirely by what is on disk: the second run walks the
+ * same tree, finds nothing ending in the old suffix, and inserts nothing. wpmcp_install()
+ * calls every migration on every schema bump for the rest of the plugin's life.
+ *
+ * IT DOES NOT GATE THE SCHEMA STAMP, for the same reason the column drop does not: the
+ * plugin is correct without it. A theme directory the web server owns and PHP may not
+ * write is a real hosting shape, and a site that cannot remove the files is still fully
+ * upgraded - refusing to stamp would put it in a dbDelta-per-request loop forever. What
+ * it does instead is say so once, with a count.
+ *
+ * SYMLINKS ARE NOT FOLLOWED, at either level: a linked directory is not descended into
+ * and a linked file is not read or removed. The jail the code tools enforce on a caller's
+ * path is the same rule, and a migration walking a tree unattended is not the place to
+ * relax it.
+ *
+ * @return array{found:int,stored:int,removed:int,skipped:int}
+ */
+function wpmcp_migrate_sweep_stale_backups() {
+    $tally = array('found' => 0, 'stored' => 0, 'removed' => 0, 'skipped' => 0);
+
+    if (!function_exists('wpmcp_code_root')) { return $tally; }
+
+    $root = wpmcp_code_root();
+    if ($root === '' || !is_dir($root)) { return $tally; }
+
+    // THE ONE PLACE IN THE PLUGIN THAT STILL SPELLS THE OLD SUFFIX, which is why it is
+    // passed down rather than pulled from a constant: tests/unit/StaleBackupSweepTest.php
+    // greps the whole repository for it and exempts exactly this function.
+    $suffix = '.bak';
+
+    $stale = array();
+    wpmcp_collect_stale_backups($root, $suffix, $stale, 0);
+
+    $tally['found'] = count($stale);
+
+    foreach ($stale as $abs) {
+        $rel = ltrim(str_replace('\\', '/', substr($abs, strlen($root))), '/');
+        // The original path: the same name without the suffix the old code appended.
+        $rel = substr($rel, 0, -strlen($suffix));
+
+        $content = @file_get_contents($abs);
+
+        if ($content === false || strlen($content) > wpmcp_version_max_bytes()) {
+            $tally['skipped']++;
+            continue;
+        }
+
+        // saved_by 0 and token_id NULL: nobody did this, the upgrade did.
+        if (wpmcp_file_version_save($rel, $content, 'sweep', 0, null) === false) {
+            $tally['skipped']++;
+            continue;
+        }
+
+        $tally['stored']++;
+
+        if (@unlink($abs)) { $tally['removed']++; } else { $tally['skipped']++; }
+    }
+
+    if ($tally['found'] > 0) {
+        wpmcp_auth_event('stale_backup_sweep', array(
+            'found'   => $tally['found'],
+            'stored'  => $tally['stored'],
+            'removed' => $tally['removed'],
+            'skipped' => $tally['skipped'],
+        ));
+    }
+
+    return $tally;
+}
+
+/**
+ * Append every file under $dir whose name ends in $suffix to $out. Depth-capped, and it
+ * steps over every symlink it meets - see wpmcp_migrate_sweep_stale_backups().
+ *
+ * scandir() and not RecursiveDirectoryIterator: the iterator descends into symlinked
+ * directories by default, and the guard against that is easier to read wrong than this
+ * loop is to read.
+ */
+function wpmcp_collect_stale_backups($dir, $suffix, &$out, $depth) {
+    if ($depth > 20) { return; }
+
+    $names = @scandir($dir);
+    if ($names === false) { return; }
+
+    foreach ($names as $name) {
+        if ($name === '.' || $name === '..') { continue; }
+
+        $full = $dir . '/' . $name;
+
+        if (is_link($full)) { continue; }
+
+        if (is_dir($full)) {
+            wpmcp_collect_stale_backups($full, $suffix, $out, $depth + 1);
+            continue;
+        }
+
+        if (is_file($full)
+            && strlen($name) > strlen($suffix)
+            && strtolower(substr($name, -strlen($suffix))) === strtolower($suffix)) {
+            $out[] = $full;
+        }
+    }
 }
 
 /**
@@ -356,6 +545,163 @@ register_deactivation_hook(__FILE__, function () {
 function wpmcp_table() {
     global $wpdb;
     return $wpdb->prefix . WPMCP_TABLE;
+}
+
+/* ============================================================
+ * File version store - the code tools' undo, in the one place WordPress never serves
+ * ========================================================== */
+function wpmcp_versions_table() {
+    global $wpdb;
+    return $wpdb->prefix . WPMCP_VERSIONS_TABLE;
+}
+
+/** The largest file the store will take: the same 512KB cap code-write enforces. */
+function wpmcp_version_max_bytes() {
+    return 524288;
+}
+
+/**
+ * How many versions are kept per path. Filterable; 20 by default.
+ *
+ * A CAP AND NOT A RETENTION PERIOD, because the thing being bounded is a table that
+ * grows by up to half a megabyte per write and is never read by anything but a human
+ * asking for an undo. Twenty is deep enough to walk back through a session of edits and
+ * shallow enough that a runaway agent cannot fill a database with them.
+ *
+ * A filter returning something useless - zero, a negative, a non-number - is ignored
+ * rather than obeyed, because "keep nothing" turns every write into an unrecoverable one
+ * and is far more likely to be a mistake than a decision.
+ */
+function wpmcp_file_versions_keep() {
+    $keep = (int) apply_filters('wpmcp_file_versions_keep', 20);
+    return $keep > 0 ? $keep : 20;
+}
+
+/**
+ * Store $content as the version of $rel that existed until now. Returns the new row's
+ * id, or false if it could not be stored.
+ *
+ * CALLED BEFORE THE DISK CHANGES, NEVER AFTER, and its false is a refusal the caller has
+ * to honour: a write that cannot be undone must not happen. Every caller in tools.php
+ * returns a tool error on false rather than carrying on.
+ *
+ * WRITTEN THROUGH UNHEX() RATHER THAN $wpdb->insert(). The value is arbitrary bytes, and
+ * every byte of it would otherwise be escaped into a SQL string literal that MySQL then
+ * parses under the connection's utf8mb4 charset. Bytes that are not valid UTF-8 - a
+ * latin1 theme file, a stray 0x80 in a comment - make that literal invalid at the point
+ * the server reads the statement, and what comes back out is not what went in. A hex
+ * literal has no charset and cannot be misread; the cost is that the statement is twice
+ * the size of the file, which at half a megabyte is nothing.
+ *
+ * @param string   $rel      path relative to the code root, as the tools spell it
+ * @param string   $content  the bytes as they are on disk right now
+ * @param string   $reason   write | delete | restore | sweep
+ * @param int|null $userId   who caused it; null = the current user, 0 = nobody (the sweep)
+ * @param int|null $tokenId  the session's token row id; null when there is no session
+ * @return int|false
+ */
+function wpmcp_file_version_save($rel, $content, $reason, $userId = null, $tokenId = null) {
+    global $wpdb;
+
+    $content = (string) $content;
+    if (strlen($content) > wpmcp_version_max_bytes()) { return false; }
+
+    if ($userId === null) { $userId = get_current_user_id(); }
+    if ($tokenId === null) {
+        $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
+        $tokenId = $session ? (int) $session->id : null;
+    }
+
+    // token_id is a LITERAL `NULL` rather than a placeholder when there is no session,
+    // because $wpdb->prepare() turns a null argument into an empty string whatever the
+    // placeholder says - and '' in a bigint column is 0, which is a real token's id.
+    // "No token was involved" and "token 0" must not be the same row.
+    $sql = 'INSERT INTO ' . wpmcp_versions_table()
+        . ' (path, content, size, sha256, reason, saved_by, token_id, saved_at)'
+        . ' VALUES (%s, UNHEX(%s), %d, %s, %s, %d, '
+        . ($tokenId === null ? 'NULL' : '%d') . ', %s)';
+
+    $args = array(
+        (string) $rel,
+        bin2hex($content),
+        strlen($content),
+        hash('sha256', $content),
+        (string) $reason,
+        (int) $userId,
+    );
+
+    if ($tokenId !== null) { $args[] = (int) $tokenId; }
+
+    $args[] = gmdate('Y-m-d H:i:s');
+
+    $ok = $wpdb->query($wpdb->prepare($sql, $args));
+
+    if ($ok === false) { return false; }
+
+    $id = (int) $wpdb->insert_id;
+    wpmcp_file_versions_prune($rel);
+
+    return $id;
+}
+
+/**
+ * Drop everything past the newest wpmcp_file_versions_keep() rows for one path.
+ *
+ * ORDERED BY saved_at AND THEN id, both here and in code-history, because saved_at has
+ * one-second resolution and a agent editing a file writes several versions inside one
+ * second. Without the id tiebreak "the oldest" is whichever row MySQL felt like
+ * returning last, so the wrong version could be the one deleted - and the listing and
+ * the pruner could disagree about which rows exist.
+ */
+function wpmcp_file_versions_prune($rel) {
+    global $wpdb;
+
+    $doomed = $wpdb->get_col($wpdb->prepare(
+        'SELECT id FROM ' . wpmcp_versions_table()
+        . ' WHERE path = %s ORDER BY saved_at DESC, id DESC LIMIT %d, 4294967295',
+        (string) $rel,
+        wpmcp_file_versions_keep()
+    ));
+
+    if (!is_array($doomed) || $doomed === array()) { return 0; }
+
+    $ids = implode(',', array_map('intval', $doomed));
+
+    // Interpolated, and safe: every element has been through intval().
+    return (int) $wpdb->query('DELETE FROM ' . wpmcp_versions_table() . " WHERE id IN ({$ids})"); // phpcs:ignore
+}
+
+/** One version row by id, or null. `content` comes back as the raw bytes. */
+function wpmcp_file_version_get($id) {
+    global $wpdb;
+
+    $row = $wpdb->get_row($wpdb->prepare(
+        'SELECT id, path, content, size, sha256, reason, saved_by, token_id, saved_at'
+        . ' FROM ' . wpmcp_versions_table() . ' WHERE id = %d',
+        (int) $id
+    ));
+
+    return $row ? $row : null;
+}
+
+/**
+ * Every stored version of one path, newest first. Without `content`: a listing is a
+ * table of contents, and the bodies are up to half a megabyte each.
+ *
+ * @return array list of row objects
+ */
+function wpmcp_file_versions_for($rel, $limit = 50) {
+    global $wpdb;
+
+    $rows = $wpdb->get_results($wpdb->prepare(
+        'SELECT id, path, size, sha256, reason, saved_by, token_id, saved_at'
+        . ' FROM ' . wpmcp_versions_table()
+        . ' WHERE path = %s ORDER BY saved_at DESC, id DESC LIMIT %d',
+        (string) $rel,
+        (int) $limit
+    ));
+
+    return is_array($rows) ? $rows : array();
 }
 
 function wpmcp_hash($raw) {

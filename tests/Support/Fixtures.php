@@ -416,6 +416,170 @@ final class Fixtures
     }
 
     /**
+     * Write a file into the ACTIVE THEME of the site under test and return its relative
+     * path. The code tools' jail is the active theme, so a test of them has nowhere else
+     * to stand.
+     *
+     * THE ACTIVE THEME ON THE STRESS SITE IS A REAL CLIENT THEME. Nothing here reads,
+     * moves or overwrites a file that was already there: the name must carry this run's
+     * prefix (assertPrefixed), so it cannot collide with a theme file, and
+     * deleteThemeFiles() takes back only prefixed names.
+     *
+     * Through `wp eval` rather than file_put_contents for the reason MuPlugin gives: in
+     * CI the site's filesystem is inside a container the host cannot reach.
+     */
+    public static function writeThemeFile(string $relative, string $content): string
+    {
+        self::assertPrefixed($relative);
+
+        $written = WpCli::evaluate(sprintf(
+            '$p = get_stylesheet_directory() . "/" . %s;'
+            . ' if (!wp_mkdir_p(dirname($p))) { echo "NO-DIR"; return; }'
+            . ' echo file_put_contents($p, base64_decode(%s)) === false ? "FAIL" : "OK";',
+            self::phpString($relative),
+            self::phpString(base64_encode($content))
+        ));
+
+        if ($written !== 'OK') {
+            throw new RuntimeException(
+                "Could not write the theme fixture {$relative}: {$written}"
+            );
+        }
+
+        return $relative;
+    }
+
+    /**
+     * The bytes of a file in the active theme, base64 round-tripped so CRLF, a BOM and
+     * anything else survive the trip through wp-cli's stdout. '' when it is not there;
+     * use themeFileExists() to tell an empty file from a missing one.
+     */
+    public static function readThemeFile(string $relative): string
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$p = get_stylesheet_directory() . "/" . %s;'
+            . ' echo is_file($p) ? base64_encode((string) file_get_contents($p)) : "";',
+            self::phpString($relative)
+        ));
+
+        return $raw === '' ? '' : (string) base64_decode($raw, true);
+    }
+
+    public static function themeFileExists(string $relative): bool
+    {
+        return WpCli::evaluate(sprintf(
+            'echo (int) is_file(get_stylesheet_directory() . "/" . %s);',
+            self::phpString($relative)
+        )) === '1';
+    }
+
+    /**
+     * Every entry in one directory of the active theme, as names. The `.bak` assertions
+     * need a LISTING and not an is_file() on a name they guessed: "the revert left no
+     * backup" is a claim about what is in the directory, and a test that only asks after
+     * the one name it expects cannot see a backup written under another.
+     *
+     * @return list<string>
+     */
+    public static function themeDirListing(string $relative = ''): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$d = rtrim(get_stylesheet_directory() . "/" . %s, "/");'
+            . ' if (!is_dir($d)) { return; }'
+            . ' foreach (scandir($d) as $n) {'
+            . '  if ($n !== "." && $n !== "..") { echo $n, "\n"; }'
+            . ' }',
+            self::phpString($relative)
+        ));
+
+        $names = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line, "\r\n ");
+
+            if ($line !== '') { $names[] = $line; }
+        }
+
+        return $names;
+    }
+
+    /**
+     * Fixture-named files anywhere in the active theme, of any run.
+     *
+     * @return array<string, string> relative path => relative path
+     */
+    public static function leftoverThemeFiles(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$root = realpath(get_stylesheet_directory());'
+            . ' if (!$root) { return; }'
+            . ' $it = new RecursiveIteratorIterator('
+            . '  new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));'
+            . ' foreach ($it as $f) {'
+            . '  $n = $f->getFilename();'
+            . '  if (strpos($n, %s) === 0) {'
+            . '   echo ltrim(str_replace("\\\\", "/", substr($f->getPathname(), strlen($root))), "/"), "\n";'
+            . '  }'
+            . ' }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line, "\r\n ");
+
+            if ($line !== '' && str_contains($line, self::PREFIX)) {
+                $found[$line] = basename($line);
+            }
+        }
+
+        return $found;
+    }
+
+    /** Remove one file from the active theme. Tolerant: it may already be gone. */
+    public static function deleteThemeFile(string $relative): void
+    {
+        self::assertPrefixed(basename($relative));
+
+        WpCli::tryEvaluate(sprintf(
+            '$p = get_stylesheet_directory() . "/" . %s;'
+            . ' echo is_file($p) ? (int) unlink($p) : 1;',
+            self::phpString($relative)
+        ));
+    }
+
+    /**
+     * Fixture-named rows in the file-versions table, of any run.
+     *
+     * @return array<int, string> row id => path
+     */
+    public static function leftoverFileVersions(): array
+    {
+        $raw = WpCli::tryEvaluate(sprintf(
+            'if (!function_exists("wpmcp_versions_table")) { return; }'
+            . ' global $wpdb; $rows = $wpdb->get_results($wpdb->prepare('
+            . '"SELECT id, path FROM " . wpmcp_versions_table() . " WHERE path LIKE %%s", %s));'
+            . ' foreach ((array) $rows as $r) { echo (int) $r->id, "\t", $r->path, "\n"; }',
+            self::phpString('%' . self::PREFIX . '%')
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $parts = explode("\t", trim($line, "\r\n"));
+
+            if (count($parts) !== 2 || !str_contains($parts[1], self::PREFIX)) {
+                continue;
+            }
+
+            $found[(int) $parts[0]] = $parts[1];
+        }
+
+        return $found;
+    }
+
+    /**
      * Delete tokens by label. Via `wp eval` and $wpdb->delete rather than `wp db
      * query`, because the mysql client is not on PATH on every machine that can run
      * this suite - notably not on the one it was written on.
@@ -462,6 +626,21 @@ final class Fixtures
             'global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
             . '"DELETE FROM " . wpmcp_table() . " WHERE label LIKE %%s", %s));',
             self::phpString(self::runPrefix() . '%')
+        ));
+
+        // THE ACTIVE THEME AND THE VERSIONS TABLE, which sprint 8's code tools write to.
+        // A red run of a code-tool test leaves a fixture file inside somebody's theme -
+        // on the stress site, a real client's theme - and a row holding its bytes. Both
+        // are this run's alone, matched on the run prefix like everything else.
+        foreach (self::ours(self::leftoverThemeFiles()) as $relative => $name) {
+            self::deleteThemeFile((string) $relative);
+        }
+
+        WpCli::tryEvaluate(sprintf(
+            'if (!function_exists("wpmcp_versions_table")) { return; }'
+            . ' global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
+            . '"DELETE FROM " . wpmcp_versions_table() . " WHERE path LIKE %%s", %s));',
+            self::phpString('%' . self::runPrefix() . '%')
         ));
 
         // Disarms this run's mu-plugins as well as deleting them.
@@ -513,6 +692,16 @@ final class Fixtures
             $lines[] = '  transient         ' . $name;
         }
 
+        // The relative path, not the basename the matching is done on: "which file, in
+        // whose theme" is the whole of what a human needs to go and look.
+        foreach (self::foreign(self::leftoverThemeFiles()) as $relative => $name) {
+            $lines[] = '  theme file        ' . $relative;
+        }
+
+        foreach (self::foreign(self::leftoverFileVersions()) as $id => $path) {
+            $lines[] = sprintf('  version %-5s     %s', (string) $id, $path);
+        }
+
         if ($lines === []) {
             return '';
         }
@@ -524,7 +713,9 @@ final class Fixtures
             array_values(self::foreign(self::leftoverPosts())),
             array_values(self::foreign(self::leftoverTokenLabels())),
             array_values(self::foreign(MuPlugin::leftovers())),
-            array_values(self::foreign(self::leftoverTransients()))
+            array_values(self::foreign(self::leftoverTransients())),
+            array_values(self::foreign(self::leftoverThemeFiles())),
+            array_values(self::foreign(self::leftoverFileVersions()))
         ) as $name) {
             $suffixes[self::runIdIn($name) ?: '(no run id)'] = true;
         }
