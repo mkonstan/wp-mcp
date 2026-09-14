@@ -39,9 +39,9 @@
  *                  overwrite a published body without asking. When in doubt, true.
  *   idempotentHint  false  the four tools that CREATE a new object per call
  *                          (create-post, create-term, upload-media, reply-comment), and
- *                          code-write, whose second call rotates the .bak onto the
- *                          content the first one wrote - the file is the same, the
- *                          backup is not.
+ *                          code-write and code-restore, whose second call stores another
+ *                          version of the file - the file ends up the same, the history
+ *                          does not.
  *                   true   everything else: reading twice, deleting twice, setting the
  *                          same status twice, writing the same fields twice.
  *   openWorldHint   true   upload-media ALONE. It fetches a URL the caller supplies;
@@ -199,17 +199,42 @@ function wpmcp_code_ext_ok($rel) {
 }
 
 /**
- * A .bak path is safe to copy/rename onto only if it is not itself a symlink
- * (copy() follows the symlink target) and, if it exists, resolves inside the
- * theme root. Same jail guarantee as the main target.
+ * Put the bytes that are on disk at $abs into the version store, under the tool-relative
+ * path $rel, before anything changes them. Returns array('id'=>int,'content'=>string) or
+ * a WP_Error the calling tool must return as-is.
+ *
+ * CALLED BY EVERY TOOL THAT MUTATES A FILE UNDER THE CODE ROOT, and its failure stops the
+ * mutation. A write whose undo could not be stored is a write that cannot be taken back,
+ * and the whole point of this sprint is that one always can be. Fail closed.
+ *
+ * It hands the CONTENT back as well as the row id because code-write's parse-error revert
+ * needs those exact bytes a few lines later, and reading them out of the table again to
+ * get what is already in a local variable would be a second thing that can fail in the
+ * middle of an abort.
+ *
+ * The 512KB cap is the store's, and it is the same number code-write enforces on the way
+ * in. A theme file larger than that cannot be versioned, so it cannot be deleted either -
+ * which is the safe direction: refusing to delete something is recoverable, and deleting
+ * the only copy is not.
  */
-function wpmcp_bak_ok($bak) {
-    if (is_link($bak)) { return false; }
-    if (file_exists($bak)) {
-        $real = realpath($bak);
-        if ($real === false || !wpmcp_path_within($real, wpmcp_code_root())) { return false; }
+function wpmcp_code_version_current($abs, $rel, $reason) {
+    $content = @file_get_contents($abs);
+
+    if ($content === false) {
+        return new WP_Error('wpmcp_version_failed', 'Could not read the current file, so nothing was changed.');
     }
-    return true;
+
+    if (strlen($content) > wpmcp_version_max_bytes()) {
+        return new WP_Error('wpmcp_too_big', 'The current file exceeds 512KB, so no version of it can be stored and it was left alone.');
+    }
+
+    $id = wpmcp_file_version_save($rel, $content, $reason);
+
+    if ($id === false) {
+        return new WP_Error('wpmcp_version_failed', 'Could not store a version of the current file, so nothing was changed.');
+    }
+
+    return array('id' => $id, 'content' => $content);
 }
 
 /**
@@ -1353,7 +1378,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Create or overwrite a text file in the theme. Active theme only. Args: path (required), content (required). Backs up to .bak; PHP is parse-checked and auto-reverted on a syntax error.',
+        'description' => 'Create or overwrite a text file in the theme. Active theme only. Args: path (required), content (required). The previous contents are stored as a version first (see code-history); PHP is parse-checked and auto-reverted on a syntax error.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
         ), 'required' => array('path', 'content')),
@@ -1366,10 +1391,19 @@ function wpmcp_code_tools() {
             $content = isset($a['content']) ? (string) $a['content'] : '';
             if (strlen($content) > 524288) { return new WP_Error('wpmcp_too_big', 'Content exceeds 512KB.'); }
 
-            $existed = is_file($r['abs']);
-            $bak = $r['abs'] . '.bak';
-            if (!wpmcp_bak_ok($bak)) { return new WP_Error('wpmcp_bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
-            if ($existed) { @copy($r['abs'], $bak); }
+            // THE VERSION IS TAKEN BEFORE THE DISK CHANGES, and a file that is not there
+            // has no previous contents, so it gets no row: a version of nothing is an
+            // undo that restores an empty file.
+            $existed  = is_file($r['abs']);
+            $prior    = null;
+            $versionId = null;
+            if ($existed) {
+                $saved = wpmcp_code_version_current($r['abs'], $r['rel'], 'write');
+                if (is_wp_error($saved)) { return $saved; }
+                $prior     = $saved['content'];
+                $versionId = $saved['id'];
+            }
+
             $bytes = file_put_contents($r['abs'], $content);
             if ($bytes === false) { return new WP_Error('wpmcp_write_failed', 'Could not write file.'); }
 
@@ -1378,13 +1412,17 @@ function wpmcp_code_tools() {
                 $chk = wpmcp_php_parse_ok($content);
                 if ($chk !== true) {
                     $perr = $chk;
-                    if ($existed) { @copy($bak, $r['abs']); } else { @unlink($r['abs']); }
+                    // FROM MEMORY, not from a file beside it. $prior is the byte string
+                    // that was just stored, so the revert and the stored version cannot
+                    // disagree, and nothing under the document root is involved.
+                    if ($existed) { file_put_contents($r['abs'], $prior); } else { @unlink($r['abs']); }
                     $reverted = true;
                 }
             }
             $out = array(
                 'path' => $r['rel'], 'bytes' => $reverted ? 0 : (int) $bytes,
                 'created' => ($existed ? false : !$reverted), 'reverted' => $reverted,
+                'version_id' => $versionId,
             );
             if ($perr !== null) { $out['error'] = 'PHP parse error (reverted): ' . $perr; }
             return $out;
@@ -1399,7 +1437,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a file in the theme. Active theme only; the file is moved to .bak rather than unlinked. Args: path (required).',
+        'description' => 'Delete a file in the theme. Active theme only; its contents are stored as a version first, so code-history and code-restore can bring it back. Args: path (required).',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
@@ -1408,10 +1446,17 @@ function wpmcp_code_tools() {
             $r = wpmcp_code_target($a, true);
             if (is_wp_error($r)) { return $r; }
             if (!is_file($r['abs'])) { return new WP_Error('wpmcp_not_found', 'Not a file.'); }
-            $bak = $r['abs'] . '.bak';
-            if (!wpmcp_bak_ok($bak)) { return new WP_Error('wpmcp_bak_unsafe', 'Backup path is unsafe (symlink or outside theme).'); }
-            if (!@rename($r['abs'], $bak)) { return new WP_Error('wpmcp_delete_failed', 'Could not move file to .bak.'); }
-            return array('path' => $r['rel'], 'deleted' => true, 'backup' => basename($bak));
+
+            // Stored first, and the delete does not happen if it could not be.
+            $saved = wpmcp_code_version_current($r['abs'], $r['rel'], 'delete');
+            if (is_wp_error($saved)) { return $saved; }
+
+            // UNLINKED, not renamed. The rename left the whole file, readable, one
+            // extension away, inside the document root - which is what the version store
+            // exists to stop.
+            if (!@unlink($r['abs'])) { return new WP_Error('wpmcp_delete_failed', 'Could not delete the file.'); }
+
+            return array('path' => $r['rel'], 'deleted' => true, 'version_id' => $saved['id']);
         },
     ),
 
