@@ -191,19 +191,26 @@ final class BoundIpDropMigrationTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * And the site under test really is at revision 3 with no such column - the outcome,
-     * as opposed to the function in isolation. Read-only: nothing is installed here.
+     * And the site under test really is past revision 3 with no such column - the
+     * outcome, as opposed to the function in isolation. Read-only: nothing is installed
+     * here.
+     *
+     * AT LEAST 3, NOT EXACTLY 3. The claim this test makes is that the drop shipped
+     * WITH a schema bump, so wpmcp_maybe_upgrade() runs it on an existing site. A later
+     * sprint bumping the revision again (4 added the file-version table) does not make
+     * that claim false, and pinning the number here turned a sprint-7 gate red for a
+     * sprint-8 change that had nothing to do with it.
      *
      * @group sprint-7
      */
-    public function testTheLiveSiteIsAtRevisionThreeWithoutTheColumn(): void
+    public function testTheLiveSiteIsPastRevisionThreeWithoutTheColumn(): void
     {
         self::dropColumn(); // in case this method runs after the fixture add
 
-        self::assertSame(
-            '3',
-            WpCli::evaluate('echo (int) WPMCP_DB_VER;'),
-            'WPMCP_DB_VER is not 3, so the column drop ships without a schema bump and'
+        self::assertGreaterThanOrEqual(
+            3,
+            (int) WpCli::evaluate('echo (int) WPMCP_DB_VER;'),
+            'WPMCP_DB_VER is below 3, so the column drop ships without a schema bump and'
             . ' wpmcp_maybe_upgrade() will never run it on an existing site.'
         );
 
