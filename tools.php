@@ -1876,14 +1876,16 @@ function wpmcp_sql_restore_session($variable, $priorTimeout, $priorSwitch) {
 /**
  * The identifiers this tool refuses to see, ANYWHERE in the statement, case-insensitively.
  *
- * THIS IS THE ONLY STRING INSPECTION IN THE TOOL AND IT EXISTS BECAUSE THE SERVER CANNOT
- * MAKE THIS DECISION. Everything else the tool refuses is refused by MySQL itself - the
+ * THIS AND wpmcp_sql_denied_functions() ARE THE WHOLE OF THE STRING INSPECTION IN THIS
+ * TOOL - two table names and one function name - AND THEY EXIST BECAUSE THE SERVER CANNOT
+ * MAKE THESE DECISIONS. Everything else the tool refuses is refused by MySQL itself - the
  * wrapper's grammar, the READ ONLY transaction, the statement timeout. But the WordPress
  * database user owns the token table and the file-version table: it created them and it
  * can read them, and there is no GRANT this plugin can issue on its own connection to
  * take that away. So the one thing the server will happily do and must not is read the
  * table of token hashes and the table of theme-file bytes, and the only place that can be
- * stopped is here, before the statement is sent.
+ * stopped is here, before the statement is sent. `LOAD_FILE()` is the same shape of
+ * problem with a different subject and lives in the other function.
  *
  * NOTHING IS STRIPPED FIRST. No comments removed, no strings skipped, no tokenising: a
  * mention of either name inside a comment or inside a string literal refuses the whole
@@ -2017,10 +2019,15 @@ function wpmcp_sql_errno() {
  * left inside a READ ONLY transaction fails all of it with 1792. The `finally` is what
  * makes that true after a throw as well as after an error.
  *
- * NOTHING ELSE IS RESTORED. MAX_EXECUTION_TIME applies to read-only SELECTs and nothing
- * else, optimizer_switch only changes a plan and not a result, both are session-scoped,
- * and the request ends within milliseconds of this returning - so putting them back would
- * be two more round trips buying nothing. It is a deliberate choice, not an oversight.
+ * AND THE TWO SESSION VARIABLES GO BACK WITH IT. Their prior values are read - two
+ * `get_var`s - before either is changed, and wpmcp_sql_restore_session() puts them back in
+ * the same `finally`, AFTER the ROLLBACK: a restore issued while still inside the
+ * transaction would make the clean-up depend on the thing it is cleaning up after. The
+ * first version of this left them set and argued that both are session-scoped and the
+ * request ends in milliseconds anyway. True, and beside the point: for those milliseconds
+ * every remaining WordPress SELECT ran under a 5-second server cap and every remaining
+ * plan was built with derived_merge off, which is this tool changing how somebody else's
+ * query behaves. Found by review. Two round trips is the right price.
  *
  * A FAILED `SET` IS NOT THE CALLER'S ERROR. An exotic server that does not know one of
  * these variables leaves its complaint in $wpdb->last_error, which the code below would

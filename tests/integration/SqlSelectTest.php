@@ -79,6 +79,18 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     /** `on` or `off`: whether THIS site's optimizer_switch has derived_merge on. */
     private static string $mergeDefault = 'on';
 
+    /** What a session variable this server does not have reads back as. */
+    private const ABSENT = '(absent)';
+
+    /** The statement-timeout variable THIS server's flavour uses, per the plugin. */
+    private static string $timeoutVariable = '';
+
+    /** Its value before anything in this class ran, or ABSENT. */
+    private static string $timeoutBefore = '';
+
+    /** What the server calls itself, for the failure message when the name is wrong. */
+    private static string $serverInfo = '';
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -93,8 +105,25 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
 
         self::$optionBefore = self::storedSwitch();
 
-        // What this site's connection starts a request with, so the restore assertion
-        // compares against the operator's value and not against a guess.
+        // WHAT THIS SITE'S CONNECTION STARTS A REQUEST WITH, so the restore assertions
+        // compare against the operator's own values rather than against a constant.
+        //
+        // The timeout variable's NAME comes from the plugin, because the two flavours
+        // spell it differently and a test that hard-coded MySQL's spelling would read
+        // null on MariaDB - and `assertNotSame('5000', null)` passes for a connection
+        // that was never restored at all. Asking wpmcp_sql_timeout_variable() means the
+        // probe reads the variable the tool actually sets, on whichever server this is.
+        self::$serverInfo = trim(WpCli::evaluate('echo wpmcp_sql_server_info();'));
+        self::$timeoutVariable = trim(WpCli::evaluate(
+            'echo wpmcp_sql_timeout_variable(wpmcp_sql_server_info());'
+        ));
+        self::$timeoutBefore = trim(WpCli::evaluate(
+            'global $wpdb; $s = $wpdb->suppress_errors(true);'
+            . ' $v = $wpdb->get_var("SELECT @@SESSION." . wpmcp_sql_timeout_variable(wpmcp_sql_server_info()));'
+            . ' $wpdb->suppress_errors($s);'
+            . " echo \$v === null ? '" . self::ABSENT . "' : (string) \$v;"
+        ));
+
         self::$mergeDefault = str_contains(
             WpCli::evaluate('global $wpdb; echo (string) $wpdb->get_var("SELECT @@SESSION.optimizer_switch");'),
             'derived_merge=off'
@@ -786,10 +815,34 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
      */
     private function assertSessionHandedBackClean(array $probe, string $after): void
     {
+        $variable = self::$timeoutVariable;
+
+        // The probe read the variable the PLUGIN sets, not one this test chose. If those
+        // two ever disagree, every assertion below is about the wrong variable.
+        self::assertSame(
+            $variable,
+            (string) ($probe['timeout_var'] ?? 'the probe reported no variable name'),
+            'The probe and the plugin disagree about which session variable carries the'
+            . ' statement timeout on this server.'
+        );
+
+        // AND THE VARIABLE HAS TO EXIST HERE. If it does not, sql-select's statement
+        // timeout is silently doing nothing on this flavour - and the equality below
+        // would be comparing one absence with another and passing. This is the assertion
+        // that fires on a MariaDB if wpmcp_sql_timeout_variable() names the wrong thing,
+        // which is the first place anyone on this project will meet a MariaDB.
         self::assertNotSame(
-            '5000',
+            self::ABSENT,
+            self::$timeoutBefore,
+            "This server has no @@SESSION.{$variable}, so the statement timeout"
+            . ' sql-select sets does nothing here. Server: ' . self::$serverInfo
+        );
+
+        self::assertSame(
+            self::$timeoutBefore,
             (string) ($probe['timeout'] ?? 'the probe reported no timeout at all'),
-            "MAX_EXECUTION_TIME was still 5000 after {$after} returned."
+            "@@SESSION.{$variable} did not go back to this site's own value ("
+            . self::$timeoutBefore . ") after {$after} returned."
         );
         self::assertSame(
             self::$mergeDefault,
@@ -912,6 +965,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
         $arm    = 'HTTP_' . strtoupper(str_replace('-', '_', self::ARM_HEADER));
         $probe  = 'HTTP_' . strtoupper(str_replace('-', '_', self::PROBE_HEADER));
         $never  = Fixtures::name('option-that-never-exists');
+        $absent = self::ABSENT;
 
         return <<<PHP
 /**
@@ -952,14 +1006,24 @@ add_action('shutdown', static function () use (\$wpmcp_test_sql_armed) {
     // The session variables sql-select changed, read back on the connection it handed
     // over. Anything but the values this site started the request with means the tool
     // put a 5-second cap and an altered plan on everybody else's queries.
-    \$timeout = \$wpdb->get_var('SELECT @@SESSION.MAX_EXECUTION_TIME');
+    //
+    // THE VARIABLE NAME COMES FROM THE PLUGIN. MySQL and MariaDB spell it differently,
+    // and reading MySQL's name on a MariaDB gives null - which an assertion written as
+    // \"not 5000\" would accept from a connection nobody restored.
+    \$variable = function_exists('wpmcp_sql_timeout_variable')
+        && function_exists('wpmcp_sql_server_info')
+        ? wpmcp_sql_timeout_variable(wpmcp_sql_server_info())
+        : 'MAX_EXECUTION_TIME';
+
+    \$timeout = \$wpdb->get_var('SELECT @@SESSION.' . \$variable);
     \$switch  = \$wpdb->get_var('SELECT @@SESSION.optimizer_switch');
     \$wpdb->suppress_errors(\$suppressed);
 
     wpmcp_auth_event('tx_probe', array(
-        'error'   => \$error,
-        'timeout' => (string) \$timeout,
-        'merge'   => strpos((string) \$switch, 'derived_merge=off') === false ? 'on' : 'off',
+        'error'       => \$error,
+        'timeout_var' => (string) \$variable,
+        'timeout'     => \$timeout === null ? '{$absent}' : (string) \$timeout,
+        'merge'       => strpos((string) \$switch, 'derived_merge=off') === false ? 'on' : 'off',
     ));
 }, 1);
 PHP;
