@@ -137,7 +137,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Twenty-eight tools. Each declares the four MCP annotation hints, so a client can tell a
+Thirty-three tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -151,6 +151,8 @@ listing from a deletion before it asks you to approve anything.
 | `list-media` | read | yes | no | yes | no |
 | `get-media` | read | yes | no | yes | no |
 | `list-comments` | read | yes | no | yes | no |
+| `list-menus` | read | yes | no | yes | no |
+| `get-menu` | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -161,6 +163,9 @@ listing from a deletion before it asks you to approve anything.
 | `delete-media` | admin | no | yes | yes | no |
 | `moderate-comment` | admin | no | yes | yes | no |
 | `reply-comment` | admin | no | no | no | no |
+| `add-menu-item` | admin | no | no | no | no |
+| `update-menu-item` | admin | no | yes | yes | no |
+| `remove-menu-item` | admin | no | yes | yes | no |
 | `code-list` | admin + code editing | no | no | yes | no |
 | `code-read` | admin + code editing | no | no | yes | no |
 | `code-write` | admin + code editing | no | yes | no | no |
@@ -179,7 +184,7 @@ sit behind the admin gate, so they report `false`. The active theme is source co
 content, and a SELECT over `wp_users` is not content either. `destructiveHint` is where
 each of them says it destroys nothing.
 
-`destructiveHint: false` is MCP's own narrow promise that an update is additive. The four
+`destructiveHint: false` is MCP's own narrow promise that an update is additive. The five
 tools that make a new object per call keep it. `update-post` does not: it replaces every
 field it is given, and its `terms` argument replaces the post's terms in that taxonomy
 rather than adding to them.
@@ -352,6 +357,42 @@ off (`WP_POST_REVISIONS` false, or a post type that does not keep them), `list-r
 empty and `update-post` has nothing to save. Where `WP_POST_REVISIONS` is `1`, WordPress
 keeps one revision per post, so the copy `update-post` saves first is deleted by the same
 update and there is nothing to restore.
+
+### Menus
+
+Classic menus only - the ones **Appearance > Menus** edits and a classic theme's
+`wp_nav_menu()` shows. A block theme's Navigation block keeps its links somewhere else and
+is not touched; on such a site `list-menus` says `block_theme: true`, as a warning that a
+classic menu you change may not be what visitors see.
+
+- `list-menus` returns every menu (id, name, slug, item count, the theme locations it is
+  assigned to), the locations the theme registers with the menu each one holds, and
+  `block_theme`.
+- `get-menu {id}` returns one menu's items as a tree: id, title, type, object, object_id,
+  url, target, classes, parent, position among its siblings, menu_order in the whole menu,
+  status, and children.
+- `add-menu-item {menu_id, type, object_id?, url?, title?, parent_id?, position?, target?,
+  classes?}` adds one. `type` is `custom` for a plain link, a post type such as `page`, or a
+  taxonomy such as `category`. A linked post must exist and be readable by you. A custom url
+  must be http, https or relative: `javascript:` and every other scheme is refused, where
+  WordPress itself would quietly store an empty link.
+- `update-menu-item {id, title?, url?, target?, classes?, parent_id?, position?}` changes
+  what you send and leaves the rest. A parent must be an item of the same menu, and not the
+  item itself or one inside it.
+- `remove-menu-item {id}` deletes one - menu items have no trash. Its children move up one
+  level into its place, as they do in wp-admin.
+
+**Every write renumbers the menu** so its order runs 1, 2, 3 from top to bottom.
+WordPress's own function stores the position it is given and moves nothing else, so two
+items would end up claiming one place; wp-admin renumbers in the browser before it saves,
+and these tools do it on the server.
+
+Reading needs what WordPress's REST API needs - the capability to edit posts or theme
+options - so an Editor can read menus and a Subscriber cannot. Writing needs
+`edit_theme_options`: Administrators, not Editors. An item that links to something you may
+not read, such as another user's draft or private page, is still listed, with its title,
+url and object_id null and `withheld: true`. An id that is not a menu, or not a menu item,
+answers exactly like an id that is not there.
 
 ### Post meta (opt-in)
 

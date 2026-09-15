@@ -149,6 +149,32 @@ admin can renew them for thirty days from when they were minted - see below.
   A restore is also an ordinary update, so a scheduled post whose date has passed is
   published by it.
 
+### Added: `list-menus`, `get-menu`, `add-menu-item`, `update-menu-item` and `remove-menu-item`
+
+- **Classic navigation menus** - the `nav_menu` taxonomy and its items, what Appearance >
+  Menus edits. `list-menus` and `get-menu` (read scope) list the menus, the theme's menu
+  locations and one menu's items as a tree; `add-menu-item`, `update-menu-item` and
+  `remove-menu-item` (admin scope) change them. A block theme's Navigation block
+  (`wp_navigation`) is not edited; `list-menus` reports `block_theme` so a client knows
+  when a classic menu may not be what visitors see. The catalog is 33 tools.
+- **WordPress's own gates.** Reading needs `edit_theme_options`, or `edit_posts` on any post
+  type in the REST API, as core's menus endpoints check: Editors read menus, Subscribers do
+  not. Writing needs `edit_theme_options`, which is what every capability WordPress maps
+  for menu items resolves to.
+- **The order stays contiguous.** `position` places an item among its siblings and every
+  write renumbers the menu 1..N. WordPress's own function shifts nothing, so two items
+  could hold one place, and it gives a new menu's first item 0.
+- **Removing an item lifts its children** one level, into its place, as wp-admin does.
+  WordPress's function leaves them pointing at the deleted item.
+- **Refused, by name, where WordPress would store it:** a parent from another menu, a parent
+  inside the item being moved, and a url that is not http, https or relative - WordPress
+  stores a `javascript:` url as an empty link without a word.
+- **A menu never reveals what its reader may not read.** An item linking to another user's
+  draft or private page is listed with its title, url and linked id null, and marked
+  `withheld`.
+- **Backslashes survive** in item labels, and a linked item given its page's own title
+  still follows that page when it is renamed.
+
 ### Changed: `update-post` saves the pre-change state first
 
 - **The first edit of a post is undoable now.** WordPress saves a revision after an update,
