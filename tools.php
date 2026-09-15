@@ -963,7 +963,12 @@ function wpmcp_apply_terms($post_id, $terms) {
                 $refused[$tax][] = (string) $v;
                 continue;
             }
-            $new = wp_insert_term((string) $v, $tax);
+            // SLASHED. wp_insert_term() unslashes the name it is given
+            // (taxonomy.php:2509-2511, `// expected_slashed ($name)`), so a category
+            // created from `terms: {category: ["A\\B"]}` was stored as `AB`. Core's own
+            // terms controller slashes here too
+            // (class-wp-rest-terms-controller.php:550).
+            $new = wp_insert_term(wp_slash((string) $v), $tax);
             if (!is_wp_error($new)) { $ids[] = (int) $new['term_id']; }
         }
 
@@ -1781,7 +1786,13 @@ function wpmcp_content_tools() {
             if (isset($a['status']))  { $changed[] = 'status'; }
             $changed = array_merge($changed, $fields['changed']);
 
-            $id = wp_insert_post($postarr, true);
+            // SLASHED AT THE BOUNDARY, as one array rather than field by field.
+            // wp_insert_post() unslashes the whole row it is about to write
+            // (post.php:4981), and the kses filters on `content_save_pre` for a user
+            // without unfiltered_html are `addslashes(wp_kses(stripslashes(...)))` - both
+            // conventions expect slashed input, and raw JSON is not. Core's own posts
+            // controller does exactly this (class-wp-rest-posts-controller.php:776).
+            $id = wp_insert_post(wp_slash($postarr), true);
             if (is_wp_error($id)) { return $id; }
             $out = array('id' => (int) $id, 'link' => get_permalink($id));
             if (!empty($a['terms']) && is_array($a['terms'])) {
@@ -1877,7 +1888,13 @@ function wpmcp_content_tools() {
             $upd     = array_merge($upd, $fields['insert']);
             $changed = array_merge($changed, $fields['changed']);
 
-            $r = wp_update_post($upd, true);
+            // SLASHED, and here it is not only wp_insert_post's unslash at the far end:
+            // wp_update_post() reads the existing row and calls `wp_slash($post)` on it
+            // (post.php:5345, "Escape data pulled from DB") before merging our array over
+            // it. An unslashed array merged into a slashed row is two conventions in one
+            // structure, and every field we sent comes out one backslash short.
+            // class-wp-rest-posts-controller.php:980 does the same thing.
+            $r = wp_update_post(wp_slash($upd), true);
             if (is_wp_error($r)) { return $r; }
             $out = array('id' => $id, 'link' => get_permalink($id));
             if (!empty($a['terms']) && is_array($a['terms'])) {
@@ -2215,7 +2232,13 @@ function wpmcp_taxonomy_tools() {
             if (isset($a['slug']))        { $args['slug'] = sanitize_title((string) $a['slug']); }
             if (isset($a['parent']))      { $args['parent'] = (int) $a['parent']; }
             if (isset($a['description'])) { $args['description'] = (string) $a['description']; }
-            $r = wp_insert_term((string) $a['name'], $tax, $args);
+            // BOTH SLASHED, name and args, exactly as
+            // class-wp-rest-terms-controller.php:550 does: wp_insert_term() unslashes
+            // `name` AND `description` (taxonomy.php:2509-2511). `slug` went through
+            // sanitize_title, which strips a backslash, and `parent` is an int, so
+            // slashing the whole array is a no-op on those two and the rule stays one
+            // rule rather than a list of exceptions.
+            $r = wp_insert_term(wp_slash((string) $a['name']), $tax, wp_slash($args));
             if (is_wp_error($r)) { return $r; }
             $t = get_term($r['term_id'], $tax);
             return array('id' => (int) $r['term_id'], 'name' => $t->name, 'slug' => $t->slug);
@@ -2378,9 +2401,28 @@ function wpmcp_media_tools() {
             if ($name === '') { $name = 'upload'; }
             $file = array('name' => $name, 'tmp_name' => $tmp);
             // $post was read and cap-checked above, before the download.
-            $id = media_handle_sideload($file, $post, isset($a['title']) ? (string) $a['title'] : null);
+            // THE TITLE IS SLASHED. media_handle_sideload() puts it straight into the
+            // attachment array it hands to wp_insert_attachment()
+            // (wp-admin/includes/media.php:518, :528), which is wp_insert_post() and
+            // unslashes. `$file['name']` needs nothing: sanitize_file_name() lists the
+            // backslash among the characters it removes.
+            $id = media_handle_sideload(
+                $file,
+                $post,
+                isset($a['title']) ? wp_slash((string) $a['title']) : null
+            );
             if (is_wp_error($id)) { @unlink($tmp); return $id; }
-            if (isset($a['alt'])) { update_post_meta($id, '_wp_attachment_image_alt', sanitize_text_field((string) $a['alt'])); }
+            // SANITISE FIRST, THEN SLASH - sanitize_text_field() is a sanitiser for
+            // unslashed text, and update_post_meta() unslashes what it is given. The KEY
+            // is a literal with no backslash in it, so it is left alone, which is what
+            // class-wp-rest-attachments-controller.php:1323 does with this same key.
+            if (isset($a['alt'])) {
+                update_post_meta(
+                    $id,
+                    '_wp_attachment_image_alt',
+                    wp_slash(sanitize_text_field((string) $a['alt']))
+                );
+            }
             return array('id' => (int) $id, 'url' => wp_get_attachment_url($id), 'mime' => get_post_mime_type($id));
         },
     ),
@@ -2632,7 +2674,15 @@ function wpmcp_comment_tools() {
             //
             // $wp_error = true, so a duplicate (409) or a flood (429) comes back as a
             // WP_Error with its message instead of wp_die()ing inside a REST request.
-            $cid = wp_new_comment($comment, true);
+            //
+            // SLASHED AS ONE ARRAY. wp_new_comment() runs wp_filter_comment() - whose
+            // `pre_comment_content` filter is kses for a user without unfiltered_html,
+            // and kses is addslashes(wp_kses(stripslashes(...))) - and then
+            // wp_insert_comment(), which opens with `wp_unslash($commentdata)`
+            // (comment.php:2159). Core's comments controller writes it as
+            // `wp_insert_comment( wp_filter_comment( wp_slash( $prepared ) ) )`
+            // (class-wp-rest-comments-controller.php:793), which is this, one layer up.
+            $cid = wp_new_comment(wp_slash($comment), true);
 
             if (is_wp_error($cid)) { return $cid; }
             if (!$cid) { return new WP_Error('wpmcp_failed', 'Could not create reply.'); }
