@@ -707,7 +707,11 @@ function wpmcp_list_posts_filters($args, $postType) {
     // its opposite, which is the one thing worse than a syntax an agent has to be told about.
     if (isset($args['search'])) {
         $search = trim((string) $args['search']);
-        if ($search !== '') { $query['s'] = $search; }
+        // SLASHED, because WP_Query::parse_search() opens with
+        // `$query_vars['s'] = stripslashes( $query_vars['s'] )` (class-wp-query.php:1439).
+        // Now that the write tools store a backslash correctly, an unslashed search for
+        // `C:\Users` is stripped to `C:Users` and can no longer find the row it names.
+        if ($search !== '') { $query['s'] = wp_slash($search); }
     }
 
     // AUTHOR. Resolved to an id HERE so the own-status query can compare it against
@@ -954,7 +958,15 @@ function wpmcp_apply_terms($post_id, $terms) {
                 }
                 continue;
             }
-            $t = get_term_by('name', (string) $v, $tax);
+            // THE READ SIDE OF THE SAME CONTRACT, and it has to agree with the write below.
+            // get_term_by('name') goes through WP_Term_Query, which runs
+            // `stripslashes( sanitize_term_field( 'name', ... 'db' ) )`
+            // (class-wp-term-query.php:548-549) - a lookup that expects SLASHED input.
+            // Before round 3 the lookup and the insert were both unslashed and agreed by
+            // accident; once the insert was slashed, `A\B` was stored correctly and then
+            // searched for as `AB`, missed, and every later post naming that term created a
+            // duplicate (`ab-2`, `ab-3`). Slash both, or neither works.
+            $t = get_term_by('name', wp_slash((string) $v), $tax);
             if ($t) {
                 $ids[] = (int) $t->term_id;
                 continue;
@@ -2297,7 +2309,9 @@ function wpmcp_media_tools() {
         'run' => function ($a) {
             $q = new WP_Query(array(
                 'post_type' => 'attachment', 'post_status' => 'inherit',
-                's' => isset($a['search']) ? (string) $a['search'] : '',
+                // Slashed for the same reason as list-posts' search: parse_search()
+                // stripslashes `s` (class-wp-query.php:1439).
+                's' => isset($a['search']) ? wp_slash((string) $a['search']) : '',
                 'post_mime_type' => isset($a['mime_type']) ? (string) $a['mime_type'] : '',
                 'paged' => isset($a['page']) ? max(1, (int) $a['page']) : 1,
                 'posts_per_page' => isset($a['per_page']) ? min(100, max(1, (int) $a['per_page'])) : 20,
