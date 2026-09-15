@@ -670,6 +670,138 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
     }
 
     /* ------------------------------------------------------------------
+     * Round 2 - review S3, S2, S7
+     * ---------------------------------------------------------------- */
+
+    /**
+     * R2 (S3). An update that does not send parent_id carries the item's STORED parent unchanged,
+     * even one pointing at an item that is gone. Core's own delete leaves exactly that pointer
+     * behind (measured), and a theme's walker shows such an item at the END of the menu; rewriting
+     * it to 0 moved it into the middle of a live menu. Only a parent_id the caller sends changes it.
+     *
+     * @group sprint-13
+     */
+    public function testAnUpdateThatDoesNotSendAParentKeepsTheStoredOne(): void
+    {
+        [$menuId, $ids] = self::menuWithItems('r2o', ['A' => [], 'B' => ['B1' => []], 'C' => []]);
+        Fixtures::deletePost($ids['B']);
+
+        $parentOf = static fn (int $id): int => array_column(Fixtures::menuItemRows($menuId), 'parent', 'id')[$id];
+
+        self::assertFalse(Fixtures::isNavMenuItem($ids['B']), 'Premise: B was not deleted.');
+        self::assertSame($ids['B'], $parentOf($ids['B1']), 'Premise: deleting B did not leave B1 pointing at it.');
+
+        $client = $this->mcp(self::$adminToken);
+        $before = array_column(Fixtures::menuItemRows($menuId), null, 'id');
+
+        $this->update($client, ['id' => $ids['B1'], 'title' => Fixtures::name('r2o-B1-renamed')]);
+        self::assertSame($ids['B'], $parentOf($ids['B1']), 'A title-only update rewrote the stored parent.');
+
+        $this->update($client, ['id' => $ids['B1'], 'target' => '_blank']);
+        self::assertSame($ids['B'], $parentOf($ids['B1']), 'A target-only update rewrote the stored parent.');
+
+        $after = array_column(Fixtures::menuItemRows($menuId), null, 'id');
+        self::assertSame([$ids['A'], $ids['B1'], $ids['C']], array_keys($after), 'The update reordered the menu.');
+
+        foreach ([$ids['A'], $ids['C']] as $id) {
+            self::assertSame(
+                [$before[$id]['title'], $before[$id]['url'], $before[$id]['parent'], $before[$id]['status']],
+                [$after[$id]['title'], $after[$id]['url'], $after[$id]['parent'], $after[$id]['status']],
+                "Item {$id}, which nobody named, changed."
+            );
+        }
+
+        self::assertSame($before[$ids['B1']]['url'], $after[$ids['B1']]['url'], 'An update that sent no url changed it.');
+        self::assertSame(Fixtures::name('r2o-B1-renamed'), $after[$ids['B1']]['title']);
+
+        // A parent_id the caller SENDS is what changes it.
+        $this->update($client, ['id' => $ids['B1'], 'parent_id' => 0]);
+        self::assertSame(0, $parentOf($ids['B1']), 'parent_id 0, sent, did not repair the pointer.');
+    }
+
+    /**
+     * R2 (S2). A draft item - in the menu, not what visitors see - is listed only to a caller who
+     * can edit theme options, as core's REST menu-items endpoint does: the collection defaults to
+     * publish and refuses any other status without edit_theme_options (measured: an Editor and an
+     * Author get 400 for status=draft, 403 for the draft item itself).
+     *
+     * @group sprint-13
+     */
+    public function testADraftItemIsListedOnlyToACallerWhoCanEditThemeOptions(): void
+    {
+        $menuId = self::menu('r2d');
+        $public = Fixtures::createMenuItem($menuId, [
+            'menu-item-title' => Fixtures::name('r2d-public'), 'menu-item-url' => 'https://example.com/r2d-public',
+        ]);
+        $draft = Fixtures::createMenuItem($menuId, [
+            'menu-item-title' => Fixtures::name('r2d-draft-label'), 'menu-item-url' => 'https://example.com/r2d-draft-secret',
+            'menu-item-status' => 'draft',
+        ]);
+        self::assertSame(['publish', 'draft'], array_column(Fixtures::menuItemRows($menuId), 'status'), 'Premise: the fixture statuses.');
+
+        foreach (['Editor' => self::$editorToken, 'Author' => self::$authorToken] as $role => $token) {
+            $client = $this->mcp($token);
+            $menu   = $client->callTool('get-menu', ['id' => $menuId]);
+
+            self::assertFalse($menu->isError, $menu->text);
+            self::assertSame([$public], array_column(self::flatten($menu->data()['items']), 'id'), "An {$role} was shown a draft item.");
+            self::assertSame(1, $menu->data()['count'], "get-menu counted a draft item for an {$role}.");
+            self::assertStringNotContainsString(Fixtures::name('r2d-draft-label'), $menu->text);
+            self::assertStringNotContainsString('r2d-draft-secret', $menu->text);
+
+            $list = $client->callTool('list-menus');
+            self::assertFalse($list->isError, $list->text);
+            self::assertSame(1, array_column($list->data()['menus'], 'count', 'id')[$menuId], "list-menus counted a draft item for an {$role}.");
+        }
+
+        $admin = $this->mcp(self::$adminToken)->callTool('get-menu', ['id' => $menuId]);
+        self::assertSame([$public, $draft], array_column(self::flatten($admin->data()['items']), 'id'), 'An Administrator was not shown the draft item.');
+        self::assertSame('draft', self::itemById($admin, $draft)['status']);
+        self::assertSame(2, $admin->data()['count']);
+    }
+
+    /**
+     * R2 (S7). mailto: and tel: links - a contact menu's - are accepted on add and on update and
+     * stored as sent, and //host stays allowed. A url with a backslash is refused on both: browsers
+     * read /\host as //host, and WordPress's own cleaning would store a different link from the one
+     * sent (measured: /\host becomes the path /host, \\host becomes http://host).
+     *
+     * @group sprint-13
+     */
+    public function testMailtoAndTelAreAcceptedAndABackslashUrlIsRefused(): void
+    {
+        [$menuId, $ids] = self::menuWithItems('r2u', ['A' => []]);
+        $client = $this->mcp(self::$adminToken);
+
+        $mail = $this->addCustom($client, $menuId, 'r2u-mail', ['url' => 'mailto:hello@example.com']);
+        $tel  = $this->addCustom($client, $menuId, 'r2u-tel', ['url' => 'tel:+15551234567']);
+        $cdn  = $this->addCustom($client, $menuId, 'r2u-cdn', ['url' => '//cdn.example/x']);
+        $this->update($client, ['id' => $ids['A'], 'url' => 'tel:+15550000000']);
+
+        $urls = array_column(Fixtures::menuItemRows($menuId), 'url', 'id');
+        self::assertSame('mailto:hello@example.com', $urls[$mail]);
+        self::assertSame('tel:+15551234567', $urls[$tel]);
+        self::assertSame('//cdn.example/x', $urls[$cdn]);
+        self::assertSame('tel:+15550000000', $urls[$ids['A']]);
+
+        $before = Fixtures::menuItemRows($menuId);
+
+        foreach (['/\\evil.example/x', '\\/evil.example/x', '\\\\evil.example/x'] as $url) {
+            $add = $client->callTool('add-menu-item', [
+                'menu_id' => $menuId, 'type' => 'custom', 'url' => $url, 'title' => Fixtures::name('r2u-never'),
+            ]);
+            self::assertTrue($add->isError, "add-menu-item accepted {$url}: " . $add->text);
+            self::assertStringContainsString('url', $add->text);
+
+            $update = $client->callTool('update-menu-item', ['id' => $mail, 'url' => $url]);
+            self::assertTrue($update->isError, "update-menu-item accepted {$url}: " . $update->text);
+            self::assertStringContainsString('url', $update->text);
+        }
+
+        self::assertSame($before, Fixtures::menuItemRows($menuId), 'A refused url changed the menu.');
+    }
+
+    /* ------------------------------------------------------------------
      * helpers
      * ---------------------------------------------------------------- */
 
