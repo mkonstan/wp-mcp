@@ -289,6 +289,7 @@ final class WireSerializationTest extends TestCase
             'wpmcp_code_tools',
             'wpmcp_sql_tools',
             'wpmcp_menu_tools',
+            'wpmcp_inventory_tools',
         ] as $fn) {
             self::assertTrue(function_exists($fn), "{$fn}() is gone from tools.php.");
 
@@ -296,9 +297,9 @@ final class WireSerializationTest extends TestCase
         }
 
         self::assertCount(
-            33,
+            38,
             $tools,
-            'The catalog is not 33 tools any more. That is the product (see the build'
+            'The catalog is not 38 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
             . ' detail - update this number deliberately. Got: ' . implode(', ', array_keys($tools))
         );

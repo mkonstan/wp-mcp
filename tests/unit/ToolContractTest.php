@@ -210,6 +210,16 @@ final class ToolContractTest extends TestCase
             'add-menu-item'    => [false, false, false],
             'update-menu-item' => [true,  true,  false],
             'remove-menu-item' => [true,  true,  false],
+            // Sprint 14. All five only read: nothing destroyed, the same answer twice, and
+            // no other server reached - list-plugins and list-themes read the update data
+            // as stored and never refresh it. list-plugins and list-themes are admin-scope
+            // readers, so their readOnlyHint is false like code-list's and sql-select's,
+            // which testReadOnlyHintIsDerivedFromTheWriteFlag asserts on its own.
+            'list-users'       => [false, true,  false],
+            'get-user'         => [false, true,  false],
+            'get-option'       => [false, true,  false],
+            'list-plugins'     => [false, true,  false],
+            'list-themes'      => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

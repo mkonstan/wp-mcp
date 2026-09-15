@@ -14,6 +14,9 @@
  * wpmcp_sql_tools():      sql-select, one read-only SQL statement (opt-in, off by default).
  * wpmcp_menu_tools():     list-menus / get-menu / add-menu-item / update-menu-item /
  *                         remove-menu-item, on CLASSIC menus only.
+ * wpmcp_inventory_tools(): list-users / get-user / get-option (read scope) and
+ *                         list-plugins / list-themes (admin scope). All five only read, and
+ *                         none of them makes an outbound request.
  * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
  *                   'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
@@ -4871,6 +4874,424 @@ function wpmcp_menu_tools() {
                 'parent'     => $parent,
                 'reparented' => array_map('intval', $kids),
             );
+        },
+    ),
+
+    );
+}
+
+/* ============================================================
+ * Admin inventory: users, options, plugins, themes (sprint 14)
+ * ========================================================== */
+
+/**
+ * THE CLASS OF INVENTORY ACCESS: core's REST gate is the ceiling, field by field. Every
+ * field these five tools return is one core's own REST API, or the wp-admin screen the
+ * caller can open, already shows that caller - and nothing else is read into a result:
+ * no user meta, no password hash, no activation key, no session. Each tool builds its
+ * result from named fields, never from a whole row. The sweep table is in the commit
+ * that added them.
+ *
+ * AND NOT ONE OF THEM TALKS TO ANOTHER SERVER. wp-admin's Plugins and Themes screens
+ * refresh update data from api.wordpress.org when they load (`wp_update_plugins()` on
+ * `load-plugins.php`). These tools read what is installed and the update data as it was
+ * last stored; nothing here calls wp_update_plugins(), wp_update_themes() or any
+ * wp_remote_* function. Measured on both sites: get_plugins(), get_site_transient(),
+ * wp_is_auto_update_enabled_for_type(), the auto_update_plugin filter (fifteen callbacks
+ * on the stress site), wp_get_themes() and WP_Theme::is_block_theme() made no request.
+ */
+
+/** The post types core counts a published author in: every type shown in REST. */
+function wpmcp_user_rest_types() {
+    return array_values(get_post_types(array('show_in_rest' => true), 'names'));
+}
+
+/**
+ * May this caller use the user tools at all?
+ *
+ * Core's rule for a caller asking about authors (class-wp-rest-users-controller.php:
+ * 237-251): list_users, or edit_posts on a REST post type that supports authors. Core's
+ * plain collection is wider - it answers anybody, with published authors - but a token
+ * whose user can edit nothing has no use for a list of authors, and this is the line
+ * core itself draws the moment the question is "who writes here". A Subscriber is refused.
+ */
+function wpmcp_users_can_read() {
+    if (current_user_can('list_users')) { return true; }
+
+    foreach (get_post_types(array('show_in_rest' => true), 'objects') as $type) {
+        if (post_type_supports($type->name, 'author') && current_user_can($type->cap->edit_posts)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * One user, as this caller may see them.
+ *
+ * id and name (the display name) for everybody who may see the user at all - get-post's
+ * author shape. login, email, roles and the registered date only when $full: core shows
+ * them in the `edit` context, which needs list_users on the collection (:220) and
+ * edit_user on one user (:487), and roles to list_users or edit_user (:1096).
+ * Named fields only: nothing from the row or its meta rides along.
+ */
+function wpmcp_user_out($user, $full) {
+    $out = array(
+        'id'   => (int) $user->ID,
+        'name' => (string) $user->display_name,
+    );
+
+    if ($full) {
+        $out['login']      = (string) $user->user_login;
+        $out['email']      = (string) $user->user_email;
+        $out['roles']      = array_values(array_map('strval', (array) $user->roles));
+        // user_registered is stored in UTC; core's REST field is the same expression (:1102).
+        $out['registered'] = gmdate('c', strtotime($user->user_registered));
+    }
+
+    return $out;
+}
+
+/**
+ * The options get-option reads, and the JSON type each is returned as.
+ *
+ * A FIXED LIST IN CODE, NOT A SETTING. Wider than core's REST settings endpoint, which
+ * needs manage_options (class-wp-rest-settings-controller.php:68), on purpose: every value
+ * here is already visible on the public site or in its URLs, and an Editor scheduling a
+ * post needs the timezone and the date formats. admin_email, this plugin's own wpmcp_*
+ * options, the salts, active_plugins and every other option stay off it. The types are
+ * core's register_setting() types where core registers one (start_of_week: integer,
+ * option.php:2841); gmt_offset, which core does not register, is a number.
+ */
+function wpmcp_option_allow_list() {
+    return array(
+        'blogname'            => 'string',
+        'blogdescription'     => 'string',
+        'timezone_string'     => 'string',
+        'gmt_offset'          => 'number',
+        'date_format'         => 'string',
+        'time_format'         => 'string',
+        'start_of_week'       => 'integer',
+        'permalink_structure' => 'string',
+        'siteurl'             => 'string',
+        'home'                => 'string',
+    );
+}
+
+/**
+ * Whether a plugin auto-updates, computed the way the Plugins screen computes it
+ * (wp-admin/includes/class-wp-plugins-list-table.php:210-248 and :293-297): the stored
+ * update data says whether updates are supported for it, the `auto_update_plugin` filter
+ * may force the answer, and otherwise it is on when the plugin is in the stored
+ * `auto_update_plugins` list. $stored is the update_plugins transient AS STORED.
+ */
+function wpmcp_plugin_auto_update($file, $data, $stored, $enabledList) {
+    if (is_object($stored) && isset($stored->response[$file])) {
+        $data = array_merge((array) $stored->response[$file], array('update-supported' => true), $data);
+    } elseif (is_object($stored) && isset($stored->no_update[$file])) {
+        $data = array_merge((array) $stored->no_update[$file], array('update-supported' => true), $data);
+    } elseif (empty($data['update-supported'])) {
+        $data['update-supported'] = false;
+    }
+
+    $payload = (object) wp_parse_args($data, array(
+        'id'            => $file,
+        'slug'          => '',
+        'plugin'        => $file,
+        'new_version'   => '',
+        'url'           => '',
+        'package'       => '',
+        'icons'         => array(),
+        'banners'       => array(),
+        'banners_rtl'   => array(),
+        'tested'        => '',
+        'requires_php'  => '',
+        'compatibility' => new stdClass(),
+    ));
+
+    $forced = wp_is_auto_update_forced_for_item('plugin', null, $payload);
+    if ($forced !== null) { return (bool) $forced; }
+
+    return in_array($file, $enabledList, true) && !empty($data['update-supported']);
+}
+
+function wpmcp_inventory_tools() {
+    $readHints = array(
+        'readOnlyHint' => true,
+        'destructiveHint' => false,
+        'idempotentHint' => true,
+        'openWorldHint' => false,
+    );
+    // Admin-scope readers carry readOnlyHint FALSE, like code-list and sql-select: the hint
+    // is !write, and `write` is the flag the scope gate reads. destructiveHint says they
+    // destroy nothing.
+    $adminReadHints = array(
+        'readOnlyHint' => false,
+        'destructiveHint' => false,
+        'idempotentHint' => true,
+        'openWorldHint' => false,
+    );
+
+    return array(
+
+    'list-users' => array(
+        'write' => false,
+        'annotations' => $readHints,
+        'description' => 'List the site\'s users you are allowed to see. With the list_users'
+            . ' capability (Administrators): every user, each with id, name (display name), login,'
+            . ' email, roles and registered (ISO 8601, UTC), and the role and search filters'
+            . ' (search matches login, email, URL, nicename or display name). Without it - an'
+            . ' Editor, Author or Contributor - only users who have published posts, as id and'
+            . ' name, as in the WordPress REST API; role and search are then refused. Args: role,'
+            . ' search, limit (default 20, max 100) and page (default 1, max 100). Returns count,'
+            . ' page, limit, has_more and items; there is no total. Never returns passwords, keys,'
+            . ' sessions or user meta. Needs list_users or permission to edit posts: Subscribers'
+            . ' are refused.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'role'   => array('type' => 'string', 'description' => 'A role such as "editor". Needs list_users.'),
+            'search' => array('type' => 'string', 'description' => 'Part of a login, email, URL, nicename or display name. Needs list_users.'),
+            'limit'  => array('type' => 'integer', 'description' => 'Users per page. Clamped to 1-100. Default 20.'),
+            'page'   => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100. Default 1.'),
+        )),
+        'run' => function ($a) {
+            if (!wpmcp_users_can_read()) { return wpmcp_cannot('list users'); }
+
+            $full   = current_user_can('list_users');
+            $role   = isset($a['role']) ? trim((string) $a['role']) : '';
+            $search = isset($a['search']) ? trim((string) $a['search']) : '';
+
+            // Core refuses a role filter without list_users (:203), and without it would
+            // search only some columns of only the published authors (:332). One rule here
+            // for both: a caller who may not list users does not filter them, and hears why.
+            // The same sentence whatever the value, so it says nothing about what exists.
+            if (!$full && $role !== '') {
+                return new WP_Error('wpmcp_forbidden', 'The role argument needs the list_users capability.'
+                    . ' Without it list-users shows only users with published posts, unfiltered.');
+            }
+            if (!$full && $search !== '') {
+                return new WP_Error('wpmcp_forbidden', 'The search argument needs the list_users capability.'
+                    . ' Without it list-users shows only users with published posts, unfiltered.');
+            }
+
+            $limit = isset($a['limit']) ? min(100, max(1, (int) $a['limit'])) : 20;
+            $page  = isset($a['page']) ? min(100, max(1, (int) $a['page'])) : 1;
+
+            // limit + 1 rows: the extra one only answers has_more (KB 5.6). ID order, so a
+            // page does not shift under two users with one display name.
+            $query = array(
+                'number'      => $limit + 1,
+                'offset'      => ($page - 1) * $limit,
+                'orderby'     => 'ID',
+                'order'       => 'ASC',
+                'count_total' => false,
+            );
+
+            if ($full) {
+                // An unknown role matches nobody: an empty list, not an error (KB 4.6).
+                if ($role !== '')   { $query['role__in'] = array($role); }
+                // WP_User_Query escapes the term for LIKE itself; the stars ask for a substring.
+                if ($search !== '') { $query['search'] = '*' . $search . '*'; }
+            } else {
+                // Core's own rule for a caller without list_users (:321-322).
+                $query['has_published_posts'] = wpmcp_user_rest_types();
+            }
+
+            $users   = get_users($query);
+            $hasMore = count($users) > $limit;
+            $items   = array();
+
+            foreach (array_slice($users, 0, $limit) as $user) {
+                $items[] = wpmcp_user_out($user, $full);
+            }
+
+            return array(
+                'count'    => count($items),
+                'page'     => $page,
+                'limit'    => $limit,
+                'has_more' => $hasMore,
+                'items'    => $items,
+            );
+        },
+    ),
+
+    'get-user' => array(
+        'write' => false,
+        'annotations' => $readHints,
+        'description' => 'Read one user you are allowed to see. Args: id (integer, required).'
+            . ' Returns id and name (display name), plus login, email, roles and registered when'
+            . ' you have the list_users capability, may edit that user, or it is you. A user you'
+            . ' may not see - one with no published posts, when you can neither list nor edit'
+            . ' users - answers exactly like an id that does not exist, as in the WordPress REST'
+            . ' API. Never returns passwords, keys, sessions or user meta. Needs list_users or'
+            . ' permission to edit posts.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id' => array('type' => 'integer', 'description' => 'User ID, from list-users or a post\'s author.'),
+        ), 'required' => array('id')),
+        'run' => function ($a) {
+            if (!wpmcp_users_can_read()) { return wpmcp_cannot('read users'); }
+
+            $missing = new WP_Error('wpmcp_not_found', 'No user with that ID.');
+            $id      = isset($a['id']) ? (int) $a['id'] : 0;
+            $user    = $id > 0 ? get_userdata($id) : false;
+
+            if (!$user) { return $missing; }
+            // Core's get_user(): on a network, a user of another site is not found here.
+            if (is_multisite() && !is_user_member_of_blog((int) $user->ID)) { return $missing; }
+
+            $full = current_user_can('list_users') || current_user_can('edit_user', $user->ID);
+
+            // Core's rule (:484, :495): yourself; or edit_user or list_users; or a user with
+            // posts in a REST type (count_user_posts counts published posts, and private
+            // ones the caller may read). Anything else is the missing-id answer, word for word.
+            if (get_current_user_id() !== (int) $user->ID
+                && !$full
+                && !count_user_posts($user->ID, wpmcp_user_rest_types())) {
+                return $missing;
+            }
+
+            return wpmcp_user_out($user, $full);
+        },
+    ),
+
+    'get-option' => array(
+        'write' => false,
+        'annotations' => $readHints,
+        'description' => 'Read one site setting from a fixed list. Args: name (required), one of'
+            . ' blogname, blogdescription, timezone_string, gmt_offset, date_format, time_format,'
+            . ' start_of_week, permalink_structure, siteurl and home - values the public site'
+            . ' already shows. Every other name gets one identical refusal, whether or not such'
+            . ' an option exists. Returns name and value (start_of_week an integer, gmt_offset a'
+            . ' number of hours, the rest strings). Needs permission to edit posts.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'name' => array('type' => 'string', 'description' => 'One of the ten option names the description lists.'),
+        ), 'required' => array('name')),
+        'run' => function ($a) {
+            if (!current_user_can('edit_posts')) { return wpmcp_cannot('read site options'); }
+
+            $allowed = wpmcp_option_allow_list();
+            $name    = isset($a['name']) ? (string) $a['name'] : '';
+
+            // array_key_exists is exact: "BlogName" is not on the list, although MySQL's
+            // collation would find the row. The refusal never echoes the name and never
+            // looks the option up, so it is the same bytes for every name off the list.
+            if (!array_key_exists($name, $allowed)) {
+                return new WP_Error('wpmcp_option_not_listed', 'get-option reads only these options: '
+                    . implode(', ', array_keys($allowed)) . '. Any other name gets this answer.');
+            }
+
+            $value = get_option($name);
+
+            if ($value === false) {
+                $value = null;
+            } elseif ($allowed[$name] === 'integer') {
+                $value = (int) $value;
+            } elseif ($allowed[$name] === 'number') {
+                $value = (float) $value;
+            } else {
+                $value = (string) $value;
+            }
+
+            return array('name' => $name, 'value' => $value);
+        },
+    ),
+
+    'list-plugins' => array(
+        // ADMIN SCOPE. `write` is the flag the scope gate reads, so an admin-scope reader
+        // carries it, as code-list and sql-select do; it writes nothing.
+        'write' => true,
+        'annotations' => $adminReadHints,
+        'description' => 'List installed plugins and which are active. Returns count and plugins:'
+            . ' file (the plugin\'s id, such as "akismet/akismet.php"), name, version, active,'
+            . ' network_active (on a multisite network only), and auto_update - true or false as'
+            . ' the Plugins screen shows it, or null when automatic updates are off or you cannot'
+            . ' update plugins. Reads what is installed and the update data as last stored; it'
+            . ' never checks for updates and contacts no other server. Needs an admin-scope token'
+            . ' and the activate_plugins capability (Administrators).',
+        'inputSchema' => array('type' => 'object', 'properties' => array()),
+        'run' => function ($a) {
+            // Core's REST gate (class-wp-rest-plugins-controller.php:113).
+            if (!current_user_can('activate_plugins')) { return wpmcp_cannot('list plugins'); }
+
+            if (!function_exists('get_plugins')) { require_once ABSPATH . 'wp-admin/includes/plugin.php'; }
+            if (!function_exists('wp_is_auto_update_enabled_for_type')) { require_once ABSPATH . 'wp-admin/includes/update.php'; }
+
+            // AS STORED. get_site_transient() reads; only wp_update_plugins() fetches.
+            $stored = get_site_transient('update_plugins');
+            // The Plugins screen shows the auto-update column only on these two conditions
+            // (class-wp-plugins-list-table.php:60-61); without them the answer is null.
+            $shown   = wp_is_auto_update_enabled_for_type('plugin') && current_user_can('update_plugins');
+            $enabled = (array) get_site_option('auto_update_plugins', array());
+            $network = is_multisite();
+            $items   = array();
+
+            foreach (get_plugins() as $file => $data) {
+                $item = array(
+                    'file'    => (string) $file,
+                    'name'    => (string) $data['Name'],
+                    'version' => (string) $data['Version'],
+                    'active'  => is_plugin_active($file),
+                );
+                if ($network) { $item['network_active'] = is_plugin_active_for_network($file); }
+                $item['auto_update'] = $shown ? wpmcp_plugin_auto_update($file, $data, $stored, $enabled) : null;
+
+                $items[] = $item;
+            }
+
+            return array('count' => count($items), 'plugins' => $items);
+        },
+    ),
+
+    'list-themes' => array(
+        'write' => true,
+        'annotations' => $adminReadHints,
+        'description' => 'List installed themes and which one is active. Returns active (its'
+            . ' stylesheet), count and themes: stylesheet, name, version, active, parent (the'
+            . ' parent theme\'s stylesheet, or null), block_theme (true for a block theme, whose'
+            . ' templates and navigation are edited in the Site Editor), and menu_locations - for'
+            . ' the active theme, the classic menu locations it registers (location and'
+            . ' description), and null for every other theme or when you cannot edit theme'
+            . ' options. Never checks for updates and'
+            . ' contacts no other server. Needs an admin-scope token and the switch_themes'
+            . ' capability (Administrators).',
+        'inputSchema' => array('type' => 'object', 'properties' => array()),
+        'run' => function ($a) {
+            // Core's REST gate (class-wp-rest-themes-controller.php:99), on a single site.
+            if (!current_user_can('switch_themes')) { return wpmcp_cannot('list themes'); }
+
+            $active = (string) get_stylesheet();
+            // Core's menu-locations endpoint shows the registered locations to
+            // edit_theme_options alone (class-wp-rest-menu-locations-controller.php:152-168),
+            // which switch_themes does not imply: without it, menu_locations is null.
+            $canMenus = current_user_can('edit_theme_options');
+            $items  = array();
+
+            foreach (wp_get_themes() as $stylesheet => $theme) {
+                $stylesheet = (string) $stylesheet;
+                $template   = (string) $theme->get_template();
+                $isActive   = $stylesheet === $active;
+                $locations  = null;
+
+                // Only the active theme's code has run, so only its locations are known.
+                if ($isActive && $canMenus) {
+                    $locations = array();
+                    foreach (get_registered_nav_menus() as $location => $description) {
+                        $locations[] = array('location' => (string) $location, 'description' => (string) $description);
+                    }
+                }
+
+                $items[] = array(
+                    'stylesheet'     => $stylesheet,
+                    'name'           => (string) $theme->get('Name'),
+                    'version'        => (string) $theme->get('Version'),
+                    'active'         => $isActive,
+                    'parent'         => $template !== $stylesheet ? $template : null,
+                    'block_theme'    => (bool) $theme->is_block_theme(),
+                    'menu_locations' => $locations,
+                );
+            }
+
+            return array('active' => $active, 'count' => count($items), 'themes' => $items);
         },
     ),
 
