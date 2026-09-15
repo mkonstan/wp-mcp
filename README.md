@@ -321,17 +321,37 @@ it, that save is skipped and costs nothing.
   content.
 - `get-revision {revision_id}` returns one in full - title, content and excerpt raw, as
   `get-post` returns them, so you can compare the two yourself.
-- `restore-revision {revision_id}` puts that title, content and excerpt back. Status, date,
-  author, slug and terms are not revisioned and do not change. The text it replaces is
-  saved first and the restored text becomes the newest revision, so a restore can be
-  undone too. The reply gives `fields` and `new_revision_id`.
+- `restore-revision {revision_id}` puts that title, content and excerpt back. Author, slug
+  and terms are not revisioned and do not change. Status and date normally do not either,
+  but a restore is an ordinary update, so WordPress re-derives the status: a scheduled post
+  whose date has already passed is published, and a published post dated in the future
+  becomes scheduled. The text it replaces is saved first and the restored text becomes the
+  newest revision, so the title, content and excerpt of a restore can be undone. The reply
+  gives `fields` and `new_revision_id`; a null `new_revision_id` means no revision was
+  saved - revisions are off for the post, or it already held that text.
+
+**A restore also brings back what WordPress and plugins keep with revisions, and not all of
+it can be taken back.** WordPress copies the meta it revisions (core's `footnotes`, and any
+key registered as revisioned) from the revision onto the post, and ACF copies its field
+values the same way. Measured on a site running ACF Pro 6.3.11:
+
+- Restoring a revision saved from wp-admin's ACF form rewinds the post's ACF fields to that
+  revision's values.
+- The copy saved before the restore holds core's revisioned meta but no ACF values - ACF
+  writes fields into a revision only during its own form save - so restoring that copy
+  brings back title, content, excerpt and `footnotes` and **leaves the ACF fields at the
+  rewound values**. That part of a restore is not undoable through these tools.
+- `fields` in the reply lists the post columns only; it does not say that ACF data moved.
 
 All three need the capability to edit the post the revision belongs to - wp-admin's own
-rule - and anything else answers exactly like an id that is not there. `restore-revision`
-refuses, and says why, while another user has the post open in the editor, and when
-revisions are turned off for the post unless the revision is an autosave. Where revisions
-are turned off (`WP_POST_REVISIONS` false, or a post type that does not keep them),
-`list-revisions` is empty and `update-post` has nothing to save.
+rule - and anything else answers exactly like an id that is not there. `update-post` and
+`restore-revision` both refuse, and name who, while another user has the post open in the
+editor; your own open editor does not count. `restore-revision` also refuses when revisions
+are turned off for the post unless the revision is an autosave. Where revisions are turned
+off (`WP_POST_REVISIONS` false, or a post type that does not keep them), `list-revisions` is
+empty and `update-post` has nothing to save. Where `WP_POST_REVISIONS` is `1`, WordPress
+keeps one revision per post, so the copy `update-post` saves first is deleted by the same
+update and there is nothing to restore.
 
 ### Post meta (opt-in)
 

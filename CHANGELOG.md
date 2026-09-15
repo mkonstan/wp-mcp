@@ -140,6 +140,14 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Two refusals that say why**, as wp-admin makes them: the post is being edited by
   another user right now (named by display name), or revisions are turned off for the post
   and the revision is not an autosave.
+- **On a site running ACF, a restore also rewinds ACF field values - and that part cannot be
+  undone here.** WordPress restores the meta it keeps with revisions (core's `footnotes`),
+  and ACF copies its field values from the revision onto the post. The copy saved before a
+  restore holds the revisioned meta but no ACF values, because ACF writes those into a
+  revision only during its own form save; restoring that copy brings back title, content,
+  excerpt and `footnotes`, and the ACF fields stay rewound. Measured with ACF Pro 6.3.11.
+  A restore is also an ordinary update, so a scheduled post whose date has passed is
+  published by it.
 
 ### Changed: `update-post` saves the pre-change state first
 
@@ -149,6 +157,10 @@ admin can renew them for thirty days from when they were minted - see below.
   with nothing to restore. `update-post` and `restore-revision` now save the current state
   as a revision before they write. On a post whose latest revision already matches it,
   WordPress skips that save, so an ordinary edit still adds exactly one revision.
+- **`update-post` refuses while another user is editing the post.** It used to overwrite
+  a colleague's open editor without a word, while `restore-revision` already refused. Both
+  now answer the same named error, naming the other user by display name, and write
+  nothing; a lock you hold yourself does not count.
 
 ### Fixed: every write tool dropped a backslash (since 1.0.0)
 
