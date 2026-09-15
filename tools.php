@@ -15,8 +15,8 @@
  * wpmcp_menu_tools():     list-menus / get-menu / add-menu-item / update-menu-item /
  *                         remove-menu-item, on CLASSIC menus only.
  * wpmcp_inventory_tools(): list-users / get-user / get-option (read scope) and
- *                         list-plugins / list-themes (admin scope). All five only read, and
- *                         none of them makes an outbound request.
+ *                         list-plugins / list-themes (admin scope). All five only read; the
+ *                         two admin ones run no filter a plugin could make a request from.
  * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
  *                   'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
@@ -4892,13 +4892,19 @@ function wpmcp_menu_tools() {
  * result from named fields, never from a whole row. The sweep table is in the commit
  * that added them.
  *
- * AND NOT ONE OF THEM TALKS TO ANOTHER SERVER. wp-admin's Plugins and Themes screens
- * refresh update data from api.wordpress.org when they load (`wp_update_plugins()` on
- * `load-plugins.php`). These tools read what is installed and the update data as it was
- * last stored; nothing here calls wp_update_plugins(), wp_update_themes() or any
- * wp_remote_* function. Measured on both sites: get_plugins(), get_site_transient(),
- * wp_is_auto_update_enabled_for_type(), the auto_update_plugin filter (fifteen callbacks
- * on the stress site), wp_get_themes() and WP_Theme::is_block_theme() made no request.
+ * AND list-plugins AND list-themes RUN NO HOOK A PLUGIN COULD MAKE A REQUEST FROM. The first
+ * version read update data through get_site_transient() and fired auto_update_plugin, and
+ * built the theme list through wp_get_themes() and WP_Theme; Gravity Forms, LiteSpeed Cache
+ * and Rank Math each make requests from filters on that path once their own caches are cold
+ * (sprint 14 review, round 1), and a test fixture hooked on those filters counted 174
+ * requests from one list-plugins call on the stress site. So neither tool calls a WordPress
+ * read that runs a filter or an action: stored settings come straight from their rows
+ * (wpmcp_raw_option), plugin and theme headers from get_file_data() without a context, and
+ * WP_Theme's rules for which folders are themes are restated in wpmcp_scan_themes(). The hooks
+ * left are current_user_can()'s map_meta_cap and user_has_cap, which every tool's gate runs,
+ * and wpdb's own `query` filter, which the token lookup has already run. The sweep table is in
+ * the round-2 commit. list-users, get-user and get-option are not in that class: they run
+ * core's user query and option read, as the REST API does, and no update code.
  */
 
 /** The post types core counts a published author in: every type shown in REST. */
@@ -4980,40 +4986,184 @@ function wpmcp_option_allow_list() {
 }
 
 /**
- * Whether a plugin auto-updates, computed the way the Plugins screen computes it
- * (wp-admin/includes/class-wp-plugins-list-table.php:210-248 and :293-297): the stored
- * update data says whether updates are supported for it, the `auto_update_plugin` filter
- * may force the answer, and otherwise it is on when the plugin is in the stored
- * `auto_update_plugins` list. $stored is the update_plugins transient AS STORED.
+ * A stored option, read straight from its row.
+ *
+ * NOT get_option(): that runs pre_option_{$name}, pre_option, alloptions, default_option_*
+ * and option_{$name} (option.php:132, :150, :199, :256), and any plugin can hook those. This
+ * runs none of them. $wpdb still applies its own `query` filter (class-wpdb.php:2230), which
+ * every database read of this request - the token lookup included - has already run before
+ * a tool is reached. Null when there is no row.
  */
-function wpmcp_plugin_auto_update($file, $data, $stored, $enabledList) {
-    if (is_object($stored) && isset($stored->response[$file])) {
-        $data = array_merge((array) $stored->response[$file], array('update-supported' => true), $data);
-    } elseif (is_object($stored) && isset($stored->no_update[$file])) {
-        $data = array_merge((array) $stored->no_update[$file], array('update-supported' => true), $data);
-    } elseif (empty($data['update-supported'])) {
-        $data['update-supported'] = false;
+function wpmcp_raw_option($name) {
+    global $wpdb;
+    $row = $wpdb->get_row($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", $name));
+    return $row ? maybe_unserialize($row->option_value) : null;
+}
+
+/**
+ * A network option, read the same way: from sitemeta on a network (option.php:2095), from
+ * the options table on a single site (:2089) - without get_site_option()'s pre_site_option_*,
+ * site_option_* and default filters (:2038, :2057, :2135).
+ */
+function wpmcp_raw_network_option($name) {
+    global $wpdb;
+    if (!is_multisite()) { return wpmcp_raw_option($name); }
+    $row = $wpdb->get_row($wpdb->prepare("SELECT meta_value FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", $name, (int) $wpdb->siteid));
+    return $row ? maybe_unserialize($row->meta_value) : null;
+}
+
+/**
+ * The installed plugins, found the way get_plugins() finds them - .php files in the plugins
+ * directory and one level of folders below it, readable, with a Plugin Name header
+ * (wp-admin/includes/plugin.php:297-346) - but with none of get_plugins()'s hooks: headers
+ * are read by get_file_data() with NO context, which is what skips the extra_plugin_headers
+ * filter (functions.php:7057), and no plugins cache is read or written.
+ *
+ * @return array<string, array{Name: string, Version: string}> file => headers, by name
+ */
+function wpmcp_scan_plugins() {
+    $root  = WP_PLUGIN_DIR;
+    $files = array();
+    $dir   = @opendir($root);
+
+    if ($dir) {
+        while (($entry = readdir($dir)) !== false) {
+            if (str_starts_with($entry, '.')) { continue; }
+
+            if (is_dir($root . '/' . $entry)) {
+                $sub = @opendir($root . '/' . $entry);
+                if (!$sub) { continue; }
+                while (($subEntry = readdir($sub)) !== false) {
+                    if (!str_starts_with($subEntry, '.') && str_ends_with($subEntry, '.php')) {
+                        $files[] = $entry . '/' . $subEntry;
+                    }
+                }
+                closedir($sub);
+            } elseif (str_ends_with($entry, '.php')) {
+                $files[] = $entry;
+            }
+        }
+        closedir($dir);
     }
 
-    $payload = (object) wp_parse_args($data, array(
-        'id'            => $file,
-        'slug'          => '',
-        'plugin'        => $file,
-        'new_version'   => '',
-        'url'           => '',
-        'package'       => '',
-        'icons'         => array(),
-        'banners'       => array(),
-        'banners_rtl'   => array(),
-        'tested'        => '',
-        'requires_php'  => '',
-        'compatibility' => new stdClass(),
-    ));
+    $plugins = array();
+    foreach ($files as $file) {
+        if (!is_readable($root . '/' . $file)) { continue; }
+        $headers = get_file_data($root . '/' . $file, array('Name' => 'Plugin Name', 'Version' => 'Version'));
+        if ($headers['Name'] === '') { continue; }
+        $plugins[$file] = $headers;
+    }
 
-    $forced = wp_is_auto_update_forced_for_item('plugin', null, $payload);
-    if ($forced !== null) { return (bool) $forced; }
+    uasort($plugins, static function ($a, $b) { return strnatcasecmp($a['Name'], $b['Name']); });
 
-    return in_array($file, $enabledList, true) && !empty($data['update-supported']);
+    return $plugins;
+}
+
+/**
+ * Whether a theme is a block theme, WP_Theme::is_block_theme()'s rule (class-wp-theme.php:
+ * 1595-1615, path choice :1628-1643) without the theme_file_path filter: a readable
+ * templates/index.html or block-templates/index.html, in the theme's own folder when it has
+ * one there and a parent, otherwise in the template's folder.
+ */
+function wpmcp_theme_is_block($styleDir, $templateDir) {
+    foreach (array('templates/index.html', 'block-templates/index.html') as $file) {
+        $path = ($styleDir !== $templateDir && file_exists($styleDir . '/' . $file))
+            ? $styleDir . '/' . $file
+            : $templateDir . '/' . $file;
+        if (is_file($path) && is_readable($path)) { return true; }
+    }
+    return false;
+}
+
+/**
+ * The installed themes, found the way search_theme_directories() finds them
+ * (wp-includes/theme.php:515-565), kept or dropped the way WP_Theme's constructor and
+ * wp_get_themes() keep them (class-wp-theme.php:299-340, :363, :393-405, :421-465, :471-514;
+ * theme.php:92-97) - and with none of the hooks on that path: no wp_cache_themes_persistently
+ * filter (theme.php:487), no theme_roots site transient, which search_theme_directories()
+ * also WRITES (:580-581), no extra_theme_headers (get_file_data() without a context), no
+ * theme_file_path, no kses on the name.
+ *
+ * Not reproduced: a theme paused by recovery mode (class-wp-theme.php:521) is listed, and a
+ * copy of a default theme in another folder keeps its header name where wp-admin appends the
+ * folder (:352-356).
+ *
+ * @return array<string, array{name: string, version: string, parent: ?string, block: bool}>
+ */
+function wpmcp_scan_themes() {
+    $roots = isset($GLOBALS['wp_theme_directories']) ? (array) $GLOBALS['wp_theme_directories'] : array();
+    $found = array();
+
+    foreach ($roots as $root) {
+        $dirs = @scandir($root);
+        if (!$dirs) { continue; }
+
+        foreach ($dirs as $dir) {
+            if ('.' === $dir[0] || 'CVS' === $dir || !is_dir($root . '/' . $dir)) { continue; }
+
+            if (file_exists($root . '/' . $dir . '/style.css')) {
+                $found[$dir] = $root;
+                continue;
+            }
+
+            $any = false;
+            foreach ((array) @scandir($root . '/' . $dir) as $subDir) {
+                if (!is_dir($root . '/' . $dir . '/' . $subDir) || !file_exists($root . '/' . $dir . '/' . $subDir . '/style.css')) { continue; }
+                $found[$dir . '/' . $subDir] = $root;
+                $any = true;
+            }
+            // A folder with no style.css anywhere: core records it and WP_Theme errors it
+            // (theme_no_stylesheet); it is dropped below.
+            if (!$any) { $found[$dir] = $root; }
+        }
+    }
+
+    ksort($found);
+    $themes = array();
+
+    foreach ($found as $stylesheet => $root) {
+        $stylesheet = (string) $stylesheet;
+        $styleFile  = $root . '/' . $stylesheet . '/style.css';
+        if (!file_exists($styleFile) || !is_readable($styleFile)) { continue; }
+
+        $headers = get_file_data($styleFile, array('Name' => 'Theme Name', 'Version' => 'Version', 'Template' => 'Template'));
+        if ($headers['Template'] === $stylesheet) { continue; }
+
+        $template     = $headers['Template'] !== '' ? $headers['Template'] : $stylesheet;
+        $templateRoot = $root;
+
+        if ($template === $stylesheet) {
+            if (!wpmcp_theme_is_block($root . '/' . $stylesheet, $root . '/' . $stylesheet)
+                && !file_exists($root . '/' . $stylesheet . '/index.php')) {
+                continue;
+            }
+        } else {
+            if (!file_exists($root . '/' . $template . '/index.php')) {
+                $parentDir = dirname($stylesheet);
+                if ('.' !== $parentDir && file_exists($root . '/' . $parentDir . '/' . $template . '/index.php')) {
+                    $template = $parentDir . '/' . $template;
+                } elseif (isset($found[$template])) {
+                    $templateRoot = $found[$template];
+                } else {
+                    continue;
+                }
+            }
+
+            // Only two generations: a parent that names a parent of its own is invalid.
+            $parentFile = $templateRoot . '/' . $template . '/style.css';
+            $parent     = is_readable($parentFile) ? get_file_data($parentFile, array('Template' => 'Template')) : array('Template' => '');
+            if ($parent['Template'] !== '') { continue; }
+        }
+
+        $themes[$stylesheet] = array(
+            'name'    => trim(strip_tags($headers['Name'])),
+            'version' => trim(strip_tags($headers['Version'])),
+            'parent'  => $template !== $stylesheet ? $template : null,
+            'block'   => wpmcp_theme_is_block($root . '/' . $stylesheet, $templateRoot . '/' . $template),
+        );
+    }
+
+    return $themes;
 }
 
 function wpmcp_inventory_tools() {
@@ -5039,18 +5189,20 @@ function wpmcp_inventory_tools() {
         'write' => false,
         'annotations' => $readHints,
         'description' => 'List the site\'s users you are allowed to see. With the list_users'
-            . ' capability (Administrators): every user, each with id, name (display name), login,'
-            . ' email, roles and registered (ISO 8601, UTC), and the role and search filters'
-            . ' (search matches login, email, URL, nicename or display name). Without it - an'
-            . ' Editor, Author or Contributor - only users who have published posts, as id and'
-            . ' name, as in the WordPress REST API; role and search are then refused. Args: role,'
-            . ' search, limit (default 20, max 100) and page (default 1, max 100). Returns count,'
-            . ' page, limit, has_more and items; there is no total. Never returns passwords, keys,'
-            . ' sessions or user meta. Needs list_users or permission to edit posts: Subscribers'
-            . ' are refused.',
+            . ' capability (Administrators): every user, each with id, name, login, email, roles'
+            . ' and registered (ISO 8601, UTC), and the role and search filters. search looks in'
+            . ' email alone when the term contains @, in login and ID when it is a number, in URL'
+            . ' alone when it starts with http:// or https://, and otherwise in login, URL, email,'
+            . ' nicename and display name. Without list_users - an Editor, Author or Contributor -'
+            . ' only users who have published posts, as id and name, as in the WordPress REST API;'
+            . ' role and search are refused. name is the display name the user chose, often their'
+            . ' login or an email address. Args: role, search, limit (default 20, max 100), page'
+            . ' (default 1, max 100). Returns count, page, limit, has_more and items; no total.'
+            . ' Never returns passwords, keys, sessions or user meta. Needs list_users or'
+            . ' permission to edit posts: Subscribers are refused.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'role'   => array('type' => 'string', 'description' => 'A role such as "editor". Needs list_users.'),
-            'search' => array('type' => 'string', 'description' => 'Part of a login, email, URL, nicename or display name. Needs list_users.'),
+            'search' => array('type' => 'string', 'description' => 'Needs list_users. With @: email. A number: login and ID. http:// or https://: URL. Otherwise login, URL, email, nicename and display name.'),
             'limit'  => array('type' => 'integer', 'description' => 'Users per page. Clamped to 1-100. Default 20.'),
             'page'   => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100. Default 1.'),
         )),
@@ -5119,12 +5271,15 @@ function wpmcp_inventory_tools() {
         'write' => false,
         'annotations' => $readHints,
         'description' => 'Read one user you are allowed to see. Args: id (integer, required).'
-            . ' Returns id and name (display name), plus login, email, roles and registered when'
-            . ' you have the list_users capability, may edit that user, or it is you. A user you'
-            . ' may not see - one with no published posts, when you can neither list nor edit'
-            . ' users - answers exactly like an id that does not exist, as in the WordPress REST'
-            . ' API. Never returns passwords, keys, sessions or user meta. Needs list_users or'
-            . ' permission to edit posts.',
+            . ' Returns id and name (the display name the user chose, often their login or an'
+            . ' email address), plus login, email, roles and registered when you have the'
+            . ' list_users capability, may edit that user, or it is you. When you can neither list'
+            . ' nor edit users, you see a user only if they have posts you may read in a post type'
+            . ' the REST API shows: published posts, and private posts when you can read those -'
+            . ' so an Editor also sees a user whose only posts are private, which list-users does'
+            . ' not show. This is the WordPress REST API\'s rule. Any other user answers exactly'
+            . ' like an id that does not exist. Never returns passwords, keys, sessions or user'
+            . ' meta. Needs list_users or permission to edit posts.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer', 'description' => 'User ID, from list-users or a post\'s author.'),
         ), 'required' => array('id')),
@@ -5202,38 +5357,54 @@ function wpmcp_inventory_tools() {
         'write' => true,
         'annotations' => $adminReadHints,
         'description' => 'List installed plugins and which are active. Returns count and plugins:'
-            . ' file (the plugin\'s id, such as "akismet/akismet.php"), name, version, active,'
-            . ' network_active (on a multisite network only), and auto_update - true or false as'
-            . ' the Plugins screen shows it, or null when automatic updates are off or you cannot'
-            . ' update plugins. Reads what is installed and the update data as last stored; it'
-            . ' never checks for updates and contacts no other server. Needs an admin-scope token'
-            . ' and the activate_plugins capability (Administrators).',
+            . ' file (the plugin\'s id, such as "akismet/akismet.php"), name and version as the'
+            . ' plugin file\'s header states them, active, network_active (on a multisite network'
+            . ' only), and auto_update - true when the plugin is in the site\'s stored auto-update'
+            . ' list, false when it is not, null when you cannot update plugins (your role lacks'
+            . ' update_plugins, or wp-config sets DISALLOW_FILE_MODS). auto_update does'
+            . ' not reflect automatic updates switched off for the whole site, a plugin that forces'
+            . ' its own answer, or whether an update source exists: finding those out means running'
+            . ' other plugins\' code. This tool reads the plugin files and the stored settings'
+            . ' directly and runs none of WordPress\'s update, option or plugin-header filters -'
+            . ' only the capability checks every tool runs - so it triggers no update check and no'
+            . ' outbound request. Needs an admin-scope token and the activate_plugins capability'
+            . ' (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),
         'run' => function ($a) {
-            // Core's REST gate (class-wp-rest-plugins-controller.php:113).
+            // Core's REST gate (class-wp-rest-plugins-controller.php:113). The capability checks
+            // are the only filters this tool runs; see the section docblock.
             if (!current_user_can('activate_plugins')) { return wpmcp_cannot('list plugins'); }
 
-            if (!function_exists('get_plugins')) { require_once ABSPATH . 'wp-admin/includes/plugin.php'; }
-            if (!function_exists('wp_is_auto_update_enabled_for_type')) { require_once ABSPATH . 'wp-admin/includes/update.php'; }
+            // STORED values, from their rows: is_plugin_active() and get_site_option() run
+            // pre_option_* / option_* and pre_site_option_* / site_option_* filters.
+            $active   = (array) wpmcp_raw_option('active_plugins');
+            $network  = is_multisite() ? (array) wpmcp_raw_network_option('active_sitewide_plugins') : array();
+            // The Plugins screen shows auto-update state only to a caller who can update plugins
+            // (class-wp-plugins-list-table.php:60-61). The stored list, and nothing that has to
+            // run a filter to be known: wp_is_auto_update_enabled_for_type() and the
+            // auto_update_plugin filter are exactly where plugins go remote.
+            //
+            // NOT current_user_can('update_plugins'): map_meta_cap resolves that capability
+            // through wp_is_file_mod_allowed(), whose file_mod_allowed filter is a hook
+            // (capabilities.php, the update_plugins case; load.php:1838) - the test's fixture
+            // made its request from there. The same rule without the filter: wp-config does not
+            // set DISALLOW_FILE_MODS, and the caller's role holds update_plugins. The user object
+            // was loaded when the token was checked, so reading its caps runs no hook.
+            $fileMods = !(defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS);
+            $canAuto  = $fileMods && !empty(wp_get_current_user()->allcaps['update_plugins']);
+            $autoList = $canAuto ? (array) wpmcp_raw_network_option('auto_update_plugins') : null;
+            $items    = array();
 
-            // AS STORED. get_site_transient() reads; only wp_update_plugins() fetches.
-            $stored = get_site_transient('update_plugins');
-            // The Plugins screen shows the auto-update column only on these two conditions
-            // (class-wp-plugins-list-table.php:60-61); without them the answer is null.
-            $shown   = wp_is_auto_update_enabled_for_type('plugin') && current_user_can('update_plugins');
-            $enabled = (array) get_site_option('auto_update_plugins', array());
-            $network = is_multisite();
-            $items   = array();
-
-            foreach (get_plugins() as $file => $data) {
+            foreach (wpmcp_scan_plugins() as $file => $headers) {
+                $file = (string) $file;
                 $item = array(
-                    'file'    => (string) $file,
-                    'name'    => (string) $data['Name'],
-                    'version' => (string) $data['Version'],
-                    'active'  => is_plugin_active($file),
+                    'file'    => $file,
+                    'name'    => (string) $headers['Name'],
+                    'version' => (string) $headers['Version'],
+                    'active'  => in_array($file, $active, true) || isset($network[$file]),
                 );
-                if ($network) { $item['network_active'] = is_plugin_active_for_network($file); }
-                $item['auto_update'] = $shown ? wpmcp_plugin_auto_update($file, $data, $stored, $enabled) : null;
+                if (is_multisite()) { $item['network_active'] = isset($network[$file]); }
+                $item['auto_update'] = $autoList === null ? null : in_array($file, $autoList, true);
 
                 $items[] = $item;
             }
@@ -5245,34 +5416,38 @@ function wpmcp_inventory_tools() {
     'list-themes' => array(
         'write' => true,
         'annotations' => $adminReadHints,
-        'description' => 'List installed themes and which one is active. Returns active (its'
-            . ' stylesheet), count and themes: stylesheet, name, version, active, parent (the'
-            . ' parent theme\'s stylesheet, or null), block_theme (true for a block theme, whose'
-            . ' templates and navigation are edited in the Site Editor), and menu_locations - for'
-            . ' the active theme, the classic menu locations it registers (location and'
-            . ' description), and null for every other theme or when you cannot edit theme'
-            . ' options. Never checks for updates and'
-            . ' contacts no other server. Needs an admin-scope token and the switch_themes'
+        'description' => 'List installed themes and which one is active. Returns active (the'
+            . ' stylesheet stored as the site\'s theme), count and themes: stylesheet, name,'
+            . ' version, active, parent (the parent theme\'s stylesheet, or null), block_theme'
+            . ' (true when the theme or its parent has a templates/index.html or'
+            . ' block-templates/index.html), and menu_locations - for the active theme, the classic'
+            . ' menu locations registered (location and description), and null for every other'
+            . ' theme or when you cannot edit theme options. This tool reads the theme files and'
+            . ' the stored settings directly and runs none of WordPress\'s theme, option or update'
+            . ' filters - only the capability checks every tool runs - so it triggers no update'
+            . ' check and no outbound request. Needs an admin-scope token and the switch_themes'
             . ' capability (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),
         'run' => function ($a) {
             // Core's REST gate (class-wp-rest-themes-controller.php:99), on a single site.
             if (!current_user_can('switch_themes')) { return wpmcp_cannot('list themes'); }
 
-            $active = (string) get_stylesheet();
+            // The STORED theme: get_stylesheet() runs pre_option_stylesheet, option_stylesheet
+            // and stylesheet (theme.php:189).
+            $active = (string) wpmcp_raw_option('stylesheet');
             // Core's menu-locations endpoint shows the registered locations to
             // edit_theme_options alone (class-wp-rest-menu-locations-controller.php:152-168),
             // which switch_themes does not imply: without it, menu_locations is null.
             $canMenus = current_user_can('edit_theme_options');
-            $items  = array();
+            $items    = array();
 
-            foreach (wp_get_themes() as $stylesheet => $theme) {
+            foreach (wpmcp_scan_themes() as $stylesheet => $theme) {
                 $stylesheet = (string) $stylesheet;
-                $template   = (string) $theme->get_template();
                 $isActive   = $stylesheet === $active;
                 $locations  = null;
 
                 // Only the active theme's code has run, so only its locations are known.
+                // get_registered_nav_menus() reads a global and runs no hook (nav-menu.php:149-152).
                 if ($isActive && $canMenus) {
                     $locations = array();
                     foreach (get_registered_nav_menus() as $location => $description) {
@@ -5282,11 +5457,11 @@ function wpmcp_inventory_tools() {
 
                 $items[] = array(
                     'stylesheet'     => $stylesheet,
-                    'name'           => (string) $theme->get('Name'),
-                    'version'        => (string) $theme->get('Version'),
+                    'name'           => $theme['name'],
+                    'version'        => $theme['version'],
                     'active'         => $isActive,
-                    'parent'         => $template !== $stylesheet ? $template : null,
-                    'block_theme'    => (bool) $theme->is_block_theme(),
+                    'parent'         => $theme['parent'],
+                    'block_theme'    => $theme['block'],
                     'menu_locations' => $locations,
                 );
             }
