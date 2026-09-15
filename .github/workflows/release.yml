@@ -160,7 +160,11 @@ jobs:
 
       - name: WordPress logs (on failure)
         if: failure()
-        run: npx --yes @wordpress/env logs all || true
+        # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
+        # so without --watch=false this step never exits: a failed run once sat here for over
+        # two hours until it was cancelled. The timeout is the backstop.
+        timeout-minutes: 5
+        run: npx --yes @wordpress/env logs all --watch=false || true
 
       - name: Stop WordPress
         if: always()

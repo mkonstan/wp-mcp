@@ -17,7 +17,8 @@
  * EVERY REFUSAL ASSERTS THE SITE TOO: the content and the revision count, read in another
  * process, must not have moved.
  *
- * @group sprint-12
+ * NO CLASS-LEVEL GROUP. Every gate test carries `@group sprint-12` on itself; the ACF test
+ * carries `@group acf` instead, and a class-level sprint-12 tag would put it back in the gate.
  */
 
 declare(strict_types=1);
@@ -557,7 +558,11 @@ final class RevisionToolsTest extends FixtureIntegrationTestCase
      *
      * Skips where ACF is not active: there is no field copy to assert on.
      *
-     * @group sprint-12
+     * NOT IN THE SPRINT-12 GATE, because it can skip, and a gate that can skip is not a gate:
+     * CI's wp-env has no ACF, so the step that refuses a skipped gate test failed on it. It runs
+     * in the full suite, on a site that has ACF.
+     *
+     * @group acf
      */
     public function testOnAnAcfSiteRestoreRewindsFieldValuesAndUndoingItDoesNot(): void
     {
