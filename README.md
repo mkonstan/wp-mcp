@@ -374,10 +374,13 @@ classic menu you change may not be what visitors see.
 - `add-menu-item {menu_id, type, object_id?, url?, title?, parent_id?, position?, target?,
   classes?}` adds one. `type` is `custom` for a plain link, a post type such as `page`, or a
   taxonomy such as `category`. A linked post must exist and be readable by you. A custom url
-  must be http, https or relative: `javascript:` and every other scheme is refused, where
-  WordPress itself would quietly store an empty link.
+  must be http, https, `mailto:`, `tel:` or a path on this site; `//host` is allowed and is a
+  link to another host. `javascript:`, every other scheme and any url with a backslash are
+  refused, where WordPress itself would quietly store an empty link or a different one.
 - `update-menu-item {id, title?, url?, target?, classes?, parent_id?, position?}` changes
-  what you send and leaves the rest. A parent must be an item of the same menu, and not the
+  what you send and leaves everything else as stored - even a parent that points at a deleted
+  item, which a theme shows at the end of the menu. A parent you send must be an item of the
+  same menu, and not the
   item itself or one inside it.
 - `remove-menu-item {id}` deletes one - menu items have no trash. Its children move up one
   level into its place, as they do in wp-admin.
@@ -391,7 +394,8 @@ Reading needs what WordPress's REST API needs - the capability to edit posts or 
 options - so an Editor can read menus and a Subscriber cannot. Writing needs
 `edit_theme_options`: Administrators, not Editors. An item that links to something you may
 not read, such as another user's draft or private page, is still listed, with its title,
-url and object_id null and `withheld: true`. An id that is not a menu, or not a menu item,
+url and object_id null and `withheld: true`. Draft items - in a menu but not shown to
+visitors - are listed only to callers who can edit theme options, as in the REST API. An id that is not a menu, or not a menu item,
 answers exactly like an id that is not there.
 
 ### Post meta (opt-in)

@@ -167,11 +167,15 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Removing an item lifts its children** one level, into its place, as wp-admin does.
   WordPress's function leaves them pointing at the deleted item.
 - **Refused, by name, where WordPress would store it:** a parent from another menu, a parent
-  inside the item being moved, and a url that is not http, https or relative - WordPress
-  stores a `javascript:` url as an empty link without a word.
+  inside the item being moved, and a url that is not http, https, `mailto:`, `tel:` or a path
+  on this site - WordPress stores a `javascript:` url as an empty link without a word - or that
+  holds a backslash, which browsers read as a slash. `//host` links are allowed.
 - **A menu never reveals what its reader may not read.** An item linking to another user's
   draft or private page is listed with its title, url and linked id null, and marked
-  `withheld`.
+  `withheld`. Draft menu items are listed only to callers who can edit theme options, as in
+  the REST API; an Editor or an Author sees the items visitors see.
+- **An update changes only what it is sent.** Every other field is carried as stored, including
+  a parent that points at a deleted item - so a theme keeps showing that item where it did.
 - **Backslashes survive** in item labels, and a linked item given its page's own title
   still follows that page when it is renamed.
 
