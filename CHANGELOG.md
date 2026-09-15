@@ -135,6 +135,12 @@ admin can renew them for thirty days from when they were minted - see below.
   before those calls; this plugin did not. It now does, at every one of the eleven call
   sites that receive text from a caller, slashing whole arrays at the boundary rather than
   field by field.
+- **A backslashed term name no longer duplicates.** Naming the same category - say
+  `A\B` - on two posts used to create it twice (`ab`, then `ab-2`), because the lookup
+  that decides whether a term already exists strips a backslash of its own. The lookup is
+  now slashed to match the write, so the second post reuses the first term. The same
+  applies to `search` in `list-posts` and `list-media`: a search for a backslashed value
+  finds the post that holds it.
 - **Nothing to do on your side**, and nothing already stored changes: this only affects
   what happens to a value on its way in from now on.
 
