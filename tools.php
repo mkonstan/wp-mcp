@@ -1849,7 +1849,9 @@ function wpmcp_content_tools() {
             . ' date becomes "future" anyway, and "future" plus a past date publishes now,'
             . ' so read `status` and `date` in the result. `author` is a user id or login'
             . ' and needs the capability to edit others\' posts. `featured_image` is an'
-            . ' image attachment id you may edit, or 0 to remove it.',
+            . ' image attachment id you may edit, or 0 to remove it. Refused, naming who,'
+            . ' while another user has the post open in the editor. The current title,'
+            . ' content and excerpt are saved as a revision first, for restore-revision.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
             'content' => array('type' => 'string'), 'status' => array('type' => 'string'),
@@ -1870,6 +1872,12 @@ function wpmcp_content_tools() {
             if (!current_user_can('edit_post', $id)) {
                 return wpmcp_cannot('edit post ' . $id);
             }
+            // NOT OVER A COLLEAGUE'S OPEN EDITOR - the same refusal restore-revision makes, from
+            // the same helper. After edit_post, so only a caller who may edit the post learns
+            // that somebody else is; before every other gate and every write, the baseline
+            // revision included, so a refused call leaves nothing behind.
+            $locked = wpmcp_post_lock_refusal($id);
+            if ($locked) { return $locked; }
             $upd = array('ID' => $id); $changed = array();
             if (isset($a['title']))   { $upd['post_title'] = wp_strip_all_tags((string) $a['title']); $changed[] = 'title'; }
             if (isset($a['content'])) { $upd['post_content'] = (string) $a['content']; $changed[] = 'content'; }
@@ -1985,6 +1993,43 @@ function wpmcp_content_tools() {
  * SAME not_found, so a caller cannot learn by probing ids that a revision, or a post, is
  * there.
  * ========================================================== */
+
+/**
+ * The refusal for a post another user has open in the editor right now, or null.
+ *
+ * wp-admin refuses to restore over a colleague's open editor (wp-admin/revision.php:58), and
+ * update-post - the far more common write - must refuse too, or the protection covers the
+ * rare path only (review of sprint 12, S9). ONE HELPER, so the two tools cannot disagree.
+ *
+ * wp_check_post_lock() lives in wp-admin/includes/post.php, which a REST request does NOT
+ * load; without the require the check is a fatal error, not a refusal. wp-cli does load it,
+ * which is why only a test over HTTP can show the difference. It answers false for a lock the
+ * CURRENT user holds (wp-admin/includes/post.php:1739), so the caller's own open editor is
+ * never a refusal, and false once the lock is older than its 150-second window.
+ *
+ * NAMED, not not_found: every caller reaches this after passing edit_post on this very post,
+ * so saying who is editing leaks nothing a wp-admin user would not see - and the display name,
+ * never the login, is get-post's ceiling.
+ *
+ * @return WP_Error|null
+ */
+function wpmcp_post_lock_refusal($postId) {
+    if (!function_exists('wp_check_post_lock')) {
+        require_once ABSPATH . 'wp-admin/includes/post.php';
+    }
+
+    $lockedBy = wp_check_post_lock((int) $postId);
+    if (!$lockedBy) { return null; }
+
+    $holder = get_userdata((int) $lockedBy);
+
+    return new WP_Error(
+        'wpmcp_post_locked',
+        'Post ' . (int) $postId . ' is being edited by '
+        . ($holder ? $holder->display_name : 'another user')
+        . ' right now. Try again when they have finished.'
+    );
+}
 
 /**
  * The post a revision tool may act on, or null - THE CLASS OF REVISION ACCESS.
@@ -2190,16 +2235,18 @@ function wpmcp_revision_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Restore a post to one of its revisions. Args: revision_id'
-            . ' (integer, required), from list-revisions. Copies back only the fields'
-            . ' revisions keep - title, content and excerpt; status, date, author, slug'
-            . ' and terms stay as they are. The current text is saved as a revision first'
-            . ' and the restored text becomes the newest one, so a restore can itself be'
-            . ' undone. Refused, saying why, while another user is editing the post, or'
-            . ' when revisions are turned off for it and this is not an autosave. Returns'
-            . ' id (the post), restored_from, fields, and new_revision_id - null when the'
-            . ' post already held that text. Needs permission to edit the post; a revision'
-            . ' you may not restore and an id that is not a revision answer like one that'
-            . ' is not there.',
+            . ' (integer, required). Copies back title, content and excerpt, plus meta that'
+            . ' WordPress or plugins keep with revisions - core\'s footnotes, and ACF field'
+            . ' values. Author, slug and terms stay; status is re-derived as on any update,'
+            . ' so a scheduled post whose date has passed is published. The current text is'
+            . ' saved as a revision first, so title, content, excerpt and core\'s revisioned'
+            . ' meta can be restored back; ACF values cannot - that copy holds none, so a'
+            . ' restore\'s rewind of ACF fields is not undoable here. Refused, saying why,'
+            . ' while another user is editing the post, or when revisions are off for it'
+            . ' and this is not an autosave. Returns id, restored_from, fields (the post'
+            . ' columns only), autosave and new_revision_id - null when no revision was'
+            . ' saved: revisions are off, or the post already held that text. Needs'
+            . ' permission to edit the post; anything else answers like a missing id.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'revision_id' => array('type' => 'integer', 'description' => 'Revision ID, from list-revisions.'),
         ), 'required' => array('revision_id')),
@@ -2223,23 +2270,10 @@ function wpmcp_revision_tools() {
                 );
             }
 
-            // wp-admin/revision.php:58 - not over somebody who is editing it now.
-            // wp_check_post_lock() lives in wp-admin/includes/post.php, which a REST
-            // request does NOT load; without this require the check is a fatal error.
-            if (!function_exists('wp_check_post_lock')) {
-                require_once ABSPATH . 'wp-admin/includes/post.php';
-            }
-            $lockedBy = wp_check_post_lock($post->ID);
-            if ($lockedBy) {
-                $holder = get_userdata((int) $lockedBy);
-                // The display name, never the login - get-post's ceiling.
-                return new WP_Error(
-                    'wpmcp_post_locked',
-                    'Post ' . $post->ID . ' is being edited by '
-                    . ($holder ? $holder->display_name : 'another user')
-                    . ' right now. Try again when they have finished.'
-                );
-            }
+            // wp-admin/revision.php:58 - not over somebody who is editing it now. See
+            // wpmcp_post_lock_refusal() for the admin include this needs over REST.
+            $locked = wpmcp_post_lock_refusal($post->ID);
+            if ($locked) { return $locked; }
 
             // THE UNDO BASELINE, before the write - see update-post. Normally a no-op:
             // the latest revision already matches the post (revision.php:159-212).

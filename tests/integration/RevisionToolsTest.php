@@ -477,6 +477,137 @@ final class RevisionToolsTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * Round 2, S9. update-post honours the edit lock exactly as restore-revision does: the
+     * common write used to overwrite a human mid-edit without a word, while the rarer one
+     * refused. Same refusal, same display-name-only holder, and nothing is written - not the
+     * post, and not the baseline revision.
+     *
+     * @group sprint-12
+     */
+    public function testUpdatePostRefusesAPostLockedByAnotherUserAndNothingChanges(): void
+    {
+        self::lock(self::$lockedPostId, self::$otherAuthorId);
+
+        $content = Fixtures::postField(self::$lockedPostId, 'post_content');
+        $count   = Fixtures::revisionCount(self::$lockedPostId);
+
+        try {
+            $result = $this->mcp(self::$editorToken)->callTool('update-post', [
+                'id'      => self::$lockedPostId,
+                'content' => Fixtures::name('rev-locked-overwrite'),
+            ]);
+        } finally {
+            Fixtures::deletePostMeta(self::$lockedPostId, '_edit_lock');
+        }
+
+        self::assertTrue($result->isError, 'update-post overwrote a post another user is editing right now.');
+        self::assertStringContainsString('being edited by ' . self::otherDisplayName(), $result->text);
+        self::assertStringNotContainsString(self::otherAuthorLogin(), $result->text, 'The refusal names the lock holder by login.');
+        self::assertSame($content, Fixtures::postField(self::$lockedPostId, 'post_content'), 'A refused update changed the post.');
+        self::assertSame($count, Fixtures::revisionCount(self::$lockedPostId), 'A refused update saved a revision.');
+    }
+
+    /**
+     * Round 2, S9. A lock the CALLER holds is not a refusal - it is their own open editor, and
+     * wp_check_post_lock() answers false for it. An implementation that refused any lock
+     * would lock the operator out of their own post.
+     *
+     * @group sprint-12
+     */
+    public function testUpdatePostGoesThroughTheCallersOwnLock(): void
+    {
+        self::lock(self::$lockedPostId, self::$editorId);
+
+        try {
+            $result = $this->mcp(self::$editorToken)->callTool('update-post', [
+                'id'      => self::$lockedPostId,
+                'content' => Fixtures::name('rev-locked-own-lock'),
+            ]);
+        } finally {
+            Fixtures::deletePostMeta(self::$lockedPostId, '_edit_lock');
+        }
+
+        self::assertFalse($result->isError, 'update-post refused a post whose lock the caller holds: ' . $result->text);
+        self::assertSame(Fixtures::name('rev-locked-own-lock'), Fixtures::postField(self::$lockedPostId, 'post_content'));
+    }
+
+    /* ------------------------------------------------------------------
+     * Round 2, B1 - what a restore does to ACF, asserted where ACF runs
+     * ---------------------------------------------------------------- */
+
+    /**
+     * MEASURED on the stress site (WP 7.1, ACF Pro 6.3.11) and held here: a restore rewinds
+     * ACF field values, and restoring the pre-restore copy - the undo the tools advertise -
+     * brings back title, content, excerpt and core's revisioned meta but NOT the fields.
+     *
+     * Why, on disk: wp_restore_post_revision fires `wp_restore_post_revision`, and ACF copies
+     * every field row of the revision onto the post (acf/includes/revisions.php:338,
+     * acf_copy_metadata never deletes). A revision gets ACF rows only when ACF's own form save
+     * ran in that request (`maybe_save_revision` bails without `acf/save_post`), so the copy
+     * this plugin saves has none. Core's `footnotes` IS in that copy: core copies revisioned
+     * meta on every revision save and restores it on every restore.
+     *
+     * The first revision is made the way a wp-admin ACF save leaves one - core's revision,
+     * then ACF's own acf_copy_postmeta() onto it. The field is two meta rows, value and `_name`
+     * reference, which is all ACF's copy looks for; no field group is registered on the site.
+     *
+     * EVERY FIXTURE WRITE RUNS AS USER 1. Core sanitises `footnotes` meta for a user without
+     * unfiltered_html, and wp-cli's default user 0 has none: the first run of this test stored
+     * F1 as an empty string, and so did core's copy of it into each revision.
+     *
+     * Skips where ACF is not active: there is no field copy to assert on.
+     *
+     * @group sprint-12
+     */
+    public function testOnAnAcfSiteRestoreRewindsFieldValuesAndUndoingItDoesNot(): void
+    {
+        if (!preg_match('/ACF:yes/', WpCli::evaluate('echo "ACF:" . (function_exists("acf_copy_postmeta") ? "yes" : "no");'))) {
+            self::markTestSkipped('ACF is not active on this site, so a restore copies no ACF fields and there is nothing to assert.');
+        }
+
+        $field  = Fixtures::name('acf-field');
+        $postId = Fixtures::createPost(Fixtures::name('rev-acf-t1'), 'publish', self::$editorId, Fixtures::name('rev-acf-body-1'));
+        self::$created[] = $postId;
+
+        self::setMeta($postId, [$field => 'V1', '_' . $field => 'field_' . substr(md5($field), 0, 13), 'footnotes' => 'F1'], 1);
+
+        $out = WpCli::evaluate(sprintf(
+            '$r = (int) wp_save_post_revision(%d); acf_copy_postmeta(%d, $r); echo "R:" . $r;',
+            $postId,
+            $postId
+        ), 1);
+        self::assertMatchesRegularExpression('/R:[1-9]\d*/', $out, 'Could not make the ACF-bearing revision.');
+        preg_match('/R:(\d+)/', $out, $m);
+        $withFields = (int) $m[1];
+
+        // An edit that does not go through ACF's form: the field, the footnotes and the title.
+        self::setMeta($postId, [$field => 'V2', 'footnotes' => 'F2'], 1);
+        self::rewrite($postId, Fixtures::name('rev-acf-t2'), Fixtures::name('rev-acf-body-2'), 1);
+
+        $editor  = $this->mcp(self::$editorToken);
+        $restore = $editor->callTool('restore-revision', ['revision_id' => $withFields]);
+
+        self::assertFalse($restore->isError, $restore->text);
+        self::assertSame(['title', 'content', 'excerpt'], $restore->data()['fields'], '`fields` is the columns; it does not list what plugins restore.');
+        self::assertSame(Fixtures::name('rev-acf-t1'), Fixtures::postField($postId, 'post_title'));
+        self::assertSame('V1', self::meta($postId, $field), 'A restore no longer rewinds the ACF field. Re-measure and correct the docs.');
+        self::assertSame('F1', self::meta($postId, 'footnotes'), 'A restore no longer restores core revisioned meta.');
+
+        // THE ADVERTISED UNDO: restore the copy of the state the restore replaced.
+        $copy = $this->revisionHolding($postId, Fixtures::name('rev-acf-t2'));
+        $undo = $editor->callTool('restore-revision', ['revision_id' => $copy]);
+
+        self::assertFalse($undo->isError, $undo->text);
+        self::assertSame(Fixtures::name('rev-acf-t2'), Fixtures::postField($postId, 'post_title'), 'The undo did not bring the title back.');
+        self::assertSame('F2', self::meta($postId, 'footnotes'), 'The undo did not bring core revisioned meta back.');
+        self::assertSame(
+            'V1',
+            self::meta($postId, $field),
+            'The undo brought the ACF field back. The docs say it cannot - re-measure and correct them.'
+        );
+    }
+
+    /**
      * G5. With revisions off for the post, a revision that is not an autosave is refused,
      * naming why, and nothing changes.
      *
@@ -647,7 +778,7 @@ final class RevisionToolsTest extends FixtureIntegrationTestCase
         WpCli::evaluate(sprintf('echo (int) wp_save_post_revision(%d);', $postId));
     }
 
-    private static function rewrite(int $postId, string $title, string $content): void
+    private static function rewrite(int $postId, string $title, string $content, int $asUser = 0): void
     {
         $out = WpCli::evaluate(sprintf(
             '$r = wp_update_post(wp_slash(array("ID" => %d, "post_title" => %s, "post_content" => %s)), true);'
@@ -655,11 +786,50 @@ final class RevisionToolsTest extends FixtureIntegrationTestCase
             $postId,
             var_export($title, true),
             var_export($content, true)
-        ));
+        ), $asUser);
 
         if (!preg_match('/(^|\s)' . $postId . '\s*$/', $out)) {
             throw new RuntimeException("Could not rewrite fixture post {$postId}: {$out}");
         }
+    }
+
+    /** An edit lock on $postId held by $userId from now, as wp-admin's editor writes it. */
+    private static function lock(int $postId, int $userId): void
+    {
+        WpCli::evaluate(sprintf(
+            'echo (int) update_post_meta(%d, "_edit_lock", time() . ":" . %d);',
+            $postId,
+            $userId
+        ));
+    }
+
+    /** @param array<string, string> $values meta key => value, written raw in another process */
+    private static function setMeta(int $postId, array $values, int $asUser = 0): void
+    {
+        foreach ($values as $key => $value) {
+            WpCli::evaluate(sprintf(
+                'echo (int) (bool) update_post_meta(%d, wp_slash(%s), wp_slash(%s));',
+                $postId,
+                var_export((string) $key, true),
+                var_export((string) $value, true)
+            ), $asUser);
+        }
+    }
+
+    /** One single meta value, read in another process, between markers so plugin noise cannot leak in. */
+    private static function meta(int $postId, string $key): string
+    {
+        $out = WpCli::evaluate(sprintf(
+            'echo "<<" . get_post_meta(%d, %s, true) . ">>";',
+            $postId,
+            var_export($key, true)
+        ));
+
+        if (!preg_match('/<<(.*)>>/s', $out, $m)) {
+            throw new RuntimeException("Could not read meta {$key} of post {$postId}: {$out}");
+        }
+
+        return $m[1];
     }
 
     /** An autosave of $postId holding $content, as wp-admin's autosave would store it. */
