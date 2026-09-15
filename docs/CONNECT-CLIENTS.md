@@ -155,24 +155,25 @@ RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
 The connector shows as connected and lists its tools.
 
-A `read`-scope token gets exactly 11:
+A `read`-scope token gets exactly 14:
 
 ```
 site-info      list-posts     get-post      list-terms
 list-media     get-media      list-comments  list-revisions
-get-revision   list-menus     get-menu
+get-revision   list-menus     get-menu      list-users
+get-user       get-option
 ```
 
-An `admin`-scope token gets 24, those 11 plus `create-post`, `update-post`, `delete-post`,
+An `admin`-scope token gets 29, those 14 plus `create-post`, `update-post`, `delete-post`,
 `restore-revision`, `create-term`, `delete-term`, `upload-media`, `delete-media`,
-`moderate-comment`, `reply-comment`, `add-menu-item`, `update-menu-item` and
-`remove-menu-item`. It gets 30 if Enable code-edit tools is also
+`moderate-comment`, `reply-comment`, `add-menu-item`, `update-menu-item`,
+`remove-menu-item`, `list-plugins` and `list-themes`. It gets 35 if Enable code-edit tools is also
 ticked in Settings > WP MCP, which adds `code-list`, `code-read`, `code-write`,
-`code-delete`, `code-history` and `code-restore`, and 31 if Allow SQL reads is ticked as
+`code-delete`, `code-history` and `code-restore`, and 36 if Allow SQL reads is ticked as
 well, which adds `sql-select`.
 Naming at least one key in Post meta keys adds `get-post-meta` to both lists - it is a read
-tool - and `set-post-meta` to the admin one, so a site with everything switched on serves 12
-and 33. Every switch is off, and the key list empty, until you say otherwise; a tool that
+tool - and `set-post-meta` to the admin one, so a site with everything switched on serves 15
+and 38. Every switch is off, and the key list empty, until you say otherwise; a tool that
 cannot run is not in the list at all.
 
 ### Undoing a code edit

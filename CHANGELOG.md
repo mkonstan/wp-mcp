@@ -179,6 +179,27 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Backslashes survive** in item labels, and a linked item given its page's own title
   still follows that page when it is renamed.
 
+### Added: `list-users`, `get-user`, `get-option`, `list-plugins` and `list-themes`
+
+- **An inventory of the site, read-only.** `list-users`, `get-user` and `get-option` (read
+  scope), `list-plugins` and `list-themes` (admin scope). None of them writes anything or
+  contacts another server. The catalog is 38 tools.
+- **Users as the REST API shows them.** With `list_users`, every user with login, email, roles
+  and registered date. Without it, only users who have published posts, as id and display
+  name; the `role` and `search` filters are refused by name, and a user you may not see is the
+  same answer as a missing id. A Subscriber is refused. No password hash, activation key,
+  session or user meta is ever returned.
+- **Ten settings, and one refusal for everything else.** `get-option` reads `blogname`,
+  `blogdescription`, `timezone_string`, `gmt_offset`, `date_format`, `time_format`,
+  `start_of_week`, `permalink_structure`, `siteurl` and `home` - values the public site already
+  shows - for anyone who can edit posts, which is wider than the REST API's settings endpoint on
+  purpose. Every other name, whether it exists or not, gets the same answer.
+- **Plugins and themes without an update check.** `list-plugins` needs `activate_plugins` and
+  reports file, name, version, active, network-active (multisite) and auto-update;
+  `list-themes` needs `switch_themes` and reports stylesheet, name, version, parent, active,
+  `block_theme`, and the active theme's menu locations to a caller who can edit theme options.
+  Both read what is installed and the update data as last stored, and never refresh it.
+
 ### Changed: `update-post` saves the pre-change state first
 
 - **The first edit of a post is undoable now.** WordPress saves a revision after an update,

@@ -49,9 +49,10 @@ someone else's page, and sees only approved comments unless that Editor holds
 
 **Scope** narrows from there. A `read` token is served the read tools and nothing else:
 the write tools are not listed to it, and are refused if it calls one anyway. That is
-nine tools, plus `get-post-meta` when the site has declared post meta keys. An `admin`
-token is served those and the ten that write, plus `set-post-meta` with the same meta
-keys declared, `sql-select` when SQL reads are on, and six more when code editing is on.
+fourteen tools, plus `get-post-meta` when the site has declared post meta keys. An `admin`
+token is served those and fifteen more - the thirteen that write, `list-plugins` and
+`list-themes` - plus `set-post-meta` with the same meta keys declared, `sql-select` when SQL
+reads are on, and six more when code editing is on.
 Scope only subtracts. It cannot hand a token a capability its user does not have.
 
 **Active window** and **Lifetime** are two separate timers, and the split is what lets a
@@ -137,7 +138,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Thirty-three tools. Each declares the four MCP annotation hints, so a client can tell a
+Thirty-eight tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -153,6 +154,9 @@ listing from a deletion before it asks you to approve anything.
 | `list-comments` | read | yes | no | yes | no |
 | `list-menus` | read | yes | no | yes | no |
 | `get-menu` | read | yes | no | yes | no |
+| `list-users` | read | yes | no | yes | no |
+| `get-user` | read | yes | no | yes | no |
+| `get-option` | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -166,6 +170,8 @@ listing from a deletion before it asks you to approve anything.
 | `add-menu-item` | admin | no | no | no | no |
 | `update-menu-item` | admin | no | yes | yes | no |
 | `remove-menu-item` | admin | no | yes | yes | no |
+| `list-plugins` | admin | no | no | yes | no |
+| `list-themes` | admin | no | no | yes | no |
 | `code-list` | admin + code editing | no | no | yes | no |
 | `code-read` | admin + code editing | no | no | yes | no |
 | `code-write` | admin + code editing | no | yes | no | no |
@@ -179,9 +185,10 @@ listing from a deletion before it asks you to approve anything.
 Three rows in that table need a sentence.
 
 `readOnlyHint` is the inverse of the scope gate, not of what the tool does to your
-database. `code-list`, `code-read`, `code-history` and `sql-select` only look, but they
-sit behind the admin gate, so they report `false`. The active theme is source code, not
-content, and a SELECT over `wp_users` is not content either. `destructiveHint` is where
+database. `code-list`, `code-read`, `code-history`, `sql-select`, `list-plugins` and
+`list-themes` only look, but they sit behind the admin gate, so they report `false`. The
+active theme is source code, not content, a SELECT over `wp_users` is not content either,
+and neither is what is installed on the server. `destructiveHint` is where
 each of them says it destroys nothing.
 
 `destructiveHint: false` is MCP's own narrow promise that an update is additive. The five
@@ -190,7 +197,8 @@ field it is given, and its `terms` argument replaces the post's terms in that ta
 rather than adding to them.
 
 `openWorldHint` is true for `upload-media` alone, which fetches a URL you supply. Every
-other tool's reach stops at this site's database and active theme.
+other tool's reach stops at this site's own database and files; `list-plugins` and
+`list-themes` read the update data as WordPress last stored it and never check for updates.
 
 `get-post-meta` is the one read tool behind an opt-in: it is listed only when the site
 has declared post meta keys (see *Post meta*), and it reports `readOnlyHint: true` like
@@ -397,6 +405,36 @@ not read, such as another user's draft or private page, is still listed, with it
 url and object_id null and `withheld: true`. Draft items - in a menu but not shown to
 visitors - are listed only to callers who can edit theme options, as in the REST API. An id that is not a menu, or not a menu item,
 answers exactly like an id that is not there.
+
+### Users, settings, plugins and themes
+
+Five tools that only read, each drawing its line where WordPress's own REST API draws it.
+None of them returns a password hash, an activation key, a session or any user meta.
+
+- `list-users {role?, search?, limit?, page?}` - with `list_users` (Administrators), every
+  user with id, name, login, email, roles and registered date, filterable by role and by a
+  search over login, email, URL, nicename and display name. Without it - an Editor, Author or
+  Contributor - only users who have published posts, as id and display name, and `role` or
+  `search` is refused by name. A Subscriber is refused.
+- `get-user {id}` - one user, with the same fields by the same rule, plus your own record in
+  full. A user you may not see - one with no published posts, when you can neither list nor
+  edit users - answers exactly like an id that does not exist.
+- `get-option {name}` reads one of ten settings the public site already shows: `blogname`,
+  `blogdescription`, `timezone_string`, `gmt_offset`, `date_format`, `time_format`,
+  `start_of_week`, `permalink_structure`, `siteurl` and `home`. Any other name - `admin_email`,
+  this plugin's own options, one that does not exist - gets one identical refusal, so it cannot
+  tell you what a site has installed. It needs permission to edit posts, which is wider than
+  the REST API's settings endpoint (`manage_options`) on purpose: an Editor scheduling a post
+  needs the timezone and the date formats.
+- `list-plugins` (admin scope, `activate_plugins`) lists each plugin's file, name, version,
+  whether it is active, whether it is network-active on a multisite network, and whether it
+  auto-updates, as the Plugins screen shows it.
+- `list-themes` (admin scope, `switch_themes`) lists each theme's stylesheet, name, version,
+  parent, whether it is active and whether it is a block theme, and - for a caller who can
+  edit theme options - the active theme's classic menu locations.
+
+Neither `list-plugins` nor `list-themes` checks for updates or contacts any other server:
+they read what is installed, and the update data as WordPress last stored it.
 
 ### Post meta (opt-in)
 

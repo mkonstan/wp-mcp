@@ -16,7 +16,7 @@ who checks that pass on every knock and then does the work as that user.
 |---|---|
 | `wp-mcp.php` | Bootstrap, the two tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The thirty-three tools and the helpers they share. |
+| `tools.php` | The thirty-eight tools and the helpers they share. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: the log, its unguessable name, the daily self-check, and the admin warnings. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
