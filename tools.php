@@ -12,6 +12,8 @@
  * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
  * wpmcp_code_tools():     the six jailed code-edit tools (active theme only).
  * wpmcp_sql_tools():      sql-select, one read-only SQL statement (opt-in, off by default).
+ * wpmcp_menu_tools():     list-menus / get-menu / add-menu-item / update-menu-item /
+ *                         remove-menu-item, on CLASSIC menus only.
  * Each tool = array('write'=>bool, 'annotations'=>array, 'description'=>str,
  *                   'inputSchema'=>array, 'run'=>callable).
  * Merged into the registry by endpoint.php's wpmcp_tools(), which REFUSES an entry
@@ -27,11 +29,15 @@
  *                          restore-revision (replaces the text it restores over),
  *                          delete-term, delete-media, moderate-comment (spam and trash
  *                          destroy the comment's place in the thread), code-write
- *                          (overwrites a theme file), code-delete.
+ *                          (overwrites a theme file), code-delete, update-menu-item
+ *                          (replaces the label, link, target and classes it is sent)
+ *                          and remove-menu-item (menu items have no trash).
  *                  false   every read tool, and create-post / create-term /
- *                          upload-media / reply-comment, which only ADD: each call
- *                          brings a new post, term, attachment or comment into being
- *                          and replaces nothing that was there.
+ *                          upload-media / reply-comment / add-menu-item, which only
+ *                          ADD: each call brings a new post, term, attachment, comment
+ *                          or menu item into being and replaces nothing that was there.
+ *                          (add-menu-item renumbers its siblings' menu_order, which
+ *                          keeps the order they had; it replaces none of them.)
  *
  *                  THE TEST IS MCP'S OWN AND IT IS NARROW: `false` promises the update
  *                  is ADDITIVE. update-post was false, and that was wrong - it replaces
@@ -40,8 +46,9 @@
  *                  2026-09-12. "Only the fields the caller named" is scope, not
  *                  additivity, and a client honouring the hint would have let an agent
  *                  overwrite a published body without asking. When in doubt, true.
- *   idempotentHint  false  the four tools that CREATE a new object per call
- *                          (create-post, create-term, upload-media, reply-comment), and
+ *   idempotentHint  false  the five tools that CREATE a new object per call
+ *                          (create-post, create-term, upload-media, reply-comment,
+ *                          add-menu-item), and
  *                          code-write and code-restore, whose second call stores another
  *                          version of the file - the file ends up the same, the history
  *                          does not.
@@ -3969,6 +3976,859 @@ function wpmcp_sql_tools() {
             'properties' => array('sql' => array('type' => 'string')), 'required' => array('sql')),
         'run' => function ($a) {
             return wpmcp_sql_select_run(isset($a['sql']) ? (string) $a['sql'] : '');
+        },
+    ),
+
+    );
+}
+
+/* ============================================================
+ * Classic menu tools (list-menus / get-menu / add-menu-item / update-menu-item /
+ * remove-menu-item)
+ *
+ * CLASSIC MENUS ONLY: the `nav_menu` taxonomy and its `nav_menu_item` posts - what a
+ * classic theme's wp_nav_menu() renders and what Appearance > Menus edits. A block theme's
+ * Navigation block keeps its links in `wp_navigation` posts, which nothing here reads or
+ * writes; list-menus reports block_theme so an agent knows when a classic menu it changes
+ * may not be what visitors see.
+ *
+ * TWO GATES, AND THEY ARE CORE'S. Reading is the REST menus controllers' rule
+ * (wpmcp_menu_can_read), so an Editor - the marketing role, no edit_theme_options - reads
+ * menus. Writing is edit_theme_options (wpmcp_menu_can_write). Each gate runs first, before
+ * any id is looked at, so a caller who may not read or write learns nothing about which
+ * ids exist.
+ *
+ * ONE NOT_FOUND per kind of id: a menu id that is not a `nav_menu` term, and an item id that
+ * is not a `nav_menu_item` in a menu, answer exactly as an id nobody used.
+ *
+ * THREE THINGS CORE LEAVES TO THE CALLER, measured on both sites (WP 7.1):
+ *   - ORDER. wp_update_nav_menu_item() stores the position it is given and moves no other
+ *     item; a new menu's first item gets 0. Every write here renumbers the menu 1..N, depth
+ *     first, as wp-admin's JavaScript does before it saves (wpmcp_menu_renumber).
+ *   - CHILDREN of a deleted item keep pointing at the deleted id. remove-menu-item lifts
+ *     them to the removed item's parent, in place, as wp-admin's removeMenuItem does
+ *     (wp-admin/js/nav-menu.js:1844).
+ *   - WHAT A READER MAY SEE. wp_setup_nav_menu_item() resolves a linked item's label and
+ *     link with no capability check; get-menu withholds both for content the caller may
+ *     not read (wpmcp_menu_item_visible).
+ *
+ * SLASHING (KB 0.27). wp_update_nav_menu_item() hands the title, description and attribute
+ * title to wp_insert_post()/wp_update_post(), which unslash, and compares
+ * wp_unslash( $title ) with a linked object's title (nav-menu.php:514); core's REST
+ * controller slashes its whole array first (menu-items controller :139, :232), and so does
+ * every write below. The renumbering and the re-parenting pass ids and integers only.
+ * ========================================================== */
+
+/**
+ * May the caller READ classic menus? Core's REST rule, restated: edit_theme_options, or
+ * edit_posts, or the edit_posts capability of any post type shown in REST
+ * (class-wp-rest-menus-controller.php:86-111; the menu-items controller makes the same check).
+ * An Editor passes, a Subscriber does not.
+ *
+ * Core consults the `rest_menu_read_access` filter first; its callbacks are handed a
+ * WP_REST_Request and a controller, and this is neither, so it is not applied here.
+ */
+function wpmcp_menu_can_read() {
+    if (current_user_can('edit_theme_options') || current_user_can('edit_posts')) { return true; }
+
+    foreach (get_post_types(array('show_in_rest' => true), 'objects') as $type) {
+        if (current_user_can($type->cap->edit_posts)) { return true; }
+    }
+
+    return false;
+}
+
+/**
+ * May the caller WRITE classic menus? edit_theme_options.
+ *
+ * That is what wp-admin's Menus screen requires, and it is what every capability the REST
+ * menu-items controller checks resolves to - MEASURED for administrator, editor, author,
+ * contributor and subscriber on both sites: nav_menu_item's create_posts, edit_post and
+ * delete_post, and the nav_menu taxonomy's assign_terms, all map to edit_theme_options
+ * (post.php:163-181, taxonomy.php:124-129). One capability, so one check.
+ */
+function wpmcp_menu_can_write() {
+    return current_user_can('edit_theme_options');
+}
+
+/** A classic menu by id, or null. An id that is not a `nav_menu` term is no menu. */
+function wpmcp_menu_get($id) {
+    $id = (int) $id;
+    if ($id <= 0) { return null; }
+
+    $term = get_term($id, 'nav_menu');
+
+    return ($term instanceof WP_Term) ? $term : null;
+}
+
+/**
+ * A menu item and the menu it belongs to, or null - for an id that is not a nav_menu_item,
+ * an item in no menu (core's draft orphans), and an item in the trash alike.
+ *
+ * @return array{item: WP_Post, menu: WP_Term}|null
+ */
+function wpmcp_menu_item_get($id) {
+    $id   = (int) $id;
+    $post = $id > 0 ? get_post($id) : null;
+
+    if (!$post || $post->post_type !== 'nav_menu_item') { return null; }
+    if (!in_array($post->post_status, array('publish', 'draft'), true)) { return null; }
+
+    $menus = wp_get_object_terms($id, 'nav_menu', array('fields' => 'ids'));
+    if (is_wp_error($menus) || empty($menus)) { return null; }
+
+    $menu = wpmcp_menu_get((int) $menus[0]);
+
+    return $menu ? array('item' => $post, 'menu' => $menu) : null;
+}
+
+/**
+ * The items of one menu, in the order it holds them: menu_order, then ID.
+ *
+ * ITS OWN QUERY, not wp_get_nav_menu_items(), which is wrong for this twice over. On any
+ * request that is not wp-admin - a REST request is not - it DROPS an item whose linked page
+ * is trashed or gone (nav-menu.php:749-751), so a renumbering built on it would skip that
+ * item and leave it holding a number another item now has. And it rewrites menu_order to
+ * 1..N on the way out (:753-766), so it cannot show what the database holds. Draft and
+ * publish both, as wp-admin's own save reads them.
+ *
+ * @return list<WP_Post>
+ */
+function wpmcp_menu_rows($menu) {
+    return array_values(get_posts(array(
+        'post_type'        => 'nav_menu_item',
+        'post_status'      => array('publish', 'draft'),
+        'numberposts'      => -1,
+        'orderby'          => array('menu_order' => 'ASC', 'ID' => 'ASC'),
+        'suppress_filters' => true,
+        'tax_query'        => array(array(
+            'taxonomy' => 'nav_menu',
+            'field'    => 'term_taxonomy_id',
+            'terms'    => (int) $menu->term_taxonomy_id,
+        )),
+    )));
+}
+
+/**
+ * The shape of a menu: each item's effective parent, and each parent's children in order.
+ *
+ * A stored parent that is not an item of THIS menu - deleted, in another menu, the item
+ * itself - counts as the top level, which is where a theme's walker shows such an item.
+ *
+ * @return array{parents: array<int, int>, children: array<int, list<int>>}
+ */
+function wpmcp_menu_shape($rows) {
+    $inMenu = array();
+    foreach ($rows as $row) { $inMenu[(int) $row->ID] = true; }
+
+    $parents  = array();
+    $children = array(0 => array());
+
+    foreach ($rows as $row) {
+        $id     = (int) $row->ID;
+        $parent = (int) get_post_meta($id, '_menu_item_menu_item_parent', true);
+
+        if ($parent === $id || !isset($inMenu[$parent])) { $parent = 0; }
+
+        $parents[$id]        = $parent;
+        $children[$parent][] = $id;
+    }
+
+    return array('parents' => $parents, 'children' => $children);
+}
+
+/**
+ * Every item, depth first from the top level - the order wp-admin saves a menu in, and the
+ * one its menu_order 1..N stands for. An item the top level cannot reach (only a cycle
+ * already in the stored data does that) follows at the end, so none is ever dropped.
+ *
+ * @param array<int, list<int>> $children
+ * @param list<int>             $allIds
+ * @return list<int>
+ */
+function wpmcp_menu_flatten($children, $allIds) {
+    $out  = array();
+    $seen = array();
+
+    $walk = function ($parent) use (&$walk, &$out, &$seen, $children) {
+        if (empty($children[$parent])) { return; }
+
+        foreach ($children[$parent] as $id) {
+            if (isset($seen[$id])) { continue; }
+            $seen[$id] = true;
+            $out[]     = $id;
+            $walk($id);
+        }
+    };
+
+    $walk(0);
+
+    foreach ($allIds as $id) {
+        if (isset($seen[$id])) { continue; }
+        $seen[$id] = true;
+        $out[]     = $id;
+        $walk($id);
+    }
+
+    return $out;
+}
+
+/** The item ids inside $id, at any depth, as a set. */
+function wpmcp_menu_descendants($children, $id) {
+    $found = array();
+    $stack = isset($children[$id]) ? $children[$id] : array();
+
+    while ($stack) {
+        $child = array_pop($stack);
+        if (isset($found[$child])) { continue; }
+        $found[$child] = true;
+
+        if (!empty($children[$child])) {
+            foreach ($children[$child] as $grandchild) { $stack[] = $grandchild; }
+        }
+    }
+
+    return $found;
+}
+
+/**
+ * Number a menu's items 1..N in $order, writing only rows whose menu_order differs.
+ *
+ * WHY IT EXISTS: wp_update_nav_menu_item() stores the position it is given and shifts
+ * nothing (nav-menu.php:458-474). MEASURED on both sites: position 2 on a menu of
+ * A(0) B(2) C(3) stores a second 2, and a new menu's first item gets 0. wp-admin renumbers
+ * the whole list in JavaScript before it saves; without this, two items claim one place and
+ * the order between them is whatever the database returns.
+ *
+ * wp_update_post() with the id and the number: it reads the rest of the row back and
+ * slashes that itself (post.php:5345), so there is no caller string here to slash.
+ *
+ * @return true|WP_Error
+ */
+function wpmcp_menu_renumber($rows, $order) {
+    $current = array();
+    foreach ($rows as $row) { $current[(int) $row->ID] = (int) $row->menu_order; }
+
+    $n = 0;
+    foreach ($order as $id) {
+        $n++;
+        if (!isset($current[$id]) || $current[$id] === $n) { continue; }
+
+        $updated = wp_update_post(array('ID' => (int) $id, 'menu_order' => $n), true);
+        if (is_wp_error($updated)) { return $updated; }
+    }
+
+    return true;
+}
+
+/**
+ * Put item $id among $parent's children at $position (from 1; null or past the end means
+ * last), then renumber the whole menu. The item's own parent meta must already say $parent.
+ *
+ * @return true|WP_Error
+ */
+function wpmcp_menu_place($menu, $id, $parent, $position) {
+    $rows     = wpmcp_menu_rows($menu);
+    $shape    = wpmcp_menu_shape($rows);
+    $children = $shape['children'];
+
+    foreach ($children as $key => $list) {
+        $children[$key] = array_values(array_diff($list, array($id)));
+    }
+
+    $siblings = isset($children[$parent]) ? $children[$parent] : array();
+    $index    = ($position === null) ? count($siblings) : max(0, min(count($siblings), (int) $position - 1));
+
+    array_splice($siblings, $index, 0, array($id));
+    $children[$parent] = $siblings;
+
+    $allIds = array();
+    foreach ($rows as $row) { $allIds[] = (int) $row->ID; }
+
+    return wpmcp_menu_renumber($rows, wpmcp_menu_flatten($children, $allIds));
+}
+
+/**
+ * May the caller see what this item links to?
+ *
+ * wp_setup_nav_menu_item() resolves a linked item's label and link with NO capability check:
+ * measured, it hands a draft page's title and its ?page_id= link to anybody who asks. So:
+ *
+ *   post_type          the linked post exists, is not trashed, its type is viewable, and the
+ *                      caller holds read_post on it - which a draft or private page of
+ *                      somebody else's fails for an Author
+ *   taxonomy           the term exists and its taxonomy is viewable
+ *   post_type_archive  the post type is viewable
+ *   custom             always - its url is the item's own
+ */
+function wpmcp_menu_item_visible($setup) {
+    switch ((string) $setup->type) {
+        case 'post_type':
+            $post = get_post((int) $setup->object_id);
+
+            return $post && $post->post_status !== 'trash'
+                && is_post_type_viewable($post->post_type)
+                && current_user_can('read_post', $post->ID);
+
+        case 'taxonomy':
+            $term = get_term((int) $setup->object_id, (string) $setup->object);
+
+            return ($term instanceof WP_Term) && is_taxonomy_viewable($term->taxonomy);
+
+        case 'post_type_archive':
+            return post_type_exists((string) $setup->object) && is_post_type_viewable((string) $setup->object);
+
+        case 'custom':
+            return true;
+    }
+
+    return false;
+}
+
+/** One item as get-menu shows it, children not included. */
+function wpmcp_menu_item_out($row, $parent, $position) {
+    $setup   = wp_setup_nav_menu_item(clone $row);
+    $visible = wpmcp_menu_item_visible($setup);
+    $classes = array();
+
+    foreach ((array) $setup->classes as $class) {
+        if ((string) $class !== '') { $classes[] = (string) $class; }
+    }
+
+    return array(
+        'id'         => (int) $row->ID,
+        'title'      => $visible ? (string) $setup->title : null,
+        'type'       => (string) $setup->type,
+        'object'     => (string) $setup->object,
+        'object_id'  => ($visible && in_array($setup->type, array('post_type', 'taxonomy'), true)) ? (int) $setup->object_id : null,
+        'url'        => $visible ? (string) $setup->url : null,
+        'target'     => (string) $setup->target,
+        'classes'    => $classes,
+        'parent'     => (int) $parent,
+        'position'   => (int) $position,
+        'menu_order' => (int) $row->menu_order,
+        'status'     => (string) $row->post_status,
+        'withheld'   => !$visible,
+    );
+}
+
+/** A menu's items as a tree, each level in order. */
+function wpmcp_menu_tree($rows) {
+    $shape = wpmcp_menu_shape($rows);
+    $byId  = array();
+    foreach ($rows as $row) { $byId[(int) $row->ID] = $row; }
+
+    $seen  = array();
+    $build = function ($parent) use (&$build, &$seen, $shape, $byId) {
+        $out      = array();
+        $position = 0;
+
+        foreach (isset($shape['children'][$parent]) ? $shape['children'][$parent] : array() as $id) {
+            if (isset($seen[$id])) { continue; }
+            $seen[$id] = true;
+
+            $item             = wpmcp_menu_item_out($byId[$id], $parent, ++$position);
+            $item['children'] = $build($id);
+            $out[]            = $item;
+        }
+
+        return $out;
+    };
+
+    $tree = $build(0);
+
+    // Only a cycle already in the stored data leaves an item unreached; show it, at the end.
+    foreach ($byId as $id => $row) {
+        if (isset($seen[$id])) { continue; }
+        $seen[$id] = true;
+
+        $item             = wpmcp_menu_item_out($row, 0, count($tree) + 1);
+        $item['children'] = $build($id);
+        $tree[]           = $item;
+    }
+
+    return $tree;
+}
+
+/** id, name, slug, count and the theme locations assigned to this menu. */
+function wpmcp_menu_summary($menu, $count, $registered, $assigned) {
+    $locations = array();
+
+    foreach ($registered as $location => $description) {
+        if (!empty($assigned[$location]) && (int) $assigned[$location] === (int) $menu->term_id) {
+            $locations[] = array('location' => (string) $location, 'description' => (string) $description);
+        }
+    }
+
+    return array(
+        'id'        => (int) $menu->term_id,
+        'name'      => (string) $menu->name,
+        'slug'      => (string) $menu->slug,
+        'count'     => (int) $count,
+        'locations' => $locations,
+    );
+}
+
+/** One item, re-read after a write, as get-menu shows it - plus menu_id. */
+function wpmcp_menu_item_result($id, $menu) {
+    $rows  = wpmcp_menu_rows($menu);
+    $shape = wpmcp_menu_shape($rows);
+
+    foreach ($rows as $row) {
+        if ((int) $row->ID !== (int) $id) { continue; }
+
+        $parent   = $shape['parents'][(int) $id];
+        $position = array_search((int) $id, $shape['children'][$parent], true);
+
+        return wpmcp_menu_item_out($row, $parent, $position === false ? 0 : $position + 1)
+            + array('menu_id' => (int) $menu->term_id);
+    }
+
+    return new WP_Error('wpmcp_not_found', 'No menu item with that ID.');
+}
+
+/**
+ * A custom item's url, or a WP_Error. http, https and relative only.
+ *
+ * esc_url_raw() with that protocol list returns '' for javascript:, data:, mailto: and any
+ * other scheme however it is cased or padded (measured), and turns a bare host into http://.
+ * The '' is REFUSED here, because core would not refuse it: its sanitize_url() on the way
+ * in stores the '' without a word (nav-menu.php:598), leaving an item that links nowhere.
+ */
+function wpmcp_menu_url($url) {
+    $clean = esc_url_raw(trim((string) $url), array('http', 'https'));
+
+    if ($clean === '') {
+        return new WP_Error(
+            'wpmcp_bad_url',
+            'The url must be an http or https address, or a relative one such as /about or'
+            . ' #top. Other schemes, javascript: among them, are refused.'
+        );
+    }
+
+    return $clean;
+}
+
+/** classes as core stores them: one space-separated string. */
+function wpmcp_menu_classes($value) {
+    $list = is_array($value) ? $value : preg_split('/\s+/', (string) $value);
+
+    return implode(' ', array_map('strval', array_filter((array) $list, 'is_scalar')));
+}
+
+function wpmcp_menu_bad_parent($parentId, $menu) {
+    return new WP_Error(
+        'wpmcp_bad_parent',
+        'parent_id ' . (int) $parentId . ' is not an item of menu ' . (int) $menu->term_id
+        . '. Use 0 for the top level, or the id of an item in the same menu (get-menu lists them).'
+    );
+}
+
+function wpmcp_menu_tools() {
+    $itemFields = 'id, title (the label shown), type (post_type, taxonomy, post_type_archive or'
+        . ' custom), object (such as page, category or custom), object_id, url, target, classes,'
+        . ' parent (0 at the top level), position (among its siblings, from 1), menu_order (its'
+        . ' place in the whole menu) and status';
+
+    return array(
+
+    'list-menus' => array(
+        'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'List the site\'s classic navigation menus. Returns block_theme - true'
+            . ' when the active theme is a block theme, whose Navigation block is edited in the'
+            . ' Site Editor, so changing a classic menu here may not change what visitors see -'
+            . ' then locations (each menu location the theme registers: location, description,'
+            . ' and menu_id of the menu assigned to it, or null) and menus (id, name, slug,'
+            . ' count of items, and the locations it is assigned to). Read one with get-menu.'
+            . ' Needs permission to edit posts or theme options: Editors can read menus,'
+            . ' Subscribers cannot.',
+        'inputSchema' => array('type' => 'object', 'properties' => array()),
+        'run' => function ($a) {
+            if (!wpmcp_menu_can_read()) { return wpmcp_cannot('read menus'); }
+
+            $registered = get_registered_nav_menus();
+            $assigned   = get_nav_menu_locations();
+            $locations  = array();
+
+            foreach ($registered as $location => $description) {
+                $menu = !empty($assigned[$location]) ? wpmcp_menu_get($assigned[$location]) : null;
+                $locations[] = array(
+                    'location'    => (string) $location,
+                    'description' => (string) $description,
+                    'menu_id'     => $menu ? (int) $menu->term_id : null,
+                );
+            }
+
+            $menus = array();
+            foreach (wp_get_nav_menus() as $menu) {
+                $menus[] = wpmcp_menu_summary($menu, count(wpmcp_menu_rows($menu)), $registered, $assigned);
+            }
+
+            return array(
+                'block_theme' => function_exists('wp_is_block_theme') && wp_is_block_theme(),
+                'locations'   => $locations,
+                'menus'       => $menus,
+            );
+        },
+    ),
+
+    'get-menu' => array(
+        'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Read one classic menu as a tree of items. Args: id (integer, required),'
+            . ' from list-menus. Returns id, name, slug, count, locations and items, top level'
+            . ' first, each with ' . $itemFields . ', withheld and children. An item that links to'
+            . ' content you may not read, such as another user\'s draft or private page, is still'
+            . ' listed, with title, url and object_id null and withheld true. Needs permission'
+            . ' to edit posts or theme options; an id that is not a menu answers like a missing'
+            . ' one.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id' => array('type' => 'integer', 'description' => 'Menu ID, from list-menus.'),
+        ), 'required' => array('id')),
+        'run' => function ($a) {
+            if (!wpmcp_menu_can_read()) { return wpmcp_cannot('read menus'); }
+
+            $menu = wpmcp_menu_get(isset($a['id']) ? $a['id'] : 0);
+            if (!$menu) { return new WP_Error('wpmcp_not_found', 'No menu with that ID.'); }
+
+            $rows = wpmcp_menu_rows($menu);
+
+            return wpmcp_menu_summary($menu, count($rows), get_registered_nav_menus(), get_nav_menu_locations())
+                + array('items' => wpmcp_menu_tree($rows));
+        },
+    ),
+
+    'add-menu-item' => array(
+        'write' => true,
+        // destructiveHint FALSE: a new item comes into being and none is replaced. The
+        // renumbering rewrites other items' menu_order, but only to keep the order they
+        // already had contiguous around the new one. idempotentHint FALSE: a second call
+        // adds a second item.
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => false,
+            'idempotentHint' => false,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Add an item to a classic navigation menu. Args: menu_id and type'
+            . ' (required). type is "custom" for a plain link, a post type such as "page" or'
+            . ' "post", or a taxonomy such as "category". object_id: the post or term a linked'
+            . ' item points at; it must exist and be readable by you. url: custom items only -'
+            . ' http, https or relative; javascript: and other schemes are refused. title:'
+            . ' required for a custom item; omit it on a linked item to show the linked title.'
+            . ' parent_id: an item of the same menu (default 0, the top level). position: among'
+            . ' those siblings, from 1 (default last). target: "" or "_blank". classes: a list'
+            . ' of CSS classes. The other items are renumbered so the order stays contiguous.'
+            . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
+            . ' theme options (Administrators, not Editors).',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'menu_id'   => array('type' => 'integer', 'description' => 'Menu ID, from list-menus.'),
+            'type'      => array('type' => 'string', 'description' => '"custom", a post type (page, post, ...) or a taxonomy (category, ...).'),
+            'object_id' => array('type' => 'integer', 'description' => 'The post or term a linked item points at.'),
+            'url'       => array('type' => 'string', 'description' => 'Custom items only: an http, https or relative url.'),
+            'title'     => array('type' => 'string', 'description' => 'The label. Required for a custom item.'),
+            'parent_id' => array('type' => 'integer', 'minimum' => 0, 'description' => 'An item of the same menu, or 0 for the top level. Default 0.'),
+            'position'  => array('type' => 'integer', 'minimum' => 1, 'description' => 'Place among its siblings, from 1. Default last.'),
+            'target'    => array('type' => 'string', 'enum' => array('', '_blank'), 'description' => '"_blank" to open in a new tab.'),
+            'classes'   => array('type' => 'array', 'items' => array('type' => 'string'), 'description' => 'CSS classes for the item.'),
+        ), 'required' => array('menu_id', 'type')),
+        'run' => function ($a) {
+            if (!wpmcp_menu_can_write()) { return wpmcp_cannot('edit menus'); }
+
+            $menu = wpmcp_menu_get(isset($a['menu_id']) ? $a['menu_id'] : 0);
+            if (!$menu) { return new WP_Error('wpmcp_not_found', 'No menu with that ID.'); }
+
+            $type = isset($a['type']) ? sanitize_key((string) $a['type']) : '';
+            $data = array('menu-item-status' => 'publish');
+
+            if ($type !== 'custom' && isset($a['url'])) {
+                return new WP_Error('wpmcp_bad_argument', 'url is only for a custom item; a linked item takes its link from what it links to.');
+            }
+
+            if ($type === 'custom') {
+                $url = wpmcp_menu_url(isset($a['url']) ? $a['url'] : '');
+                if (is_wp_error($url)) { return $url; }
+
+                $title = isset($a['title']) ? (string) $a['title'] : '';
+                if (trim($title) === '') {
+                    return new WP_Error('wpmcp_title_required', 'A custom item needs a title.');
+                }
+
+                $data += array('menu-item-type' => 'custom', 'menu-item-url' => $url, 'menu-item-title' => $title);
+            } elseif ($type !== '' && post_type_exists($type) && wpmcp_post_type_ok($type)) {
+                // The same not_found for a missing post, a post of another type, a trashed
+                // one and one the caller may not read.
+                $post = !empty($a['object_id']) ? get_post((int) $a['object_id']) : null;
+                if (!$post || $post->post_type !== $type || $post->post_status === 'trash'
+                    || !current_user_can('read_post', $post->ID)) {
+                    return new WP_Error('wpmcp_not_found', 'No post with that ID.');
+                }
+
+                $data += array(
+                    'menu-item-type'      => 'post_type',
+                    'menu-item-object'    => $type,
+                    'menu-item-object-id' => (int) $post->ID,
+                    'menu-item-title'     => isset($a['title']) ? (string) $a['title'] : '',
+                );
+            } elseif ($type !== '' && taxonomy_exists($type) && is_taxonomy_viewable($type)) {
+                $term = !empty($a['object_id']) ? get_term((int) $a['object_id'], $type) : null;
+                if (!($term instanceof WP_Term)) {
+                    return new WP_Error('wpmcp_not_found', 'No term with that ID.');
+                }
+
+                $data += array(
+                    'menu-item-type'      => 'taxonomy',
+                    'menu-item-object'    => $type,
+                    'menu-item-object-id' => (int) $term->term_id,
+                    'menu-item-title'     => isset($a['title']) ? (string) $a['title'] : '',
+                );
+            } else {
+                return new WP_Error(
+                    'wpmcp_bad_type',
+                    'type must be "custom", a viewable post type such as "page" or "post", or a'
+                    . ' viewable taxonomy such as "category".'
+                );
+            }
+
+            // THE PARENT MUST BE AN ITEM OF THIS MENU. Core would store any id it is given,
+            // an item of another menu included (measured), and the item would then show at
+            // the top level of one menu while claiming a parent in another.
+            $shape  = wpmcp_menu_shape(wpmcp_menu_rows($menu));
+            $parent = isset($a['parent_id']) ? (int) $a['parent_id'] : 0;
+            if ($parent !== 0 && !isset($shape['parents'][$parent])) {
+                return wpmcp_menu_bad_parent($parent, $menu);
+            }
+
+            $data['menu-item-parent-id'] = $parent;
+            if (isset($a['target']))  { $data['menu-item-target'] = ((string) $a['target'] === '_blank') ? '_blank' : ''; }
+            if (isset($a['classes'])) { $data['menu-item-classes'] = wpmcp_menu_classes($a['classes']); }
+
+            // SLASHED, as core's REST controller does (menu-items controller :139): the title
+            // reaches wp_insert_post(), which unslashes, and core compares wp_unslash() of it
+            // with the linked title (nav-menu.php:514).
+            $id = wp_update_nav_menu_item($menu->term_id, 0, wp_slash($data));
+            if (is_wp_error($id)) { return $id; }
+
+            $placed = wpmcp_menu_place($menu, (int) $id, $parent, isset($a['position']) ? (int) $a['position'] : null);
+            if (is_wp_error($placed)) { return $placed; }
+
+            return wpmcp_menu_item_result((int) $id, $menu);
+        },
+    ),
+
+    'update-menu-item' => array(
+        'write' => true,
+        // destructiveHint TRUE: the label, link, target and classes sent REPLACE what the
+        // item had - update-post's judgement for update-post's reason. idempotentHint TRUE:
+        // the same fields and the same place twice leave the same menu.
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Change one item of a classic menu. Args: id (required), then any of'
+            . ' title, url (custom items only: http, https or relative), target ("" or'
+            . ' "_blank"), classes (a list), parent_id (0 for the top level, or an item of the'
+            . ' same menu that is not the item itself or inside it) and position (among its'
+            . ' siblings, from 1). An empty title on a linked item shows the linked title again.'
+            . ' Moving to a new parent without a position puts the item last there. Fields not'
+            . ' sent stay as they are, and the menu is renumbered so its order stays contiguous.'
+            . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
+            . ' theme options; an id that is not a menu item answers like a missing one.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id'        => array('type' => 'integer', 'description' => 'Menu item ID, from get-menu.'),
+            'title'     => array('type' => 'string', 'description' => 'The label.'),
+            'url'       => array('type' => 'string', 'description' => 'Custom items only: an http, https or relative url.'),
+            'target'    => array('type' => 'string', 'enum' => array('', '_blank'), 'description' => '"_blank" to open in a new tab, "" not to.'),
+            'classes'   => array('type' => 'array', 'items' => array('type' => 'string'), 'description' => 'CSS classes; replaces the list.'),
+            'parent_id' => array('type' => 'integer', 'minimum' => 0, 'description' => 'An item of the same menu, or 0 for the top level.'),
+            'position'  => array('type' => 'integer', 'minimum' => 1, 'description' => 'Place among its siblings, from 1.'),
+        ), 'required' => array('id')),
+        'run' => function ($a) {
+            if (!wpmcp_menu_can_write()) { return wpmcp_cannot('edit menus'); }
+
+            $found = wpmcp_menu_item_get(isset($a['id']) ? $a['id'] : 0);
+            if (!$found) { return new WP_Error('wpmcp_not_found', 'No menu item with that ID.'); }
+
+            $item  = $found['item'];
+            $menu  = $found['menu'];
+            $id    = (int) $item->ID;
+            $shape = wpmcp_menu_shape(wpmcp_menu_rows($menu));
+            $type  = (string) get_post_meta($id, '_menu_item_type', true);
+
+            // EVERY FIELD CORE WILL WRITE, read back from the row first. wp_update_nav_menu_item()
+            // fills anything missing with its DEFAULTS - an empty label, url and classes, type
+            // `custom` (nav-menu.php:437-454) - so an update that sent only what changed would
+            // wipe the rest. The REST controller reads the item back the same way (menu-items
+            // controller :343-368). RAW, not through wp_setup_nav_menu_item(), which would hand
+            // back a linked page's title as the label and a trimmed, filtered description.
+            $data = array(
+                'menu-item-object-id'   => (int) get_post_meta($id, '_menu_item_object_id', true),
+                'menu-item-object'      => (string) get_post_meta($id, '_menu_item_object', true),
+                'menu-item-parent-id'   => $shape['parents'][$id],
+                'menu-item-position'    => max(1, (int) $item->menu_order),
+                'menu-item-type'        => $type,
+                'menu-item-title'       => $item->post_title,
+                'menu-item-url'         => (string) get_post_meta($id, '_menu_item_url', true),
+                'menu-item-description' => $item->post_content,
+                'menu-item-attr-title'  => $item->post_excerpt,
+                'menu-item-target'      => (string) get_post_meta($id, '_menu_item_target', true),
+                'menu-item-classes'     => wpmcp_menu_classes((array) get_post_meta($id, '_menu_item_classes', true)),
+                'menu-item-xfn'         => (string) get_post_meta($id, '_menu_item_xfn', true),
+                'menu-item-status'      => $item->post_status,
+            );
+
+            if (array_key_exists('title', $a)) {
+                $title = (string) $a['title'];
+                if ($type === 'custom' && trim($title) === '') {
+                    return new WP_Error('wpmcp_title_required', 'A custom item needs a title.');
+                }
+                $data['menu-item-title'] = $title;
+            }
+
+            if (array_key_exists('url', $a)) {
+                if ($type !== 'custom') {
+                    return new WP_Error('wpmcp_bad_argument', 'url is only for a custom item; a linked item takes its link from what it links to.');
+                }
+                $url = wpmcp_menu_url($a['url']);
+                if (is_wp_error($url)) { return $url; }
+                $data['menu-item-url'] = $url;
+            }
+
+            if (array_key_exists('target', $a))  { $data['menu-item-target'] = ((string) $a['target'] === '_blank') ? '_blank' : ''; }
+            if (array_key_exists('classes', $a)) { $data['menu-item-classes'] = wpmcp_menu_classes($a['classes']); }
+
+            $parent = $shape['parents'][$id];
+            $moved  = false;
+
+            if (array_key_exists('parent_id', $a)) {
+                $newParent = (int) $a['parent_id'];
+
+                if ($newParent !== 0 && !isset($shape['parents'][$newParent])) {
+                    return wpmcp_menu_bad_parent($newParent, $menu);
+                }
+
+                // NO CYCLES. Core catches only the item as its own parent, and silently: it
+                // stores 0 (nav-menu.php:583-586). A descendant it stores as given, and the
+                // two items then hang from each other with no way back to the top.
+                if ($newParent === $id || isset(wpmcp_menu_descendants($shape['children'], $id)[$newParent])) {
+                    return new WP_Error(
+                        'wpmcp_bad_parent',
+                        'parent_id cannot be the item itself or an item inside it: item ' . $id
+                        . ' contains ' . ($newParent === $id ? 'no item ' . $id . ' to hang from' : 'item ' . $newParent) . '.'
+                    );
+                }
+
+                $moved  = ($newParent !== $parent);
+                $parent = $newParent;
+                $data['menu-item-parent-id'] = $parent;
+            }
+
+            if (array_key_exists('position', $a)) {
+                $position = (int) $a['position'];
+            } elseif ($moved) {
+                $position = null;
+            } else {
+                $index    = array_search($id, $shape['children'][$parent], true);
+                $position = ($index === false) ? null : $index + 1;
+            }
+
+            // SLASHED, as core's REST controller does (menu-items controller :232).
+            $updated = wp_update_nav_menu_item($menu->term_id, $id, wp_slash($data));
+            if (is_wp_error($updated)) { return $updated; }
+
+            $placed = wpmcp_menu_place($menu, $id, $parent, $position);
+            if (is_wp_error($placed)) { return $placed; }
+
+            return wpmcp_menu_item_result($id, $menu);
+        },
+    ),
+
+    'remove-menu-item' => array(
+        'write' => true,
+        // destructiveHint TRUE: the item is deleted outright - menu items have no trash.
+        // idempotentHint TRUE: a second call finds nothing to remove and the menu is as
+        // the first call left it.
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Remove one item from a classic menu. Args: id (required). The item is'
+            . ' deleted permanently - menu items have no trash. Its children move up one level to'
+            . ' its parent, in its place, as in wp-admin; every other item keeps its order and'
+            . ' the menu is renumbered. Returns id, removed, menu_id, parent and reparented (the'
+            . ' ids that moved up). Needs permission to edit theme options; an id that is not a'
+            . ' menu item answers like a missing one.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id' => array('type' => 'integer', 'description' => 'Menu item ID, from get-menu.'),
+        ), 'required' => array('id')),
+        'run' => function ($a) {
+            if (!wpmcp_menu_can_write()) { return wpmcp_cannot('edit menus'); }
+
+            $found = wpmcp_menu_item_get(isset($a['id']) ? $a['id'] : 0);
+            if (!$found) { return new WP_Error('wpmcp_not_found', 'No menu item with that ID.'); }
+
+            $id     = (int) $found['item']->ID;
+            $menu   = $found['menu'];
+            $rows   = wpmcp_menu_rows($menu);
+            $shape  = wpmcp_menu_shape($rows);
+            $parent = $shape['parents'][$id];
+            $kids   = isset($shape['children'][$id]) ? $shape['children'][$id] : array();
+
+            // wp_delete_post() with force, as wp-admin and the REST controller delete a menu
+            // item (nav-menus.php:283, menu-items controller :306). It does not touch the
+            // children: measured, they keep pointing at the id that is now gone.
+            if (!wp_delete_post($id, true)) {
+                return new WP_Error('wpmcp_delete_failed', 'The menu item could not be removed.');
+            }
+
+            // THE CHILDREN MOVE UP ONE LEVEL, what wp-admin's removeMenuItem does
+            // (nav-menu.js:1844). An integer as a string, the form core stores it in
+            // (nav-menu.php:589); no caller string, nothing to slash.
+            foreach ($kids as $kid) {
+                update_post_meta($kid, '_menu_item_menu_item_parent', (string) $parent);
+            }
+
+            // ...AND TAKE THE REMOVED ITEM'S PLACE among its siblings, so every other item
+            // keeps the order it had.
+            $children = $shape['children'];
+            $siblings = $children[$parent];
+            array_splice($siblings, (int) array_search($id, $siblings, true), 1, $kids);
+            $children[$parent] = $siblings;
+            unset($children[$id]);
+
+            $remaining = array();
+            $allIds    = array();
+            foreach ($rows as $row) {
+                if ((int) $row->ID === $id) { continue; }
+                $remaining[] = $row;
+                $allIds[]    = (int) $row->ID;
+            }
+
+            $done = wpmcp_menu_renumber($remaining, wpmcp_menu_flatten($children, $allIds));
+            if (is_wp_error($done)) { return $done; }
+
+            return array(
+                'id'         => $id,
+                'removed'    => true,
+                'menu_id'    => (int) $menu->term_id,
+                'parent'     => $parent,
+                'reparented' => array_map('intval', $kids),
+            );
         },
     ),
 

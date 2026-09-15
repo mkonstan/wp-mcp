@@ -198,6 +198,18 @@ final class ToolContractTest extends TestCase
             'list-revisions'   => [false, true,  false],
             'get-revision'     => [false, true,  false],
             'restore-revision' => [true,  true,  false],
+            // Sprint 13. list-menus and get-menu only read. add-menu-item brings a new
+            // item into being and replaces none - it renumbers its siblings' menu_order,
+            // which keeps the order they had - so it is create-post's judgement, and not
+            // idempotent for the same reason: a second call adds a second item.
+            // update-menu-item REPLACES the label, link, target and classes it is sent,
+            // update-post's judgement. remove-menu-item deletes outright; menu items have
+            // no trash.
+            'list-menus'       => [false, true,  false],
+            'get-menu'         => [false, true,  false],
+            'add-menu-item'    => [false, false, false],
+            'update-menu-item' => [true,  true,  false],
+            'remove-menu-item' => [true,  true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();
