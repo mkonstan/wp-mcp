@@ -189,6 +189,15 @@ final class ToolContractTest extends TestCase
             // because writing the same value twice leaves the same rows.
             'get-post-meta'    => [false, true,  false],
             'set-post-meta'    => [true,  true,  false],
+            // Sprint 12. list-revisions and get-revision only read. restore-revision
+            // REPLACES the post's title, content and excerpt with the revision's - saved
+            // first, so it is undoable, but undoable is not additive, which is
+            // update-post's judgement for update-post's reason. Idempotent because a
+            // second restore of the same revision finds the post already holding it, and
+            // core stores no revision for an unchanged post.
+            'list-revisions'   => [false, true,  false],
+            'get-revision'     => [false, true,  false],
+            'restore-revision' => [true,  true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

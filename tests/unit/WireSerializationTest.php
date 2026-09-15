@@ -281,6 +281,7 @@ final class WireSerializationTest extends TestCase
         foreach ([
             'wpmcp_core_tools',
             'wpmcp_content_tools',
+            'wpmcp_revision_tools',
             'wpmcp_meta_tools',
             'wpmcp_taxonomy_tools',
             'wpmcp_media_tools',
@@ -294,9 +295,9 @@ final class WireSerializationTest extends TestCase
         }
 
         self::assertCount(
-            25,
+            28,
             $tools,
-            'The catalog is not 25 tools any more. That is the product (see the build'
+            'The catalog is not 28 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
             . ' detail - update this number deliberately. Got: ' . implode(', ', array_keys($tools))
         );

@@ -6,6 +6,7 @@
  *
  * wpmcp_core_tools():     site-info / list-posts / get-post.
  * wpmcp_content_tools():  create-post / update-post / delete-post.
+ * wpmcp_revision_tools():  list-revisions / get-revision / restore-revision.
  * wpmcp_taxonomy_tools(): list-terms / create-term / delete-term.
  * wpmcp_media_tools():    list-media / get-media / upload-media / delete-media.
  * wpmcp_comment_tools():  list-comments / moderate-comment / reply-comment.
@@ -23,6 +24,7 @@
  * means and why an unstated `destructiveHint` defaults to true. The judgements made here:
  *
  *   destructiveHint true   update-post, delete-post (force=true permanently deletes),
+ *                          restore-revision (replaces the text it restores over),
  *                          delete-term, delete-media, moderate-comment (spam and trash
  *                          destroy the comment's place in the thread), code-write
  *                          (overwrites a theme file), code-delete.
@@ -1906,6 +1908,20 @@ function wpmcp_content_tools() {
             // it. An unslashed array merged into a slashed row is two conventions in one
             // structure, and every field we sent comes out one backslash short.
             // class-wp-rest-posts-controller.php:980 does the same thing.
+            // THE UNDO BASELINE, BEFORE THE WRITE. Core saves a revision AFTER an update,
+            // of the NEW state (post_updated -> wp_save_post_revision, default-filters.php:
+            // 446), and saves none on create (wp_save_post_revision_on_insert returns when
+            // !$update, revision.php:108). So a post with no revisions - everything
+            // create-post makes, everything imported - lost its original title, content
+            // and excerpt on its first update, with nothing for restore-revision to put
+            // back. Saving the CURRENT state here closes that. It costs nothing on a post
+            // that is already revisioned: core compares with the latest revision and saves
+            // only when a revisioned field differs (revision.php:159-212) - MEASURED on both
+            // sites, a post with an up-to-date revision keeps its count. Unconditional, and
+            // after every refusal above, so a refused call writes no revision either.
+            // No slashing question: it is handed an id and reads the row itself.
+            wp_save_post_revision($id);
+
             $r = wp_update_post(wp_slash($upd), true);
             if (is_wp_error($r)) { return $r; }
             $out = array('id' => $id, 'link' => get_permalink($id));
@@ -1948,6 +1964,323 @@ function wpmcp_content_tools() {
             $r = wp_delete_post($id, $force);
             if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
             return array('id' => $id, 'deleted' => $force, 'trashed' => !$force);
+        },
+    ),
+
+    );
+}
+
+/* ============================================================
+ * Revision tools (list-revisions / get-revision / restore-revision)
+ *
+ * UNDO, AS WORDPRESS ALREADY KEEPS IT. Every revisioned post carries its history as rows
+ * of type `revision` whose post_parent is the post; these tools read that history and put
+ * one entry of it back. Nothing is stored that core does not store.
+ *
+ * ONE CLASS OF ACCESS, AND IT IS WORDPRESS'S. A revision is editorial data, so the gate
+ * is edit_post ON THE PARENT - wp-admin/revision.php:42 and the REST revisions controller
+ * (class-wp-rest-revisions-controller.php:186) both ask exactly that, and get-post already
+ * answers `revisions: null` to a caller who may read a post but not edit it. Every tool
+ * here resolves through wpmcp_revision_parent() and every way of failing it answers the
+ * SAME not_found, so a caller cannot learn by probing ids that a revision, or a post, is
+ * there.
+ * ========================================================== */
+
+/**
+ * The post a revision tool may act on, or null - THE CLASS OF REVISION ACCESS.
+ *
+ * Null for every one of: no such id, a post of a type the post tools refuse (attachment,
+ * revision, nav_menu_item, wp_block, anything not viewable), and a post the caller may not
+ * edit. The callers turn null into one wpmcp_not_found and never say which it was.
+ *
+ * @return WP_Post|null
+ */
+function wpmcp_revision_parent($postId) {
+    $postId = (int) $postId;
+    $post   = $postId > 0 ? get_post($postId) : null;
+
+    if (!$post || !wpmcp_post_type_ok($post->post_type)) { return null; }
+    if (!current_user_can('edit_post', $post->ID)) { return null; }
+
+    return $post;
+}
+
+/**
+ * A revision, with the post it belongs to, that the caller may read and restore - or the
+ * one not_found every failure along the chain answers.
+ *
+ * THE CHAIN: the id is a post of type `revision`; its post_parent exists and passes
+ * wpmcp_post_type_ok(); the caller holds edit_post on that parent. A normal post id, an
+ * attachment id, a revision whose parent is gone or of a refused type, and a revision of a
+ * post the caller may not edit all come back as the same sentence as an id nobody ever
+ * used.
+ *
+ * @return array{revision: WP_Post, parent: WP_Post}|WP_Error
+ */
+function wpmcp_revision_for_edit($revisionId) {
+    $notFound   = new WP_Error('wpmcp_not_found', 'No revision with that ID.');
+    $revisionId = (int) $revisionId;
+
+    if ($revisionId <= 0) { return $notFound; }
+
+    // By reference in core's signature, hence the variable.
+    $revision = wp_get_post_revision($revisionId);
+    if (!$revision) { return $notFound; }
+
+    $parent = wpmcp_revision_parent($revision->post_parent);
+    if (!$parent) { return $notFound; }
+
+    return array('revision' => $revision, 'parent' => $parent);
+}
+
+/**
+ * The fields of one revision every revision tool reports, in get-post's own conventions:
+ * the title through get_the_title(), the date through wpmcp_iso_date(), and the author as
+ * an id and a DISPLAY NAME - never the login, for get-post's reason.
+ */
+function wpmcp_revision_summary($revision) {
+    $author = get_userdata((int) $revision->post_author);
+
+    return array(
+        'id'       => (int) $revision->ID,
+        'date'     => wpmcp_iso_date($revision->post_date),
+        'author'   => array(
+            'id'   => (int) $revision->post_author,
+            'name' => $author ? $author->display_name : null,
+        ),
+        'title'    => get_the_title($revision),
+        'autosave' => (bool) wp_is_post_autosave($revision),
+    );
+}
+
+/**
+ * The names of the fields wp_restore_post_revision() will copy from this revision.
+ *
+ * CORE'S OWN RULE, READ RATHER THAN RESTATED: the keys of _wp_post_revision_fields() that
+ * are also columns of the revision row (revision.php:485-492). That is post_title,
+ * post_content and post_excerpt on a bare site; the filter may add more, and it also
+ * carries names that are NOT columns - core's `footnotes` on both sites, and field names
+ * from ACF on the stress site (measured) - which core's array_intersect drops, so this
+ * drops them too. The three core columns are reported by the names get-post uses.
+ *
+ * @return list<string>
+ */
+function wpmcp_revision_restored_fields($revision) {
+    $row    = get_post($revision->ID, ARRAY_A);
+    $fields = array_keys(_wp_post_revision_fields($row));
+    $names  = array('post_title' => 'title', 'post_content' => 'content', 'post_excerpt' => 'excerpt');
+    $out    = array();
+
+    foreach ($fields as $field) {
+        if (!is_array($row) || !array_key_exists($field, $row)) { continue; }
+        $out[] = isset($names[$field]) ? $names[$field] : $field;
+    }
+
+    return $out;
+}
+
+function wpmcp_revision_tools() {
+    return array(
+
+    'list-revisions' => array(
+        'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'List a post\'s revisions, newest first. Args: id (integer,'
+            . ' required), limit (1-100, default 20) and page (1-100, default 1). Each'
+            . ' item is id, date (ISO 8601, site-local), author {id, name}, title and'
+            . ' autosave - true for an autosave, which is listed with the rest. No'
+            . ' content: read one with get-revision, restore one with restore-revision.'
+            . ' Returns count, page, limit, has_more and items. Needs permission to edit'
+            . ' the post; a post you may not edit, a post that is not there and an id of'
+            . ' the wrong kind all answer identically. Where revisions are turned off for'
+            . ' the post - its type does not keep them, or the site disabled them - the'
+            . ' list is empty.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'id'    => array('type' => 'integer', 'description' => 'Post ID.'),
+            'limit' => array('type' => 'integer', 'description' => 'Items per page, 1-100. Default 20.'),
+            'page'  => array('type' => 'integer', 'description' => 'Page number, 1-100. Default 1.'),
+        ), 'required' => array('id')),
+        'run' => function ($args) {
+            $post = wpmcp_revision_parent(isset($args['id']) ? $args['id'] : 0);
+            // get-post's sentence, because it is get-post's question: is there a post
+            // with that id that this caller may see - here, may edit.
+            if (!$post) { return new WP_Error('wpmcp_not_found', 'No post with that ID.'); }
+
+            $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
+            $page  = isset($args['page']) ? min(100, max(1, (int) $args['page'])) : 1;
+
+            // CORE'S LISTING, NOT A QUERY OF OUR OWN. wp_get_post_revisions() is what
+            // wp-admin lists from: newest first on `date ID` (so two revisions saved in
+            // one second still come back in the order they were made - measured), and
+            // EMPTY when revisions are off for the post. That last is not worked around:
+            // it is what wp-admin shows, and the description says so. One row past the
+            // page is the has_more probe, as in list-posts.
+            $revisions = array_values(wp_get_post_revisions($post->ID, array(
+                'posts_per_page' => $limit + 1,
+                'offset'         => ($page - 1) * $limit,
+            )));
+
+            $hasMore = count($revisions) > $limit;
+            $items   = array_map('wpmcp_revision_summary', array_slice($revisions, 0, $limit));
+
+            return array(
+                'count'    => count($items),
+                'page'     => $page,
+                'limit'    => $limit,
+                'has_more' => $hasMore,
+                'items'    => $items,
+            );
+        },
+    ),
+
+    'get-revision' => array(
+        'write' => false,
+        'annotations' => array(
+            'readOnlyHint' => true,
+            'destructiveHint' => false,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Read one revision of a post in full. Args: revision_id (integer,'
+            . ' required), from list-revisions. Returns id, parent (the post id), title,'
+            . ' content and excerpt - raw, exactly as get-post returns a post, so the two'
+            . ' can be compared field by field; no diff is computed - plus date (ISO 8601,'
+            . ' site-local), author {id, name} and autosave. Needs permission to edit the'
+            . ' post the revision belongs to; a revision of a post you may not edit, an id'
+            . ' that is not a revision and an id that is not there all answer identically.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'revision_id' => array('type' => 'integer', 'description' => 'Revision ID, from list-revisions.'),
+        ), 'required' => array('revision_id')),
+        'run' => function ($args) {
+            $r = wpmcp_revision_for_edit(isset($args['revision_id']) ? $args['revision_id'] : 0);
+            if (is_wp_error($r)) { return $r; }
+
+            $revision = $r['revision'];
+            $summary  = wpmcp_revision_summary($revision);
+
+            return array(
+                'id'       => $summary['id'],
+                'parent'   => (int) $revision->post_parent,
+                'title'    => $summary['title'],
+                'content'  => $revision->post_content,
+                'excerpt'  => $revision->post_excerpt,
+                'date'     => $summary['date'],
+                'author'   => $summary['author'],
+                'autosave' => $summary['autosave'],
+            );
+        },
+    ),
+
+    'restore-revision' => array(
+        'write' => true,
+        // destructiveHint TRUE: the post's current title, content and excerpt are
+        // REPLACED. That they are saved as a revision first makes it undoable, not
+        // additive - update-post saves one too and carries the same judgement.
+        // idempotentHint TRUE: a second restore of the same revision finds the post
+        // already holding it, and core saves no revision for an unchanged post.
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Restore a post to one of its revisions. Args: revision_id'
+            . ' (integer, required), from list-revisions. Copies back only the fields'
+            . ' revisions keep - title, content and excerpt; status, date, author, slug'
+            . ' and terms stay as they are. The current text is saved as a revision first'
+            . ' and the restored text becomes the newest one, so a restore can itself be'
+            . ' undone. Refused, saying why, while another user is editing the post, or'
+            . ' when revisions are turned off for it and this is not an autosave. Returns'
+            . ' id (the post), restored_from, fields, and new_revision_id - null when the'
+            . ' post already held that text. Needs permission to edit the post; a revision'
+            . ' you may not restore and an id that is not a revision answer like one that'
+            . ' is not there.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'revision_id' => array('type' => 'integer', 'description' => 'Revision ID, from list-revisions.'),
+        ), 'required' => array('revision_id')),
+        'run' => function ($args) {
+            $r = wpmcp_revision_for_edit(isset($args['revision_id']) ? $args['revision_id'] : 0);
+            if (is_wp_error($r)) { return $r; }
+
+            $revision = $r['revision'];
+            $post     = $r['parent'];
+
+            // NAMED REFUSALS FROM HERE ON. The caller has passed the edit_post gate on this
+            // very post, so saying why leaks nothing - and an agent needs "locked, retry
+            // later" and "never, on this post" to be different answers.
+            //
+            // wp-admin/revision.php:52 - with revisions off, only an autosave comes back.
+            if (!wp_revisions_enabled($post) && !wp_is_post_autosave($revision)) {
+                return new WP_Error(
+                    'wpmcp_revisions_disabled',
+                    'Revisions are turned off for post ' . $post->ID . ', so only an'
+                    . ' autosave of it can be restored.'
+                );
+            }
+
+            // wp-admin/revision.php:58 - not over somebody who is editing it now.
+            // wp_check_post_lock() lives in wp-admin/includes/post.php, which a REST
+            // request does NOT load; without this require the check is a fatal error.
+            if (!function_exists('wp_check_post_lock')) {
+                require_once ABSPATH . 'wp-admin/includes/post.php';
+            }
+            $lockedBy = wp_check_post_lock($post->ID);
+            if ($lockedBy) {
+                $holder = get_userdata((int) $lockedBy);
+                // The display name, never the login - get-post's ceiling.
+                return new WP_Error(
+                    'wpmcp_post_locked',
+                    'Post ' . $post->ID . ' is being edited by '
+                    . ($holder ? $holder->display_name : 'another user')
+                    . ' right now. Try again when they have finished.'
+                );
+            }
+
+            // THE UNDO BASELINE, before the write - see update-post. Normally a no-op:
+            // the latest revision already matches the post (revision.php:159-212).
+            wp_save_post_revision($post->ID);
+
+            $fields = wpmcp_revision_restored_fields($revision);
+
+            // THE REVISION THE RESTORE ITSELF MAKES, caught as core makes it rather than
+            // guessed at afterwards: _wp_put_post_revision fires once per revision stored,
+            // with the parent's id, and fires not at all when the restored text already
+            // matched the post. Attached AFTER the baseline, so it cannot catch that one.
+            $created = null;
+            $catch   = static function ($revisionId, $parentId = 0) use (&$created, $post) {
+                if ((int) $parentId === (int) $post->ID) { $created = (int) $revisionId; }
+            };
+            add_action('_wp_put_post_revision', $catch, 10, 2);
+
+            try {
+                // NOT SLASHED BY US. wp_restore_post_revision() reads the revision from the
+                // database and slashes it itself (revision.php:498, "Since data is from
+                // DB") before wp_update_post() unslashes it. Every other write in this file
+                // is slashed at the boundary (KB 0.27); this one receives no caller string
+                // at all, only an id, and slashing here would add a backslash to every
+                // escape it restores.
+                $restored = wp_restore_post_revision($revision->ID);
+            } finally {
+                remove_action('_wp_put_post_revision', $catch, 10);
+            }
+
+            if (is_wp_error($restored)) { return $restored; }
+            if (!$restored) {
+                return new WP_Error('wpmcp_restore_failed', 'The revision could not be restored.');
+            }
+
+            return array(
+                'id'              => (int) $post->ID,
+                'restored_from'   => (int) $revision->ID,
+                'fields'          => $fields,
+                'autosave'        => (bool) wp_is_post_autosave($revision),
+                'new_revision_id' => $created,
+            );
         },
     ),
 

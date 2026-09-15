@@ -541,7 +541,7 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  */
 function wpmcp_tools() {
     $tools = array();
-    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
+    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_revision_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
         if (function_exists($fn)) { $tools = array_merge($tools, $fn()); }
     }
     // Code tools are exposed only when the switch in Settings > WP MCP is on AND the site
