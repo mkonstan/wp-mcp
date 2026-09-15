@@ -121,6 +121,35 @@ admin can renew them for thirty days from when they were minted - see below.
 - New option `wpmcp_sql_enabled`, removed on uninstall. No schema change. The catalog is
   23 tools.
 
+### Added: `list-revisions`, `get-revision` and `restore-revision`
+
+- **Undo for content, using the revisions WordPress already keeps.** `list-revisions {id}`
+  lists a post's revisions newest first, paged with `has_more` - id, date, author
+  `{id, name}`, title, and `autosave` (autosaves are listed and flagged). `get-revision`
+  returns one revision's title, content and excerpt raw, in the shape `get-post` uses, for
+  a client to compare; no diff is computed on the server. `restore-revision` (admin scope)
+  puts a revision's title, content and excerpt back. The catalog is 28 tools.
+- **One gate, WordPress's own:** the capability to edit the post the revision belongs to,
+  which is what wp-admin's revision screen and the REST revisions controller check. A
+  revision of a post you may not edit, an id that is not a revision, and an id that is not
+  there all answer the same `No revision with that ID.`
+- **A restore changes only what revisions hold.** Status, date, author, slug and terms come
+  out exactly as they went in. The replaced text is saved as a revision first and the
+  restored text becomes the newest revision, so a restore is itself undoable; the reply
+  names `new_revision_id`.
+- **Two refusals that say why**, as wp-admin makes them: the post is being edited by
+  another user right now (named by display name), or revisions are turned off for the post
+  and the revision is not an autosave.
+
+### Changed: `update-post` saves the pre-change state first
+
+- **The first edit of a post is undoable now.** WordPress saves a revision after an update,
+  of the NEW text, so a post with no revisions - every post `create-post` makes, and every
+  imported one - lost its original title, content and excerpt on its first `update-post`,
+  with nothing to restore. `update-post` and `restore-revision` now save the current state
+  as a revision before they write. On a post whose latest revision already matches it,
+  WordPress skips that save, so an ordinary edit still adds exactly one revision.
+
 ### Fixed: every write tool dropped a backslash (since 1.0.0)
 
 - **A backslash in anything you wrote was silently eaten.** A post title, body or excerpt,
@@ -140,7 +169,8 @@ admin can renew them for thirty days from when they were minted - see below.
   that decides whether a term already exists strips a backslash of its own. The lookup is
   now slashed to match the write, so the second post reuses the first term. The same
   applies to `search` in `list-posts` and `list-media`: a search for a backslashed value
-  finds the post that holds it.
+  finds the post that holds it. A term that an older build stored without its backslash
+  (`AB`) no longer matches `A\B`, so the next post naming it creates the correct term once.
 - **Nothing to do on your side**, and nothing already stored changes: this only affects
   what happens to a value on its way in from now on.
 

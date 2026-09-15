@@ -49,8 +49,8 @@ someone else's page, and sees only approved comments unless that Editor holds
 
 **Scope** narrows from there. A `read` token is served the read tools and nothing else:
 the write tools are not listed to it, and are refused if it calls one anyway. That is
-seven tools, plus `get-post-meta` when the site has declared post meta keys. An `admin`
-token is served those and the nine that write, plus `set-post-meta` with the same meta
+nine tools, plus `get-post-meta` when the site has declared post meta keys. An `admin`
+token is served those and the ten that write, plus `set-post-meta` with the same meta
 keys declared, `sql-select` when SQL reads are on, and six more when code editing is on.
 Scope only subtracts. It cannot hand a token a capability its user does not have.
 
@@ -137,7 +137,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Twenty-five tools. Each declares the four MCP annotation hints, so a client can tell a
+Twenty-eight tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -145,6 +145,8 @@ listing from a deletion before it asks you to approve anything.
 | `site-info` | read | yes | no | yes | no |
 | `list-posts` | read | yes | no | yes | no |
 | `get-post` | read | yes | no | yes | no |
+| `list-revisions` | read | yes | no | yes | no |
+| `get-revision` | read | yes | no | yes | no |
 | `list-terms` | read | yes | no | yes | no |
 | `list-media` | read | yes | no | yes | no |
 | `get-media` | read | yes | no | yes | no |
@@ -152,6 +154,7 @@ listing from a deletion before it asks you to approve anything.
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
+| `restore-revision` | admin | no | yes | yes | no |
 | `create-term` | admin | no | no | no | no |
 | `delete-term` | admin | no | yes | yes | no |
 | `upload-media` | admin | no | no | no | yes |
@@ -304,6 +307,31 @@ Both tools reply with `changed`: the fields this call named, in the order above.
 Backslashes survive. A Windows path, a regular expression or a JSON document written
 into a title, a body, an excerpt, a term name, a media title or alt text, or a comment
 comes back byte for byte - which was not true before 1.1.0.
+
+### Undoing a content edit
+
+`update-post` saves the post's current title, content and excerpt as a revision **before**
+it writes - WordPress on its own saves one only afterwards, of the new text, so the first
+edit of a post that had no revisions (every post `create-post` makes, and every imported
+one) used to leave nothing to go back to. On a post whose latest revision already matches
+it, that save is skipped and costs nothing.
+
+- `list-revisions {id, limit?, page?}` lists a post's revisions newest first, paged like
+  `list-posts` with `has_more`: id, date, author `{id, name}`, title and `autosave`. No
+  content.
+- `get-revision {revision_id}` returns one in full - title, content and excerpt raw, as
+  `get-post` returns them, so you can compare the two yourself.
+- `restore-revision {revision_id}` puts that title, content and excerpt back. Status, date,
+  author, slug and terms are not revisioned and do not change. The text it replaces is
+  saved first and the restored text becomes the newest revision, so a restore can be
+  undone too. The reply gives `fields` and `new_revision_id`.
+
+All three need the capability to edit the post the revision belongs to - wp-admin's own
+rule - and anything else answers exactly like an id that is not there. `restore-revision`
+refuses, and says why, while another user has the post open in the editor, and when
+revisions are turned off for the post unless the revision is an autosave. Where revisions
+are turned off (`WP_POST_REVISIONS` false, or a post type that does not keep them),
+`list-revisions` is empty and `update-post` has nothing to save.
 
 ### Post meta (opt-in)
 
