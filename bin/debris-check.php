@@ -50,8 +50,8 @@ $switches = Fixtures::switchesLeftOn();
 
 if ($report === '' && $switches === '') {
     echo "debris-check: clean - no wpmcp-test-* users, posts, terms, tokens, mu-plugins,"
-        . " transients, theme files or file-version rows, no opt-in switch left on, and no"
-        . " test key left in the post-meta allow-list.\n";
+        . " transients, theme files, upload files or file-version rows, no opt-in switch"
+        . " left on, and no test key left in the post-meta allow-list.\n";
     exit(0);
 }
 

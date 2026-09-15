@@ -1066,6 +1066,61 @@ final class Fixtures
     }
 
     /** Remove one file from the active theme. Tolerant: it may already be gone. */
+    /**
+     * Fixture-named files anywhere under the uploads directory, of any run.
+     *
+     * WHY THE HARNESS OWNS THESE BY NAME AND NOT THROUGH THE ATTACHMENT. Measured on the
+     * stress site: an image-conversion plugin hooks `wp_handle_upload`, writes a `.webp`
+     * beside the uploaded `.png`, and calls update_attached_file() so the attachment
+     * points at the `.webp`. wp_delete_attachment($id, true) then deletes the row and the
+     * `.webp` and never learns the `.png` existed - one orphan per test run, eight of
+     * them before anybody looked, on a real client's site. The bare site has no such
+     * plugin and leaks nothing, which is why the debris check had never seen it. So files
+     * are found and removed by the run prefix, like theme files, whatever any plugin did
+     * to the attachment in between.
+     *
+     * @return array<string, string> path relative to the uploads basedir => file name
+     */
+    public static function leftoverUploadFiles(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$u = wp_upload_dir(null, false); $root = realpath($u["basedir"]);'
+            . ' if (!$root) { return; }'
+            . ' $it = new RecursiveIteratorIterator('
+            . '  new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));'
+            . ' foreach ($it as $f) {'
+            . '  if ($f->isFile() && strpos($f->getFilename(), %s) === 0) {'
+            . '   echo ltrim(str_replace("\\\\", "/", substr($f->getPathname(), strlen($root))), "/"), "\n";'
+            . '  }'
+            . ' }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line, "\r\n ");
+
+            if ($line !== '' && str_starts_with(basename($line), self::PREFIX)) {
+                $found[$line] = basename($line);
+            }
+        }
+
+        return $found;
+    }
+
+    /** Delete one fixture-named file under uploads. Refuses a name without the prefix. */
+    public static function deleteUploadFile(string $relative): void
+    {
+        self::assertPrefixed(basename($relative));
+
+        WpCli::tryEvaluate(sprintf(
+            '$u = wp_upload_dir(null, false); $p = $u["basedir"] . "/" . %s;'
+            . ' echo is_file($p) ? (int) unlink($p) : 1;',
+            self::phpString($relative)
+        ));
+    }
+
     public static function deleteThemeFile(string $relative): void
     {
         self::assertPrefixed(basename($relative));
@@ -1164,6 +1219,12 @@ final class Fixtures
             self::deleteThemeFile((string) $relative);
         }
 
+        // UPLOADS, by name - see leftoverUploadFiles() for why the attachment cannot be
+        // trusted to take its own file with it on a site that converts images.
+        foreach (self::ours(self::leftoverUploadFiles()) as $relative => $name) {
+            self::deleteUploadFile((string) $relative);
+        }
+
         // Directories AFTER the files, because rmdir only takes an empty one.
         foreach (self::ours(self::leftoverThemeDirs()) as $relative => $name) {
             self::deleteThemeDir((string) $relative);
@@ -1235,6 +1296,10 @@ final class Fixtures
             $lines[] = '  theme dir         ' . $relative;
         }
 
+        foreach (self::foreign(self::leftoverUploadFiles()) as $relative => $name) {
+            $lines[] = '  upload file       ' . $relative;
+        }
+
         foreach (self::foreign(self::leftoverFileVersions()) as $id => $path) {
             $lines[] = sprintf('  version %-5s     %s', (string) $id, $path);
         }
@@ -1252,6 +1317,7 @@ final class Fixtures
             array_values(self::foreign(MuPlugin::leftovers())),
             array_values(self::foreign(self::leftoverTransients())),
             array_values(self::foreign(self::leftoverThemeFiles())),
+            array_values(self::foreign(self::leftoverUploadFiles())),
             array_values(self::foreign(self::leftoverFileVersions()))
         ) as $name) {
             $suffixes[self::runIdIn($name) ?: '(no run id)'] = true;

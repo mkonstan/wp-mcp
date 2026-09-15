@@ -117,6 +117,15 @@ final class SlashedWritesTest extends FixtureIntegrationTestCase
             WpCli::tryEvaluate(sprintf('echo (int) (bool) wp_delete_attachment(%d, true);', (int) $id));
         }
 
+        // AND BY NAME, because the attachment does not always know its own file. MEASURED
+        // on the stress site: an image-conversion plugin writes a `.webp` beside the
+        // uploaded `.png` and repoints `_wp_attached_file` at the `.webp`, so the delete
+        // above removes the row and the `.webp` and orphans the `.png` - one file per run,
+        // eight before anybody looked. purge() below does the same sweep for any class.
+        foreach (Fixtures::ours(Fixtures::leftoverUploadFiles()) as $relative => $name) {
+            Fixtures::deleteUploadFile((string) $relative);
+        }
+
         foreach (self::$posts as $id) { Fixtures::deletePost((int) $id); }
 
         foreach (self::$terms as $id) {
@@ -163,6 +172,163 @@ final class SlashedWritesTest extends FixtureIntegrationTestCase
     public function testPostFieldsKeepTheirBackslashesForAnAuthor(): void
     {
         $this->assertPostFieldsSurvive('author', self::$authorToken);
+    }
+
+    /**
+     * kses ran for the Author and did not run for the Editor - observed, not assumed.
+     *
+     * THE GAP THIS CLOSES. The two role tests above go red identically on the unfixed
+     * code, so neither of them proves the Author's content actually took the kses path;
+     * a site where the Author somehow held unfiltered_html would pass both. `<script>`
+     * is the observable: wp_filter_post_kses removes the tag for a user without
+     * unfiltered_html and nothing touches it for one who has it. The backslash payload
+     * rides in the same string, so this also shows kses and the slash fix composing.
+     *
+     * @group sprint-11
+     */
+    public function testKsesStripsScriptForTheAuthorAndNotForTheEditor(): void
+    {
+        $results = [];
+
+        foreach (['editor' => self::$editorToken, 'author' => self::$authorToken] as $role => $token) {
+            $created = $this->mcp($token)->callTool('create-post', [
+                'title'   => Fixtures::name($role . '-kses'),
+                'content' => '<script>wpmcp()</script>' . self::marked($role . '-kses-body'),
+            ]);
+
+            self::assertFalse($created->isError, $created->text);
+
+            $id = (int) $created->data()['id'];
+            self::$posts[] = $id;
+
+            $results[$role] = $this->mcp($token)->callTool('get-post', ['id' => $id])->data()['content'];
+        }
+
+        self::assertStringContainsString(
+            '<script>',
+            $results['editor'],
+            'The Editor\'s <script> was stripped, so the Editor is not on the unfiltered_html'
+            . ' path this test depends on - the comparison below would prove nothing.'
+        );
+        self::assertStringNotContainsString(
+            '<script>',
+            $results['author'],
+            'The Author\'s <script> survived, so kses did NOT run on the Author\'s content and'
+            . ' testPostFieldsKeepTheirBackslashesForAnAuthor never exercised the kses path.'
+        );
+        self::assertStringContainsString(
+            self::marked('author-kses-body'),
+            $results['author'],
+            'kses removed the tag and took a backslash with it: the slashed value went through'
+            . ' stripslashes/addslashes and came back one backslash short.'
+        );
+    }
+
+    /* ------------------------------------------------------------------
+     * the read side: lookups that stripslashes their input
+     * ---------------------------------------------------------------- */
+
+    /**
+     * Two create-post calls naming the same backslashed category produce ONE term, and
+     * get-post reports that term's name with its backslash.
+     *
+     * O1, THE READ SIDE OF THE SLASHING CLASS. wpmcp_apply_terms() looks a name up with
+     * get_term_by('name'), which stripslashes its input inside WP_Term_Query
+     * (class-wp-term-query.php:548-549). Once the insert was slashed and the lookup was
+     * not, `A\B` was stored correctly, looked up as `AB`, missed - and the second post
+     * created `ab-2`. Counted through list-terms, not guessed from ids.
+     *
+     * @group sprint-11
+     */
+    public function testNamingTheSameBackslashedTermTwiceCreatesItOnce(): void
+    {
+        $name = self::marked('dup-term');
+        $ids  = [];
+
+        foreach (['first', 'second'] as $which) {
+            $created = $this->mcp(self::$editorToken)->callTool('create-post', [
+                'title' => Fixtures::name('dup-term-carrier-' . $which),
+                'terms' => ['category' => [$name]],
+            ]);
+
+            self::assertFalse($created->isError, $created->text);
+
+            $ids[$which] = (int) $created->data()['id'];
+            self::$posts[] = $ids[$which];
+        }
+
+        $listed = $this->mcp(self::$editorToken)->callTool('list-terms', [
+            'taxonomy' => 'category',
+            'search'   => Fixtures::name('dup-term'),
+        ]);
+
+        self::assertFalse($listed->isError, $listed->text);
+
+        $matching = [];
+
+        foreach ($listed->data()['terms'] as $term) {
+            self::$terms[] = (int) $term['id'];
+
+            if (str_starts_with($term['name'], Fixtures::name('dup-term'))) {
+                $matching[] = $term['name'] . ' (' . $term['slug'] . ')';
+            }
+        }
+
+        self::assertCount(
+            1,
+            $matching,
+            'Naming the same backslashed category on two posts created more than one term:'
+            . ' the name lookup is unslashed while the insert is slashed. Found: '
+            . implode(' | ', $matching)
+        );
+
+        foreach ($ids as $which => $id) {
+            $terms = $this->mcp(self::$editorToken)->callTool('get-post', ['id' => $id])->data()['terms'];
+
+            self::assertSame(
+                [$name],
+                array_column($terms['category'] ?? [], 'name'),
+                "get-post on the {$which} post does not report the one backslashed term by name."
+            );
+        }
+    }
+
+    /**
+     * list-posts can find a backslashed value it just stored.
+     *
+     * The same read-side rule as the term lookup, found by the sweep rather than
+     * reported: WP_Query::parse_search() stripslashes `s` (class-wp-query.php:1439), so
+     * after the write fix a search for `C:\Users` was stripped to `C:Users` and could no
+     * longer match the row that now correctly holds `C:\Users`.
+     *
+     * @group sprint-11
+     */
+    public function testSearchFindsTheBackslashedContentItStored(): void
+    {
+        $content = self::marked('searchable');
+
+        $created = $this->mcp(self::$editorToken)->callTool('create-post', [
+            'title'   => Fixtures::name('searchable-title'),
+            'content' => $content,
+            'status'  => 'publish',
+        ]);
+
+        self::assertFalse($created->isError, $created->text);
+
+        $id = (int) $created->data()['id'];
+        self::$posts[] = $id;
+
+        $found = $this->mcp(self::$editorToken)->callTool('list-posts', [
+            'search' => Fixtures::name('searchable') . ' C:\\Users\\max',
+        ]);
+
+        self::assertFalse($found->isError, $found->text);
+        self::assertContains(
+            $id,
+            $found->column('id'),
+            'list-posts could not find a post by the backslashed text it holds: WP_Query'
+            . ' stripslashes `s`, so the search has to be slashed like the write was.'
+        );
     }
 
     /** Create, read back, update, read back - every field byte-exact. */
