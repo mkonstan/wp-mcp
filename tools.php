@@ -4022,7 +4022,7 @@ function wpmcp_sql_tools() {
 /**
  * May the caller READ classic menus? Core's REST rule, restated: edit_theme_options, or
  * edit_posts, or the edit_posts capability of any post type shown in REST
- * (class-wp-rest-menus-controller.php:86-111; the menu-items controller makes the same check).
+ * (class-wp-rest-menus-controller.php:86-112; the menu-items controller makes the same check).
  * An Editor passes, a Subscriber does not.
  *
  * Core consults the `rest_menu_read_access` filter first; its callbacks are handed a
@@ -4089,15 +4089,27 @@ function wpmcp_menu_item_get($id) {
  * request that is not wp-admin - a REST request is not - it DROPS an item whose linked page
  * is trashed or gone (nav-menu.php:749-751), so a renumbering built on it would skip that
  * item and leave it holding a number another item now has. And it rewrites menu_order to
- * 1..N on the way out (:753-766), so it cannot show what the database holds. Draft and
- * publish both, as wp-admin's own save reads them.
+ * 1..N on the way out (:753-766), so it cannot show what the database holds.
+ *
+ * DRAFTS ONLY FOR THOSE WHO MAY SEE THEM. The writers take the default, draft and publish both,
+ * as wp-admin's own save reads them: a renumbering has to number every row. The readers pass
+ * current_user_can('edit_theme_options'), which is core's REST rule. The menu-items collection
+ * defaults to `publish` (class-wp-rest-posts-controller.php:3126-3127) and refuses any other
+ * status without the type's edit_posts (:3207), which for nav_menu_item is edit_theme_options
+ * (post.php:170); a single draft needs read_post (:1791). Measured on both sites: an Editor and
+ * an Author get the published item only, 400 for status=draft, 403 for the draft item itself.
+ *
+ * TIES: menu_order, then ID - which is what visitors see. Core's own query orders by menu_order
+ * alone, and MySQL 8.4 returned tied rows in ID order in every case measured on both sites:
+ * four tied fixture menus of 12 and 80 items, post dates reversed against ids included, through
+ * wp_get_nav_menu_items() and through its raw SQL alike.
  *
  * @return list<WP_Post>
  */
-function wpmcp_menu_rows($menu) {
+function wpmcp_menu_rows($menu, $withDrafts = true) {
     return array_values(get_posts(array(
         'post_type'        => 'nav_menu_item',
-        'post_status'      => array('publish', 'draft'),
+        'post_status'      => $withDrafts ? array('publish', 'draft') : array('publish'),
         'numberposts'      => -1,
         'orderby'          => array('menu_order' => 'ASC', 'ID' => 'ASC'),
         'suppress_filters' => true,
@@ -4388,21 +4400,37 @@ function wpmcp_menu_item_result($id, $menu) {
 }
 
 /**
- * A custom item's url, or a WP_Error. http, https and relative only.
+ * A custom item's url, or a WP_Error: http, https, mailto: and tel:, or a path on this site.
+ * //host is allowed, and it is what it looks like - an ordinary link to another host.
  *
- * esc_url_raw() with that protocol list returns '' for javascript:, data:, mailto: and any
- * other scheme however it is cased or padded (measured), and turns a bare host into http://.
- * The '' is REFUSED here, because core would not refuse it: its sanitize_url() on the way
- * in stores the '' without a word (nav-menu.php:598), leaving an item that links nowhere.
+ * esc_url_raw() with that protocol list returns '' for javascript:, data:, sms: and any other
+ * scheme however it is cased or padded (measured), and turns a bare host into http://. The ''
+ * is REFUSED here, because core would not refuse it: its sanitize_url() on the way in stores
+ * the '' without a word (nav-menu.php:598), leaving an item that links nowhere.
+ *
+ * A BACKSLASH IS REFUSED FIRST. Browsers read /\host as //host, another host; esc_url() strips
+ * the backslash, so what would be stored is a different link from the one sent - measured on
+ * both sites, /\host becomes the path /host and \\host becomes http://host. No url needs a
+ * literal backslash; an encoded one (%5C) passes untouched.
  */
 function wpmcp_menu_url($url) {
-    $clean = esc_url_raw(trim((string) $url), array('http', 'https'));
+    $url = trim((string) $url);
+
+    if (strpos($url, '\\') !== false) {
+        return new WP_Error(
+            'wpmcp_bad_url',
+            'The url contains a backslash, which browsers read as a slash: /\\host opens another'
+            . ' host. Use / instead, or %5C for a literal backslash.'
+        );
+    }
+
+    $clean = esc_url_raw($url, array('http', 'https', 'mailto', 'tel'));
 
     if ($clean === '') {
         return new WP_Error(
             'wpmcp_bad_url',
-            'The url must be an http or https address, or a relative one such as /about or'
-            . ' #top. Other schemes, javascript: among them, are refused.'
+            'The url must be an http, https, mailto: or tel: address, or a path on this site such'
+            . ' as /about or #top. Other schemes, javascript: among them, are refused.'
         );
     }
 
@@ -4465,9 +4493,11 @@ function wpmcp_menu_tools() {
                 );
             }
 
-            $menus = array();
+            // Draft items are counted only for a caller who may list them - see wpmcp_menu_rows().
+            $drafts = current_user_can('edit_theme_options');
+            $menus  = array();
             foreach (wp_get_nav_menus() as $menu) {
-                $menus[] = wpmcp_menu_summary($menu, count(wpmcp_menu_rows($menu)), $registered, $assigned);
+                $menus[] = wpmcp_menu_summary($menu, count(wpmcp_menu_rows($menu, $drafts)), $registered, $assigned);
             }
 
             return array(
@@ -4490,7 +4520,8 @@ function wpmcp_menu_tools() {
             . ' from list-menus. Returns id, name, slug, count, locations and items, top level'
             . ' first, each with ' . $itemFields . ', withheld and children. An item that links to'
             . ' content you may not read, such as another user\'s draft or private page, is still'
-            . ' listed, with title, url and object_id null and withheld true. Needs permission'
+            . ' listed, with title, url and object_id null and withheld true. Draft items, which'
+            . ' visitors do not see, are listed only to callers who can edit theme options. Needs permission'
             . ' to edit posts or theme options; an id that is not a menu answers like a missing'
             . ' one.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -4502,7 +4533,8 @@ function wpmcp_menu_tools() {
             $menu = wpmcp_menu_get(isset($a['id']) ? $a['id'] : 0);
             if (!$menu) { return new WP_Error('wpmcp_not_found', 'No menu with that ID.'); }
 
-            $rows = wpmcp_menu_rows($menu);
+            // Draft items only for a caller who can edit theme options, as core's REST endpoint.
+            $rows = wpmcp_menu_rows($menu, current_user_can('edit_theme_options'));
 
             return wpmcp_menu_summary($menu, count($rows), get_registered_nav_menus(), get_nav_menu_locations())
                 + array('items' => wpmcp_menu_tree($rows));
@@ -4525,7 +4557,8 @@ function wpmcp_menu_tools() {
             . ' (required). type is "custom" for a plain link, a post type such as "page" or'
             . ' "post", or a taxonomy such as "category". object_id: the post or term a linked'
             . ' item points at; it must exist and be readable by you. url: custom items only -'
-            . ' http, https or relative; javascript: and other schemes are refused. title:'
+            . ' http, https, mailto: or tel:, or a path on this site (//host links to another host);'
+            . ' javascript:, other schemes and backslashes are refused. title:'
             . ' required for a custom item; omit it on a linked item to show the linked title.'
             . ' parent_id: an item of the same menu (default 0, the top level). position: among'
             . ' those siblings, from 1 (default last). target: "" or "_blank". classes: a list'
@@ -4536,7 +4569,7 @@ function wpmcp_menu_tools() {
             'menu_id'   => array('type' => 'integer', 'description' => 'Menu ID, from list-menus.'),
             'type'      => array('type' => 'string', 'description' => '"custom", a post type (page, post, ...) or a taxonomy (category, ...).'),
             'object_id' => array('type' => 'integer', 'description' => 'The post or term a linked item points at.'),
-            'url'       => array('type' => 'string', 'description' => 'Custom items only: an http, https or relative url.'),
+            'url'       => array('type' => 'string', 'description' => 'Custom items only: http, https, mailto: or tel:, or a path on this site.'),
             'title'     => array('type' => 'string', 'description' => 'The label. Required for a custom item.'),
             'parent_id' => array('type' => 'integer', 'minimum' => 0, 'description' => 'An item of the same menu, or 0 for the top level. Default 0.'),
             'position'  => array('type' => 'integer', 'minimum' => 1, 'description' => 'Place among its siblings, from 1. Default last.'),
@@ -4639,7 +4672,7 @@ function wpmcp_menu_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Change one item of a classic menu. Args: id (required), then any of'
-            . ' title, url (custom items only: http, https or relative), target ("" or'
+            . ' title, url (custom items only: http, https, mailto:, tel: or a path), target ("" or'
             . ' "_blank"), classes (a list), parent_id (0 for the top level, or an item of the'
             . ' same menu that is not the item itself or inside it) and position (among its'
             . ' siblings, from 1). An empty title on a linked item shows the linked title again.'
@@ -4650,7 +4683,7 @@ function wpmcp_menu_tools() {
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id'        => array('type' => 'integer', 'description' => 'Menu item ID, from get-menu.'),
             'title'     => array('type' => 'string', 'description' => 'The label.'),
-            'url'       => array('type' => 'string', 'description' => 'Custom items only: an http, https or relative url.'),
+            'url'       => array('type' => 'string', 'description' => 'Custom items only: http, https, mailto: or tel:, or a path on this site.'),
             'target'    => array('type' => 'string', 'enum' => array('', '_blank'), 'description' => '"_blank" to open in a new tab, "" not to.'),
             'classes'   => array('type' => 'array', 'items' => array('type' => 'string'), 'description' => 'CSS classes; replaces the list.'),
             'parent_id' => array('type' => 'integer', 'minimum' => 0, 'description' => 'An item of the same menu, or 0 for the top level.'),
@@ -4674,10 +4707,19 @@ function wpmcp_menu_tools() {
             // wipe the rest. The REST controller reads the item back the same way (menu-items
             // controller :343-368). RAW, not through wp_setup_nav_menu_item(), which would hand
             // back a linked page's title as the label and a trimmed, filtered description.
+            //
+            // A FIELD NOT SENT IS CARRIED UNCHANGED - THE PARENT TOO, even a stored parent that
+            // names no item of this menu. The shape counts such an item as top level, and that
+            // decides where it is NUMBERED; storing that 0 would move it on screen, because a
+            // theme's walker shows an item whose parent is gone after every top-level tree
+            // (class-wp-walker.php:258-264) and an item with parent 0 at its own place (:224-225).
+            // Found by review. What core itself does to each carried value is tabled in the
+            // round-2 commit; the one it changes is a stored parent equal to the item itself,
+            // which it stores as 0 (nav-menu.php:584-586).
             $data = array(
                 'menu-item-object-id'   => (int) get_post_meta($id, '_menu_item_object_id', true),
                 'menu-item-object'      => (string) get_post_meta($id, '_menu_item_object', true),
-                'menu-item-parent-id'   => $shape['parents'][$id],
+                'menu-item-parent-id'   => (int) get_post_meta($id, '_menu_item_menu_item_parent', true),
                 'menu-item-position'    => max(1, (int) $item->menu_order),
                 'menu-item-type'        => $type,
                 'menu-item-title'       => $item->post_title,
