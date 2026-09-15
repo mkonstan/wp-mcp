@@ -516,6 +516,24 @@ final class Fixtures
         )));
     }
 
+    /**
+     * One field of one term, read from OUTSIDE the request under test.
+     *
+     * `list-terms` reports id, name, slug, taxonomy, count and parent - so a term's
+     * `description` has no read tool at all, and the only honest way to assert what was
+     * stored in it is to read the row in another process.
+     */
+    public static function termField(int $termId, string $taxonomy, string $field): string
+    {
+        return trim(WpCli::evaluate(sprintf(
+            '$t = get_term(%d, %s);'
+            . ' echo (!$t || is_wp_error($t)) ? "(no such term)" : (string) $t->%s;',
+            $termId,
+            self::phpString($taxonomy),
+            preg_replace('/[^a-z_]/', '', $field)
+        )));
+    }
+
     /** The reverse, as get_date_from_gmt() does it: UTC to this site's wall clock. */
     public static function dateFromGmt(string $gmt): string
     {

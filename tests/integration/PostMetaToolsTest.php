@@ -50,6 +50,9 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
     /** Sent to put this run's keys on the allow-list for one request. */
     private const ARM_HEADER = 'X-Wpmcp-Test-Meta';
 
+    /** What storedAllowList() answers when the site has no `wpmcp_meta_keys` row at all. */
+    private const NO_OPTION = '(no option)';
+
     private static function label(): string { return Fixtures::name('metatools'); }
 
     private static function editorLogin(): string { return Fixtures::name('metaeditor'); }
@@ -108,6 +111,21 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
         Fixtures::purge();
 
         self::$optionBefore = self::storedAllowList();
+
+        // FAIL LOUDLY RATHER THAN GUESS. The settings test writes this option and puts it
+        // back; it can put back an array and it can put back the absence of a row, and
+        // nothing else exactly. A site whose `wpmcp_meta_keys` holds some other shape is a
+        // site this class must not touch.
+        if (self::$optionBefore !== self::NO_OPTION
+            && !is_array(json_decode(self::$optionBefore, true))) {
+            throw new \RuntimeException(
+                'wpmcp_meta_keys on the site under test is not an array: '
+                . self::$optionBefore . '. This class writes that option and restores it,'
+                . ' and it will only restore a shape it can reproduce exactly. Fix the'
+                . ' option (wp option update wpmcp_meta_keys --format=json \'[]\') or point'
+                . ' WPMCP_TEST_URL somewhere else.'
+            );
+        }
 
         self::$editorId     = Fixtures::createUser(self::editorLogin(), 'editor');
         self::$authorId     = Fixtures::createUser(self::authorLogin(), 'author');
@@ -850,12 +868,30 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
         );
     }
 
-    /** Put the operator's allow-list back, from the JSON storedAllowList() returns. */
-    private static function restoreAllowList(string $json): void
+    /**
+     * Put the operator's allow-list back EXACTLY as storedAllowList() found it - including
+     * putting back the absence of a row.
+     *
+     * NO `(array)` CAST. It used to have one, so a site whose `wpmcp_meta_keys` held a
+     * string - the shape a hand-edited `wp option update` leaves - would have been
+     * "restored" as a one-element array holding that string, which is a different setting
+     * and a silent one. build() refuses to run at all against a prior value that is
+     * neither absent nor an array, so the only two shapes this has to reproduce are the
+     * two it can reproduce exactly.
+     */
+    private static function restoreAllowList(string $stored): void
     {
+        if ($stored === self::NO_OPTION) {
+            // It had no row. Leaving an empty array behind would be a change too - small,
+            // permanent, and exactly the kind this suite promises not to make.
+            WpCli::tryEvaluate('echo (int) delete_option("wpmcp_meta_keys");');
+
+            return;
+        }
+
         WpCli::tryEvaluate(sprintf(
-            'echo (int) update_option("wpmcp_meta_keys", (array) json_decode(%s, true));',
-            self::phpString($json === '' ? '[]' : $json)
+            'echo (int) update_option("wpmcp_meta_keys", json_decode(%s, true));',
+            self::phpString($stored)
         ));
     }
 
@@ -897,11 +933,19 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
         return ['code' => $body['error']['code'], 'message' => $body['error']['message']];
     }
 
-    /** The stored option, as JSON, so "unchanged" is one string comparison. */
+    /**
+     * The stored option, as JSON, so "unchanged" is one string comparison - or NO_OPTION
+     * when there is no row at all.
+     *
+     * THE ABSENT CASE IS NOT THE EMPTY CASE. A bare site has no `wpmcp_meta_keys` row;
+     * encoding that as `[]` and restoring it would leave a row behind where there was
+     * none, which is a permanent change to somebody's database made by a test.
+     */
     private static function storedAllowList(): string
     {
         return trim(WpCli::evaluate(
-            'echo wp_json_encode(get_option("wpmcp_meta_keys", array()));'
+            '$v = get_option("wpmcp_meta_keys", null);'
+            . ' echo $v === null ? "' . self::NO_OPTION . '" : wp_json_encode($v);'
         ));
     }
 
