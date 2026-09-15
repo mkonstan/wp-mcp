@@ -51,6 +51,50 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     /** The mu-plugin that counts and blocks outbound HTTP for this run's watched requests. */
     private const HTTP_PLUGIN = 'httpcount';
 
+    /**
+     * The mu-plugin that plays a third-party plugin: for this run's watched requests it hooks
+     * every filter a plugin or theme listing could run - update data, auto-update state, the
+     * option and header reads, the theme lookups - and makes an outbound request from inside
+     * each one, as Gravity Forms, LiteSpeed Cache and Rank Math do from theirs (review round 1).
+     */
+    private const HOOKS_PLUGIN = 'httphooks';
+
+    /** Every hook the third-party fixture makes a request from. Its host names the hook. */
+    private const HOOKED = [
+        'pre_site_transient_update_plugins',
+        'site_transient_update_plugins',
+        'pre_site_transient_update_themes',
+        'site_transient_update_themes',
+        'auto_update_plugin',
+        'auto_update_theme',
+        'plugins_auto_update_enabled',
+        'themes_auto_update_enabled',
+        'automatic_updater_disabled',
+        'file_mod_allowed',
+        'extra_plugin_headers',
+        'pre_option_active_plugins',
+        'option_active_plugins',
+        'pre_site_option_active_sitewide_plugins',
+        'site_option_active_sitewide_plugins',
+        'pre_site_option_auto_update_plugins',
+        'site_option_auto_update_plugins',
+        'pre_option_auto_update_plugins',
+        'option_auto_update_plugins',
+        'extra_theme_headers',
+        'theme_file_path',
+        'stylesheet',
+        'template',
+        'pre_option_stylesheet',
+        'option_stylesheet',
+        'pre_option_template',
+        'option_template',
+        'wp_cache_themes_persistently',
+        'pre_site_transient_theme_roots',
+        'site_transient_theme_roots',
+        'theme_root',
+        'pre_kses',
+    ];
+
     private const WATCH_HEADER = 'X-Wpmcp-Test-Http-Watch';
     private const PROBE_HEADER = 'X-Wpmcp-Test-Http-Probe';
     private const COUNT_HEADER = 'X-Wpmcp-Test-Http-Count';
@@ -121,6 +165,7 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
         }
 
         MuPlugin::drop(self::HTTP_PLUGIN, self::httpSource());
+        MuPlugin::drop(self::HOOKS_PLUGIN, self::hooksSource());
 
         self::$adminToken      = Fixtures::mintToken('admin', self::label(), self::$users['admin']);
         self::$adminReadToken  = Fixtures::mintToken('read', self::label(), self::$users['admin']);
@@ -139,6 +184,7 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     private static function destroy(): void
     {
         MuPlugin::remove(self::HTTP_PLUGIN);
+        MuPlugin::remove(self::HOOKS_PLUGIN);
 
         Fixtures::deletePost(self::$publishedPostId);
         self::$publishedPostId = 0;
@@ -468,8 +514,26 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * G4, the third-party fixture's own control: site-info reads active_plugins through
+     * get_option(), so the fixture's request from option_active_plugins is counted. A zero
+     * from list-plugins or list-themes below therefore means they ran none of the hooked
+     * filters, not that the fixture was never loaded.
+     *
+     * @group sprint-14
+     */
+    public function testTheThirdPartyFixtureRequestsFromInsideAHookedFilter(): void
+    {
+        [$result, $count, $hosts] = $this->watched(self::$adminToken, 'site-info');
+
+        self::assertFalse($result->isError, $result->text);
+        self::assertGreaterThanOrEqual(1, $count, 'The third-party fixture made no request from option_active_plugins, so it proves nothing.');
+        self::assertStringContainsString(self::hookHost('option_active_plugins'), $hosts);
+    }
+
+    /**
      * G4. An Administrator's list-plugins matches get_plugins() on the site, file by
-     * file, and makes no outbound request while it runs.
+     * file, and makes no outbound request while it runs - with a third-party fixture making a
+     * request from inside every update, auto-update, option and header filter it could run.
      *
      * @group sprint-14
      */
@@ -510,7 +574,8 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * G4. An Administrator's list-themes makes no outbound request while it runs.
+     * G4. An Administrator's list-themes makes no outbound request while it runs, with the
+     * same third-party fixture hooked on every theme, option and update filter.
      *
      * @group sprint-14
      */
@@ -745,6 +810,51 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
         ];
     }
 
+    /** The host the third-party fixture requests from inside $hook. */
+    private static function hookHost(string $hook): string
+    {
+        return str_replace('_', '-', $hook) . '.hook.wpmcp-test.invalid';
+    }
+
+    /**
+     * The third-party fixture: for this run's watched requests, a wp_remote_get() from
+     * inside each hook in HOOKED every time it runs, to a host that names the hook.
+     * The counter blocks every one of them. Nothing is stored.
+     */
+    private static function hooksSource(): string
+    {
+        $run    = Fixtures::runId();
+        $header = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
+        $watch  = 'HTTP_' . strtoupper(str_replace('-', '_', self::WATCH_HEADER));
+        $hooks  = var_export(self::HOOKED, true);
+
+        return <<<PHP
+/**
+ * wp-mcp sprint-14 third-party hook fixture for run {$run}. Dropped and removed by
+ * tests/integration/InventoryToolsTest.php. Gated on this run's request header; stores nothing.
+ */
+if (!isset(\$_SERVER['{$header}']) || \$_SERVER['{$header}'] !== '{$run}' || empty(\$_SERVER['{$watch}'])) {
+    return;
+}
+
+\$inside = new ArrayObject();
+
+foreach ({$hooks} as \$hook) {
+    add_filter(\$hook, static function (\$value) use (\$hook, \$inside) {
+        // Every time the hook runs, as a real plugin's callback would - a once-per-request
+        // guard fired during bootstrap, before the counter arms, and hid the in-tool calls.
+        // Only re-entry is guarded: the request itself may run the same hook.
+        if (empty(\$inside['busy'])) {
+            \$inside['busy'] = true;
+            wp_remote_get('http://' . str_replace('_', '-', \$hook) . '.hook.wpmcp-test.invalid/');
+            \$inside['busy'] = false;
+        }
+        return \$value;
+    }, 10, 1);
+}
+PHP;
+    }
+
     /** @return array<mixed> */
     private static function decode(string $json): array
     {
@@ -756,8 +866,9 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
 
     /**
      * The counter: for this run's requests that ask to be watched, every outbound HTTP
-     * request is BLOCKED (nothing leaves the machine) and counted while the REST request's
-     * callbacks run, and the count goes back in a response header. The stored update data
+     * request is BLOCKED (nothing leaves the machine) and counted from rest_dispatch_request,
+     * after the permission callback, to the first rest_request_after_callbacks callback - the
+     * tool's own run - and the count goes back in a response header. The stored update data
      * is made to look never checked for that request, so a tool that refreshed it would
      * have to go out: with a fresh transient wp_update_plugins() returns before any request
      * (measured on the bare site). Nothing is stored.
@@ -801,22 +912,22 @@ foreach (array('update_plugins', 'update_themes', 'update_core') as \$name) {
     }, PHP_INT_MAX);
 }
 
-add_filter('rest_request_before_callbacks', static function (\$response) use (\$state) {
+add_filter('rest_dispatch_request', static function (\$result) use (\$state) {
     \$state->armed = true;
-    return \$response;
+    return \$result;
 }, -100000);
 
-add_filter('rest_request_before_callbacks', static function (\$response) {
+add_filter('rest_dispatch_request', static function (\$result) {
     if (!empty(\$_SERVER['{$probe}'])) {
         wp_remote_head('http://{$host}/');
     }
-    return \$response;
+    return \$result;
 }, 100000);
 
 add_filter('rest_request_after_callbacks', static function (\$response) use (\$state) {
     \$state->armed = false;
     return \$response;
-}, 100000);
+}, -100000);
 
 add_filter('rest_post_dispatch', static function (\$response) use (\$state) {
     if (\$response instanceof WP_HTTP_Response) {
