@@ -198,8 +198,8 @@ rather than adding to them.
 
 `openWorldHint` is true for `upload-media` alone, which fetches a URL you supply. Every
 other tool's reach stops at this site's own database and files; `list-plugins` and
-`list-themes` read files and stored settings directly and run none of the filters other
-plugins fetch update data from.
+`list-themes` read files and stored settings directly and run no update, auto-update,
+plugin-header, theme or per-option filter - the ones other plugins fetch update data from.
 
 `get-post-meta` is the one read tool behind an opt-in: it is listed only when the site
 has declared post meta keys (see *Post meta*), and it reports `readOnlyHint: true` like
@@ -445,13 +445,14 @@ None of them returns a password hash, an activation key, a session or any user m
 or an email address. WordPress's REST API shows the same field; the plugin shows whatever the
 user set.
 
-Neither `list-plugins` nor `list-themes` runs any of WordPress's update, option, plugin-header
-or theme filters, which are where other plugins fetch update data and licence status from:
-Gravity Forms, LiteSpeed Cache and Rank Math all make requests from them once their own caches
-expire. They read the plugin and theme files and the stored settings directly, so no other
-plugin's code runs for them beyond the capability check every tool makes, and they make no
-outbound request. A plugin that goes remote from a hook every request runs, such as `init`,
-does so for this request as for any other.
+Neither `list-plugins` nor `list-themes` runs an update, auto-update, plugin-header, theme or
+per-option filter - the filters Gravity Forms, LiteSpeed Cache and Rank Math make update and
+licence requests from once their own caches expire. They read the plugin and theme files and
+the stored settings directly, so neither triggers an update check. The hooks every tool call
+runs still run, as on any page load: `init` and the other request hooks, the capability
+filters, the database `query` filter, the option filters on this plugin's own settings, and the
+`wpmcp_tools` filter. A plugin that goes remote from one of those does so during these calls
+too, and that is outside these tools' control.
 
 ### Post meta (opt-in)
 

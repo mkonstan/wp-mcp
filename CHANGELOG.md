@@ -201,9 +201,11 @@ admin can renew them for thirty days from when they were minted - see below.
   whether the plugin is in the site's stored auto-update list; `list-themes` needs
   `switch_themes` and reports stylesheet, name, version, parent, active, `block_theme`, and the
   active theme's menu locations to a caller who can edit theme options. Both read the plugin
-  and theme files and the stored settings directly and run none of WordPress's update, option,
-  plugin-header or theme filters - the ones Gravity Forms, LiteSpeed Cache and Rank Math make
-  update and licence requests from - so they make no outbound request.
+  and theme files and the stored settings directly and run no update, auto-update,
+  plugin-header, theme or per-option filter - the ones Gravity Forms, LiteSpeed Cache and Rank
+  Math make update and licence requests from - so neither triggers an update check. The hooks
+  every tool call runs (`init`, the capability, database query and option filters, and
+  `wpmcp_tools`) still run, and a plugin that goes remote from those does so here too.
 
 ### Changed: `update-post` saves the pre-change state first
 

@@ -5356,19 +5356,18 @@ function wpmcp_inventory_tools() {
         // carries it, as code-list and sql-select do; it writes nothing.
         'write' => true,
         'annotations' => $adminReadHints,
-        'description' => 'List installed plugins and which are active. Returns count and plugins:'
-            . ' file (the plugin\'s id, such as "akismet/akismet.php"), name and version as the'
-            . ' plugin file\'s header states them, active, network_active (on a multisite network'
-            . ' only), and auto_update - true when the plugin is in the site\'s stored auto-update'
-            . ' list, false when it is not, null when you cannot update plugins (your role lacks'
-            . ' update_plugins, or wp-config sets DISALLOW_FILE_MODS). auto_update does'
-            . ' not reflect automatic updates switched off for the whole site, a plugin that forces'
-            . ' its own answer, or whether an update source exists: finding those out means running'
-            . ' other plugins\' code. This tool reads the plugin files and the stored settings'
-            . ' directly and runs none of WordPress\'s update, option or plugin-header filters -'
-            . ' only the capability checks every tool runs - so it triggers no update check and no'
-            . ' outbound request. Needs an admin-scope token and the activate_plugins capability'
-            . ' (Administrators).',
+        'description' => 'List installed plugins and which are active. Returns count and plugins: file (the'
+            . ' plugin\'s id, such as "akismet/akismet.php"), name and version from its header, active,'
+            . ' network_active (multisite only), and auto_update - true when the plugin is in the'
+            . ' site\'s stored auto-update list, false when not, null when you cannot update plugins'
+            . ' (your role lacks update_plugins, or wp-config sets DISALLOW_FILE_MODS). auto_update'
+            . ' does not reflect auto-updates switched off site-wide, a plugin forcing its own answer,'
+            . ' or whether an update source exists. It reads plugin files and stored settings'
+            . ' directly: no update, auto-update, plugin-header or per-option filter runs, so no'
+            . ' update check is triggered. Hooks every tool call runs still run - capability, database'
+            . ' query and option filters, and wp-mcp\'s tools filter - and a plugin that goes remote'
+            . ' from those does so here too. Needs an admin-scope token and the activate_plugins'
+            . ' capability (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),
         'run' => function ($a) {
             // Core's REST gate (class-wp-rest-plugins-controller.php:113). The capability checks
@@ -5416,17 +5415,17 @@ function wpmcp_inventory_tools() {
     'list-themes' => array(
         'write' => true,
         'annotations' => $adminReadHints,
-        'description' => 'List installed themes and which one is active. Returns active (the'
-            . ' stylesheet stored as the site\'s theme), count and themes: stylesheet, name,'
-            . ' version, active, parent (the parent theme\'s stylesheet, or null), block_theme'
-            . ' (true when the theme or its parent has a templates/index.html or'
-            . ' block-templates/index.html), and menu_locations - for the active theme, the classic'
-            . ' menu locations registered (location and description), and null for every other'
-            . ' theme or when you cannot edit theme options. This tool reads the theme files and'
-            . ' the stored settings directly and runs none of WordPress\'s theme, option or update'
-            . ' filters - only the capability checks every tool runs - so it triggers no update'
-            . ' check and no outbound request. Needs an admin-scope token and the switch_themes'
-            . ' capability (Administrators).',
+        'description' => 'List installed themes and which one is active. Returns active (the stylesheet stored'
+            . ' as the site\'s theme), count and themes: stylesheet, name, version, active, parent (the'
+            . ' parent theme\'s stylesheet, or null), block_theme (true when the theme or its parent'
+            . ' has a templates/index.html or block-templates/index.html), and menu_locations - for'
+            . ' the active theme, the classic menu locations registered (location and description);'
+            . ' null for other themes or when you cannot edit theme options. It reads theme files and'
+            . ' stored settings directly: no theme, update or per-option filter runs, so no update'
+            . ' check is triggered. Hooks every tool call runs still run - capability, database query'
+            . ' and option filters, and wp-mcp\'s tools filter - and a plugin that goes remote from'
+            . ' those does so here too. Needs an admin-scope token and the switch_themes capability'
+            . ' (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),
         'run' => function ($a) {
             // Core's REST gate (class-wp-rest-themes-controller.php:99), on a single site.
