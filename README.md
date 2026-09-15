@@ -198,7 +198,8 @@ rather than adding to them.
 
 `openWorldHint` is true for `upload-media` alone, which fetches a URL you supply. Every
 other tool's reach stops at this site's own database and files; `list-plugins` and
-`list-themes` read the update data as WordPress last stored it and never check for updates.
+`list-themes` read files and stored settings directly and run none of the filters other
+plugins fetch update data from.
 
 `get-post-meta` is the one read tool behind an opt-in: it is listed only when the site
 has declared post meta keys (see *Post meta*), and it reports `readOnlyHint: true` like
@@ -413,12 +414,16 @@ None of them returns a password hash, an activation key, a session or any user m
 
 - `list-users {role?, search?, limit?, page?}` - with `list_users` (Administrators), every
   user with id, name, login, email, roles and registered date, filterable by role and by a
-  search over login, email, URL, nicename and display name. Without it - an Editor, Author or
+  search: a term with `@` searches emails only, a number searches logins and ids, a term
+  starting with `http://` or `https://` searches URLs only, and anything else searches login,
+  URL, email, nicename and display name - WordPress's own rule. Without it - an Editor, Author or
   Contributor - only users who have published posts, as id and display name, and `role` or
   `search` is refused by name. A Subscriber is refused.
 - `get-user {id}` - one user, with the same fields by the same rule, plus your own record in
-  full. A user you may not see - one with no published posts, when you can neither list nor
-  edit users - answers exactly like an id that does not exist.
+  full. When you can neither list nor edit users, you see a user only if they have posts you
+  may read - published posts, or private posts when you can read those - so an Editor also
+  sees a user whose only posts are private, whom `list-users` does not show. That is the REST
+  API's own rule. Anyone else answers exactly like an id that does not exist.
 - `get-option {name}` reads one of ten settings the public site already shows: `blogname`,
   `blogdescription`, `timezone_string`, `gmt_offset`, `date_format`, `time_format`,
   `start_of_week`, `permalink_structure`, `siteurl` and `home`. Any other name - `admin_email`,
@@ -427,14 +432,26 @@ None of them returns a password hash, an activation key, a session or any user m
   the REST API's settings endpoint (`manage_options`) on purpose: an Editor scheduling a post
   needs the timezone and the date formats.
 - `list-plugins` (admin scope, `activate_plugins`) lists each plugin's file, name, version,
-  whether it is active, whether it is network-active on a multisite network, and whether it
-  auto-updates, as the Plugins screen shows it.
+  whether it is active, whether it is network-active on a multisite network, and whether it is
+  in the site's stored auto-update list. That is not always whether it will auto-update:
+  automatic updates switched off for the whole site, a plugin that forces its own answer, and
+  whether an update source exists are not reflected, because finding them out means running
+  other plugins' code.
 - `list-themes` (admin scope, `switch_themes`) lists each theme's stylesheet, name, version,
   parent, whether it is active and whether it is a block theme, and - for a caller who can
   edit theme options - the active theme's classic menu locations.
 
-Neither `list-plugins` nor `list-themes` checks for updates or contacts any other server:
-they read what is installed, and the update data as WordPress last stored it.
+`name`, in both user tools, is the display name each user chose - on many sites their login
+or an email address. WordPress's REST API shows the same field; the plugin shows whatever the
+user set.
+
+Neither `list-plugins` nor `list-themes` runs any of WordPress's update, option, plugin-header
+or theme filters, which are where other plugins fetch update data and licence status from:
+Gravity Forms, LiteSpeed Cache and Rank Math all make requests from them once their own caches
+expire. They read the plugin and theme files and the stored settings directly, so no other
+plugin's code runs for them beyond the capability check every tool makes, and they make no
+outbound request. A plugin that goes remote from a hook every request runs, such as `init`,
+does so for this request as for any other.
 
 ### Post meta (opt-in)
 
