@@ -680,6 +680,281 @@ final class Fixtures
         }
     }
 
+    /* ------------------------------------------------------------------
+     * Classic menus (sprint 13)
+     *
+     * A menu is a `nav_menu` TERM and its items are `nav_menu_item` POSTS, and neither of
+     * the listings above can find everything a red menu test leaves behind:
+     *
+     *   - `wp post list --post_type=any` does not include nav_menu_item. `any` means "not
+     *     excluded from search", and nav_menu_item is (measured on both sites).
+     *   - a linked item's post_title is EMPTY by design: core keeps the label in step with
+     *     the page it links to by storing nothing (nav-menu.php:514-516).
+     *   - `wp term delete nav_menu` removes the term and ORPHANS every item in it.
+     *
+     * So a menu is deleted through wp_delete_nav_menu(), which takes its items with it, an
+     * item is found through its menu as well as through its title, and a theme location
+     * pointing at a fixture menu is debris too.
+     * ---------------------------------------------------------------- */
+
+    /** A classic menu named $name (which must carry this run's prefix). */
+    public static function createMenu(string $name): int
+    {
+        self::assertPrefixed($name);
+
+        $out = WpCli::evaluate(sprintf(
+            '$id = wp_create_nav_menu(%s);'
+            . ' echo is_wp_error($id) ? "ERROR:" . $id->get_error_message() : "\n" . (int) $id;',
+            self::phpString($name)
+        ));
+
+        $id = self::porcelainId($out);
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create the fixture menu {$name}: {$out}");
+        }
+
+        return $id;
+    }
+
+    /**
+     * An item in a FIXTURE menu, made by core's wp_update_nav_menu_item() with its data
+     * slashed the way core's REST controller slashes it (menu-items controller :139).
+     *
+     * Refuses a menu whose name does not carry this run's prefix, so a wrong id can never
+     * add an item to somebody's real menu. Status defaults to publish, which is what a
+     * saved wp-admin menu holds (core's own default for a new item is draft).
+     *
+     * @param array<string, int|string> $data menu-item-* keys
+     */
+    public static function createMenuItem(int $menuId, array $data): int
+    {
+        $out = WpCli::evaluate(sprintf(
+            '$m = wp_get_nav_menu_object(%d);'
+            . ' if (!$m || strpos($m->name, %s) !== 0) { echo "ERROR:not this run\'s fixture menu"; return; }'
+            . ' $d = json_decode(base64_decode(%s), true);'
+            . ' $d += array("menu-item-status" => "publish");'
+            . ' $id = wp_update_nav_menu_item($m->term_id, 0, wp_slash($d));'
+            . ' echo is_wp_error($id) ? "ERROR:" . $id->get_error_message() : "\n" . (int) $id;',
+            $menuId,
+            self::phpString(self::runPrefix()),
+            self::phpString(base64_encode((string) json_encode($data)))
+        ));
+
+        $id = self::porcelainId($out);
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create a fixture item in menu {$menuId}: {$out}");
+        }
+
+        return $id;
+    }
+
+    /**
+     * A menu item in NO menu - core's own draft orphan, what wp_update_nav_menu_item() makes
+     * when it is given menu 0 (nav-menu.php:458-459, :600-601). Found again by its title.
+     */
+    public static function createOrphanMenuItem(string $title): int
+    {
+        self::assertPrefixed($title);
+
+        $out = WpCli::evaluate(sprintf(
+            '$id = wp_update_nav_menu_item(0, 0, wp_slash(array("menu-item-title" => %s,'
+            . ' "menu-item-url" => "https://example.com/orphan")));'
+            . ' echo is_wp_error($id) ? "ERROR:" . $id->get_error_message() : "\n" . (int) $id;',
+            self::phpString($title)
+        ));
+
+        $id = self::porcelainId($out);
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create the orphan fixture item {$title}: {$out}");
+        }
+
+        return $id;
+    }
+
+    /** Tolerant, and it deletes only a menu whose name carries the fixture prefix. */
+    public static function deleteMenu(int $menuId): void
+    {
+        if ($menuId <= 0) { return; }
+
+        WpCli::tryEvaluate(sprintf(
+            '$m = wp_get_nav_menu_object(%d);'
+            . ' if ($m && strpos($m->name, %s) === 0) { echo (int) !is_wp_error(wp_delete_nav_menu($m->term_id)); }',
+            $menuId,
+            self::phpString(self::PREFIX)
+        ));
+    }
+
+    /**
+     * A post created with exactly these fields, SLASHED on the way into wp_insert_post().
+     *
+     * `wp post create --post_title=...` hands its argument to wp_insert_post() unslashed,
+     * so a backslash in a fixture title is lost before any tool sees it (KB 0.27).
+     *
+     * @param array<string, int|string> $fields
+     */
+    public static function createPostExact(array $fields): int
+    {
+        self::assertPrefixed((string) ($fields['post_title'] ?? ''));
+
+        $out = WpCli::evaluate(sprintf(
+            '$id = wp_insert_post(wp_slash(json_decode(base64_decode(%s), true)), true);'
+            . ' echo is_wp_error($id) ? "ERROR:" . $id->get_error_message() : "\n" . (int) $id;',
+            self::phpString(base64_encode((string) json_encode($fields)))
+        ));
+
+        $id = self::porcelainId($out);
+
+        if ($id <= 0) {
+            throw new RuntimeException("Could not create the fixture post: {$out}");
+        }
+
+        return $id;
+    }
+
+    /**
+     * Every item of one menu as the DATABASE holds it, in menu_order then ID order - read
+     * in another process, never through the tool under test.
+     *
+     * @return list<array{id:int, order:int, parent:int, title:string, status:string, url:string, modified:string}>
+     */
+    public static function menuItemRows(int $menuId): array
+    {
+        $out = WpCli::evaluate(sprintf(
+            '$m = wp_get_nav_menu_object(%d); if (!$m) { echo "\n[]"; return; }'
+            . ' $rows = get_posts(array("post_type" => "nav_menu_item",'
+            . '  "post_status" => array("publish", "draft", "pending", "private", "future", "trash"),'
+            . '  "numberposts" => -1, "orderby" => array("menu_order" => "ASC", "ID" => "ASC"),'
+            . '  "suppress_filters" => true, "tax_query" => array(array("taxonomy" => "nav_menu",'
+            . '  "field" => "term_taxonomy_id", "terms" => $m->term_taxonomy_id))));'
+            . ' $o = array(); foreach ($rows as $r) { $o[] = array("id" => (int) $r->ID,'
+            . '  "order" => (int) $r->menu_order,'
+            . '  "parent" => (int) get_post_meta($r->ID, "_menu_item_menu_item_parent", true),'
+            . '  "title" => $r->post_title, "status" => $r->post_status,'
+            . '  "url" => (string) get_post_meta($r->ID, "_menu_item_url", true),'
+            . '  "modified" => $r->post_modified_gmt); }'
+            . ' echo "\n", wp_json_encode($o);',
+            $menuId
+        ));
+
+        $last    = trim((string) substr($out, (int) strrpos("\n" . $out, "\n")));
+        $decoded = json_decode($last, true);
+
+        if (!is_array($decoded)) {
+            throw new RuntimeException("Could not read the items of menu {$menuId}: {$out}");
+        }
+
+        return $decoded;
+    }
+
+    public static function isNavMenu(int $id): bool
+    {
+        return str_ends_with(trim(WpCli::evaluate(sprintf('echo "\n", is_nav_menu(%d) ? "yes" : "no";', $id))), 'yes');
+    }
+
+    public static function isNavMenuItem(int $id): bool
+    {
+        return str_ends_with(trim(WpCli::evaluate(sprintf('echo "\n", is_nav_menu_item(%d) ? "yes" : "no";', $id))), 'yes');
+    }
+
+    /** user_can(), for a test's premise: "this role really does lack that capability here". */
+    public static function userCan(int $userId, string $capability, int $objectId = 0): bool
+    {
+        $php = $objectId > 0
+            ? sprintf('echo "\n", user_can(%d, %s, %d) ? "yes" : "no";', $userId, self::phpString($capability), $objectId)
+            : sprintf('echo "\n", user_can(%d, %s) ? "yes" : "no";', $userId, self::phpString($capability));
+
+        return str_ends_with(trim(WpCli::evaluate($php)), 'yes');
+    }
+
+    /** The STORED nav_menu_locations theme mod, raw JSON, for "a test changed nothing". */
+    public static function menuLocationsRaw(): string
+    {
+        $out = WpCli::evaluate(
+            '$mods = get_theme_mods(); echo "\n", wp_json_encode(isset($mods["nav_menu_locations"]) ? $mods["nav_menu_locations"] : null);'
+        );
+
+        return trim((string) substr($out, (int) strrpos("\n" . $out, "\n")));
+    }
+
+    /**
+     * Fixture menu ITEMS still on the site: any nav_menu_item whose title carries the
+     * prefix, and every item of a menu whose name does - labelled by that name, because an
+     * item linked to a page has no title of its own to carry a run id.
+     *
+     * @return array<int, string> item id => label
+     */
+    public static function leftoverMenuItems(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            'global $wpdb; $p = %s;'
+            . ' foreach ($wpdb->get_results($wpdb->prepare("SELECT ID, post_title FROM {$wpdb->posts}'
+            . ' WHERE post_type = %%s AND post_title LIKE %%s", "nav_menu_item", $wpdb->esc_like($p) . "%%")) as $r) {'
+            . '  echo (int) $r->ID, "\t", $r->post_title, "\n"; }'
+            . ' $menus = get_terms(array("taxonomy" => "nav_menu", "hide_empty" => false, "name__like" => $p));'
+            . ' foreach (is_wp_error($menus) ? array() : $menus as $t) {'
+            . '  if (strpos($t->name, $p) !== 0) { continue; }'
+            . '  foreach ((array) get_objects_in_term($t->term_id, "nav_menu") as $id) { echo (int) $id, "\t", $t->name, "\n"; } }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = [];
+
+        foreach (explode("\n", $raw) as $line) {
+            $parts = explode("\t", trim($line, "\r\n"));
+
+            if (count($parts) === 2 && (int) $parts[0] > 0 && str_starts_with($parts[1], self::PREFIX)) {
+                $found[(int) $parts[0]] = $parts[1];
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Theme locations (of the active theme) assigned to a fixture menu, or themselves
+     * fixture-named.
+     *
+     * @return array<string, string> location => label (the fixture menu's name, or the slug)
+     */
+    public static function leftoverMenuLocations(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            '$p = %s; $mods = get_theme_mods();'
+            . ' $locs = isset($mods["nav_menu_locations"]) && is_array($mods["nav_menu_locations"]) ? $mods["nav_menu_locations"] : array();'
+            . ' foreach ($locs as $loc => $menuId) {'
+            . '  $m = $menuId ? wp_get_nav_menu_object((int) $menuId) : false;'
+            . '  if (strpos((string) $loc, $p) === 0) { echo $loc, "\t", $loc, "\n"; }'
+            . '  elseif ($m && strpos($m->name, $p) === 0) { echo $loc, "\t", $m->name, "\n"; } }',
+            self::phpString(self::PREFIX)
+        ));
+
+        $found = [];
+
+        foreach (explode("\n", $raw) as $line) {
+            $parts = explode("\t", trim($line, "\r\n"));
+
+            if (count($parts) === 2 && str_starts_with($parts[1], self::PREFIX)) {
+                $found[$parts[0]] = $parts[1];
+            }
+        }
+
+        return $found;
+    }
+
+    /** Take one location assignment out of the stored theme mod. Tolerant. */
+    public static function unassignMenuLocation(string $location): void
+    {
+        WpCli::tryEvaluate(sprintf(
+            '$locs = get_theme_mod("nav_menu_locations");'
+            . ' if (is_array($locs) && array_key_exists(%1$s, $locs)) { unset($locs[%1$s]);'
+            . ' set_theme_mod("nav_menu_locations", $locs); echo 1; }',
+            self::phpString($location)
+        ));
+    }
+
     /**
      * @param string $email author email, or '' to leave it empty. Set it only when a
      *                      test needs to prove the email is NOT reachable - it is
@@ -1194,6 +1469,22 @@ final class Fixtures
             self::deleteUser((int) $id);
         }
 
+        // MENUS BEFORE TERMS (sprint 13). A location first, so nothing points at a menu
+        // about to go; then the menu through wp_delete_nav_menu(), which takes its items
+        // with it - the generic term delete below would orphan them; then any item a
+        // crash left with a fixture title outside a fixture menu.
+        foreach (self::ours(self::leftoverMenuLocations()) as $location => $label) {
+            self::unassignMenuLocation((string) $location);
+        }
+
+        foreach (self::ours(self::leftoverTerms()['nav_menu'] ?? []) as $id => $name) {
+            self::deleteMenu((int) $id);
+        }
+
+        foreach (self::ours(self::leftoverMenuItems()) as $id => $label) {
+            self::deletePost((int) $id);
+        }
+
         // TERMS TOO. A red run of the create-post {terms} test left
         // `wpmcp-test-term-via-create-post` on the site, because the debris check and
         // the purge only knew about posts, users and tokens - the tools that can create
@@ -1274,6 +1565,14 @@ final class Fixtures
             }
         }
 
+        foreach (self::foreign(self::leftoverMenuItems()) as $id => $label) {
+            $lines[] = sprintf('  menu item %-7s in or named %s', (string) $id, $label);
+        }
+
+        foreach (self::foreign(self::leftoverMenuLocations()) as $location => $label) {
+            $lines[] = '  menu location     ' . $location . ' -> ' . $label;
+        }
+
         foreach (self::foreign(self::leftoverTokenLabels()) as $id => $label) {
             $lines[] = sprintf('  token %-7s %s', (string) $id, $label);
         }
@@ -1318,7 +1617,9 @@ final class Fixtures
             array_values(self::foreign(self::leftoverTransients())),
             array_values(self::foreign(self::leftoverThemeFiles())),
             array_values(self::foreign(self::leftoverUploadFiles())),
-            array_values(self::foreign(self::leftoverFileVersions()))
+            array_values(self::foreign(self::leftoverFileVersions())),
+            array_values(self::foreign(self::leftoverMenuItems())),
+            array_values(self::foreign(self::leftoverMenuLocations()))
         ) as $name) {
             $suffixes[self::runIdIn($name) ?: '(no run id)'] = true;
         }
