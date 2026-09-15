@@ -301,6 +301,10 @@ way - and it has to be an image. `0` removes the image. It round-trips through
 
 Both tools reply with `changed`: the fields this call named, in the order above.
 
+Backslashes survive. A Windows path, a regular expression or a JSON document written
+into a title, a body, an excerpt, a term name, a media title or alt text, or a comment
+comes back byte for byte - which was not true before 1.1.0.
+
 ### Post meta (opt-in)
 
 Off by default, and the third switch in the same **Settings > WP MCP** form - a textarea,

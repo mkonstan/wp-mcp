@@ -121,6 +121,23 @@ admin can renew them for thirty days from when they were minted - see below.
 - New option `wpmcp_sql_enabled`, removed on uninstall. No schema change. The catalog is
   23 tools.
 
+### Fixed: every write tool dropped a backslash (since 1.0.0)
+
+- **A backslash in anything you wrote was silently eaten.** A post title, body or excerpt,
+  a term name or description, a media title or alt text, a comment - each lost one
+  backslash from every escape on the way to the database. `C:\Users\max` became
+  `C:Usersmax`; a regex `\d+` became `d+`; JSON stored as a string lost its escapes. The
+  tool then re-read the row and reported the mangled value, which is why it looked right.
+- **Why.** WordPress's write functions take SLASHED input and unslash it on the way in -
+  `wp_insert_post()`, `wp_insert_term()`, `wp_insert_comment()` and the whole meta API all
+  do, and `wp_update_post()` additionally re-slashes the row it read from the database
+  before merging yours over it. Every core REST controller calls `wp_slash()` immediately
+  before those calls; this plugin did not. It now does, at every one of the eleven call
+  sites that receive text from a caller, slashing whole arrays at the boundary rather than
+  field by field.
+- **Nothing to do on your side**, and nothing already stored changes: this only affects
+  what happens to a value on its way in from now on.
+
 ### New: scheduling, authorship and featured images on the write tools
 
 - **`create-post` and `update-post` gain `date`, `author` and `featured_image`**, shaped
