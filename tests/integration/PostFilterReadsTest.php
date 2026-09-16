@@ -466,6 +466,33 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     }
 
     /** list-posts as one token, asserting only that it did not fail. */
+    /**
+     * B-DATE. list-posts offers orderby: date, so its items carry date and modified, in
+     * get-post's ISO convention and with get-post's values.
+     *
+     * @group sprint-10
+     */
+    public function testListPostsItemsCarryTheDateAndModifiedGetPostReports(): void
+    {
+        $listed = $this->listing(self::$adminToken, ['search' => self::marker(), 'limit' => 100]);
+        $items  = [];
+
+        foreach ($listed->items() as $row) { $items[(int) $row['id']] = $row; }
+
+        foreach ([self::$alpha, self::$delta] as $id) {
+            self::assertArrayHasKey($id, $items, 'A fixture post is missing from the listing.');
+            self::assertArrayHasKey('date', $items[$id], 'list-posts items carry no date.');
+            self::assertArrayHasKey('modified', $items[$id], 'list-posts items carry no modified.');
+
+            $post = $this->mcp(self::$adminToken)->callTool('get-post', ['id' => $id]);
+            self::assertFalse($post->isError, $post->text);
+
+            self::assertSame($post->data()['date'], $items[$id]['date'], 'list-posts and get-post disagree about date.');
+            self::assertSame($post->data()['modified'], $items[$id]['modified'], 'list-posts and get-post disagree about modified.');
+            self::assertMatchesRegularExpression('/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}/', (string) $items[$id]['date']);
+        }
+    }
+
     private function listing(string $token, array $args): ToolResult
     {
         $result = $this->mcp($token)->callTool('list-posts', $args);

@@ -805,6 +805,33 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
      * helpers
      * ---------------------------------------------------------------- */
 
+    /**
+     * B-TITLE, menus. A linked item with no label of its own shows the linked page's
+     * title, and core's wp_setup_nav_menu_item() runs that through the_title
+     * (nav-menu.php:897) - so a page titled with a straight quote came back texturized,
+     * while a custom label (the item's own post_title) did not. Both are raw now.
+     *
+     * @group sprint-13
+     */
+    public function testALinkedItemLabelComesBackAsThePageStoresIt(): void
+    {
+        $pageTitle = Fixtures::name('g7-page') . ' A\\B "quoted" it\'s & more';
+        $pageId    = Fixtures::createPost($pageTitle, 'publish', self::$editorId, 'x', 'page');
+        self::$posts[] = $pageId;
+
+        $menuId = self::menu('g7');
+        $client = $this->mcp(self::$adminToken);
+
+        $added = $client->callTool('add-menu-item', ['menu_id' => $menuId, 'type' => 'page', 'object_id' => $pageId]);
+        self::assertFalse($added->isError, $added->text);
+
+        $item = self::itemById($client->callTool('get-menu', ['id' => $menuId]), (int) $added->data()['id']);
+
+        self::assertSame($pageTitle, $item['title'], 'The linked label is not the page title as stored.');
+        self::assertSame('', Fixtures::menuItemRows($menuId)[0]['title'], 'The label was stored as a copy, not left to follow the page.');
+        self::assertSame($pageTitle, Fixtures::postField($pageId, 'post_title'), 'The page title itself changed.');
+    }
+
     private static function menu(string $what): int
     {
         $id = Fixtures::createMenu(Fixtures::name('menu-' . $what));

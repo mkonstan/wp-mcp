@@ -782,6 +782,49 @@ final class PostFieldWritesTest extends FixtureIntegrationTestCase
         );
     }
 
+    /**
+     * B-TITLE. A title holding a straight quote, an apostrophe, an ampersand and a
+     * backslash survives create -> read -> write-back -> read, byte for byte, through
+     * get-post AND list-posts, and the database holds exactly what was sent.
+     *
+     * Found on Max's live site: the title came back through get_the_title(), so
+     * wptexturize had turned the straight quotes into curly entities, and a client that
+     * wrote back what it read corrupted the post. Content and excerpt were always raw
+     * columns; the title was the odd one out.
+     *
+     * @group sprint-11
+     */
+    public function testATitleWithQuotesApostrophesAndAmpersandsRoundTripsThroughReadAndWrite(): void
+    {
+        $title = Fixtures::name('fw-raw') . ' A\\B "quoted" it\'s & more';
+
+        $created = $this->create(self::$editorToken, $title, ['status' => 'publish']);
+        self::assertFalse($created->isError, $created->text);
+        $id = (int) $created->data()['id'];
+
+        $read = $this->mcp(self::$editorToken)->callTool('get-post', ['id' => $id]);
+        self::assertFalse($read->isError, $read->text);
+        self::assertSame($title, $read->data()['title'], 'get-post did not return the title as stored.');
+
+        $listed = $this->mcp(self::$editorToken)->callTool('list-posts', ['search' => Fixtures::name('fw-raw'), 'limit' => 100]);
+        self::assertFalse($listed->isError, $listed->text);
+        $item = null;
+        foreach ($listed->items() as $row) {
+            if ((int) $row['id'] === $id) { $item = $row; }
+        }
+        self::assertIsArray($item, 'The post is missing from list-posts.');
+        self::assertSame($title, $item['title'], 'list-posts did not return the title as stored.');
+
+        // The write-back: exactly what the caller just read.
+        $back = $this->mcp(self::$editorToken)->callTool('update-post', ['id' => $id, 'title' => $read->data()['title']]);
+        self::assertFalse($back->isError, $back->text);
+
+        $again = $this->mcp(self::$editorToken)->callTool('get-post', ['id' => $id]);
+        self::assertFalse($again->isError, $again->text);
+        self::assertSame($title, $again->data()['title'], 'Reading a title and writing it back changed it.');
+        self::assertSame($title, Fixtures::postField($id, 'post_title'), 'The stored title changed.');
+    }
+
     /* ------------------------------------------------------------------
      * helpers
      * ---------------------------------------------------------------- */

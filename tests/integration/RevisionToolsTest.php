@@ -740,6 +740,35 @@ final class RevisionToolsTest extends FixtureIntegrationTestCase
     }
 
     /** The id of the revision whose title is $title, found through list-revisions. */
+    /**
+     * B-TITLE, revisions. A revision's title comes back as the column holds it, through
+     * list-revisions and get-revision alike - both used get_the_title(), so a quoted
+     * title was texturized on the way out and no longer matched the post it came from.
+     *
+     * @group sprint-12
+     */
+    public function testARevisionTitleComesBackAsStored(): void
+    {
+        $first  = Fixtures::name('rev-raw') . ' A\\B "quoted" it\'s & more';
+        $second = Fixtures::name('rev-raw2') . ' second "title"';
+
+        $id = $this->createThroughTheTool(['title' => $first, 'content' => Fixtures::name('rev-raw-body'), 'excerpt' => '']);
+
+        $update = $this->mcp(self::$editorToken)->callTool('update-post', ['id' => $id, 'title' => $second]);
+        self::assertFalse($update->isError, $update->text);
+
+        $listed = $this->listRevisions($id, ['limit' => 100]);
+        $titles = array_column($listed->items(), 'title', 'id');
+        self::assertContains($first, $titles, 'No revision carries the original title as stored.');
+
+        $revisionId = (int) array_search($first, $titles, true);
+        $revision   = $this->mcp(self::$editorToken)->callTool('get-revision', ['revision_id' => $revisionId]);
+
+        self::assertFalse($revision->isError, $revision->text);
+        self::assertSame($first, $revision->data()['title'], 'get-revision did not return the title as stored.');
+        self::assertSame($first, Fixtures::postField($revisionId, 'post_title'), 'The stored revision title is not the original.');
+    }
+
     private function revisionHolding(int $postId, string $title): int
     {
         foreach ($this->listRevisions($postId, ['limit' => 100])->items() as $item) {
