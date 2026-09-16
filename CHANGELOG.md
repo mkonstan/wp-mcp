@@ -220,6 +220,34 @@ admin can renew them for thirty days from when they were minted - see below.
   now answer the same named error, naming the other user by display name, and write
   nothing; a lock you hold yourself does not count.
 
+### Fixed: titles came back through WordPress's display filters (since 1.0.0)
+
+- **A title you read is the title as stored.** `get-post`, `list-posts`, `list-revisions`,
+  `get-revision`, `list-media` and `get-media` built the title with `get_the_title()`, which
+  runs WordPress's display filters: a title stored as `A\B "quoted"` came back as
+  `A\B &#8220;quoted&#8221;`, so a client that read a title and wrote it back corrupted the
+  post - and straight quotes, apostrophes and ampersands make that routine. Content and
+  excerpt were always the stored columns; titles now match them. Found on a live site.
+- **A menu item's label** now follows the linked page's stored title rather than the filtered
+  one, in `get-menu`.
+- **No more `Private: ` and `Protected: ` prefixes** on the titles of private and
+  password-protected posts: that prefix is display text, not the stored title.
+- `link`, and a media `url`, stay as WordPress renders them - there is no column to write
+  those back to.
+
+### Added: `list-posts` items carry `date` and `modified`
+
+- `orderby: date` was offered while the date itself was invisible, so a caller needed one
+  `get-post` per row to sort or filter by hand. Each item now carries `date` and `modified`
+  in `get-post`'s ISO 8601 convention, null where the column holds no date.
+
+### Changed: `restore-revision` names both revisions it can store
+
+- The reply now carries `pre_restore_revision_id` - the revision holding what the post said
+  *before* the call, which is the copy that undoes it - beside `new_revision_id`, which holds
+  the *restored* text. The description said the current text is saved first but named only one
+  id, so the two were easy to confuse.
+
 ### Fixed: every write tool dropped a backslash (since 1.0.0)
 
 - **A backslash in anything you wrote was silently eaten.** A post title, body or excerpt,

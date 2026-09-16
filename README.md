@@ -228,7 +228,9 @@ executes.
 | `limit` | 1-100 | 20 |
 | `page` | 1-100 | 1 |
 
-It answers with `count`, `page`, `limit`, `has_more` and `items`. There is no total, on
+It answers with `count`, `page`, `limit`, `has_more` and `items`. Each item is `id`,
+`title`, `type`, `status`, `slug`, `link`, `date` and `modified` - the dates in ISO 8601,
+null where the column holds no date, exactly as `get-post` reports them. There is no total, on
 purpose: a total is a count of posts the caller has not been shown, and on the
 own-unpublished side it would be a count of somebody's drafts. Page until `has_more` is
 `false`.
@@ -341,8 +343,10 @@ it, that save is skipped and costs nothing.
   whose date has already passed is published, and a published post dated in the future
   becomes scheduled. The text it replaces is saved first and the restored text becomes the
   newest revision, so the title, content and excerpt of a restore can be undone. The reply
-  gives `fields` and `new_revision_id`; a null `new_revision_id` means no revision was
-  saved - revisions are off for the post, or it already held that text.
+  gives `fields`, `pre_restore_revision_id` - the revision holding what the post said *before*
+  the call, which is the copy that undoes it - and `new_revision_id`, the revision holding the
+  *restored* text. Either is null when nothing needed saving: revisions are off for the post,
+  or it already held that text.
 
 **A restore also brings back what WordPress and plugins keep with revisions, and not all of
 it can be taken back.** WordPress copies the meta it revisions (core's `footnotes`, and any
@@ -406,6 +410,10 @@ not read, such as another user's draft or private page, is still listed, with it
 url and object_id null and `withheld: true`. Draft items - in a menu but not shown to
 visitors - are listed only to callers who can edit theme options, as in the REST API. An id that is not a menu, or not a menu item,
 answers exactly like an id that is not there.
+
+**A menu write is live at once.** Menus have no draft state: an item added to, changed in or
+removed from a menu the theme has assigned to a location is what visitors see on their next
+page load. Practise on a menu assigned to no location.
 
 ### Users, settings, plugins and themes
 
