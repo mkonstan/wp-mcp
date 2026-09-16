@@ -882,6 +882,26 @@ function wpmcp_post_terms($post) {
 }
 
 /**
+ * A post's title AS THE COLUMN HOLDS IT - never get_the_title().
+ *
+ * get_the_title() runs the `the_title` filter chain, and core hangs wptexturize,
+ * convert_chars and trim on it by default (default-filters.php:197-199), so a title stored
+ * with a straight quote comes back as `&#8220;...&#8221;`; it also prepends "Private: " or
+ * "Protected: " for those statuses (post-template.php:131-151). Content and excerpt were
+ * always the raw columns, so the title was the odd field out - and a client that read a
+ * title and wrote it back corrupted the post, which apostrophes and ampersands make routine.
+ * MEASURED on a live site, 2026-09-16: stored `Migration test A\B "quoted"`, read back
+ * `Migration test A\B &#8220;quoted&#8221;`, the row's own bytes correct.
+ *
+ * THE RULE THIS SETTLES, for every read tool: a field a caller may write back is the stored
+ * column, unfiltered. A field that is a rendering - `link` (get_permalink), a media `url` -
+ * stays filtered, because there is no column to write it back to.
+ */
+function wpmcp_raw_title($post) {
+    return isset($post->post_title) ? (string) $post->post_title : '';
+}
+
+/**
  * Statuses that count as publishing, so they need publish_posts rather than merely
  * edit_posts. `private` is one of them - core's wp-admin/includes/post.php requires
  * publish_posts for it, because publishing privately is still publishing, and a
@@ -1513,8 +1533,10 @@ function wpmcp_core_tools() {
                 . ' order ("asc" or "desc"; default "desc"), limit (default 20, max 100)'
                 . ' and page (default 1, max 100). A filter naming something that does'
                 . ' not exist, or something the caller may not see, returns an empty'
-                . ' list rather than an error. Returns count, page, limit, has_more and'
-                . ' items; there is no total.',
+                . ' list rather than an error. Returns count, page, limit, has_more and items;'
+                . ' each item is id, title (the stored column, as get-post returns it), type,'
+                . ' status, slug, link, date and modified - ISO 8601, or null where the column'
+                . ' holds no date. There is no total.',
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string', 'description' => 'Post type to list. Default "post".'),
                 'status'    => array('type' => 'string', 'description' => 'One post status. Default: every status the caller may see.'),
@@ -1629,8 +1651,11 @@ function wpmcp_core_tools() {
                 $items = array();
                 foreach ($posts as $p) {
                     $items[] = array(
-                        'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
+                        'id' => $p->ID, 'title' => wpmcp_raw_title($p), 'type' => $p->post_type,
                         'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
+                        // orderby: date is offered, so the date is part of the row (B-DATE).
+                        'date' => wpmcp_iso_date($p->post_date),
+                        'modified' => wpmcp_iso_date($p->post_modified),
                     );
                 }
                 return array(
@@ -1651,14 +1676,16 @@ function wpmcp_core_tools() {
                 'openWorldHint' => false,
             ),
             'description' => 'Read one post or page in full. Args: id (integer,'
-                . ' required). Returns id, title, type, status, slug, link, raw content,'
-                . ' raw excerpt, author {id, name}, date, date_gmt, modified and'
+                . ' required). Returns id, title, type, status, slug, link, content,'
+                . ' excerpt, author {id, name}, date, date_gmt, modified and'
                 . ' modified_gmt as ISO 8601, or null where the column holds no date -'
                 . ' a draft nobody dated. featured_image {id, url} or null, terms'
                 . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
                 . ' entry {id, name, slug}, and revisions - the number of stored'
                 . ' revisions, or null when the caller may read the post but not edit'
-                . ' it. A post the caller may not read, a post that is not there, and an'
+                . ' it. title, content and excerpt are the stored columns byte for byte, so'
+                . ' what you read here can be written back unchanged; link is the rendered'
+                . ' permalink. A post the caller may not read, a post that is not there, and an'
                 . ' id of the wrong kind of thing all answer identically.',
             'inputSchema' => array('type' => 'object',
                 'properties' => array('id' => array('type' => 'integer', 'description' => 'Post ID.')),
@@ -1707,7 +1734,7 @@ function wpmcp_core_tools() {
                 $thumbnailUrl = $thumbnail ? wp_get_attachment_url($thumbnail) : false;
 
                 return array(
-                    'id' => $p->ID, 'title' => get_the_title($p), 'type' => $p->post_type,
+                    'id' => $p->ID, 'title' => wpmcp_raw_title($p), 'type' => $p->post_type,
                     'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
                     'content' => $p->post_content,
                     'excerpt' => $p->post_excerpt,
@@ -2103,7 +2130,7 @@ function wpmcp_revision_summary($revision) {
             'id'   => (int) $revision->post_author,
             'name' => $author ? $author->display_name : null,
         ),
-        'title'    => get_the_title($revision),
+        'title'    => wpmcp_raw_title($revision),
         'autosave' => (bool) wp_is_post_autosave($revision),
     );
 }
@@ -2147,7 +2174,8 @@ function wpmcp_revision_tools() {
         ),
         'description' => 'List a post\'s revisions, newest first. Args: id (integer,'
             . ' required), limit (1-100, default 20) and page (1-100, default 1). Each'
-            . ' item is id, date (ISO 8601, site-local), author {id, name}, title and'
+            . ' item is id, date (ISO 8601, site-local), author {id, name}, title (the'
+            . ' stored column) and'
             . ' autosave - true for an autosave, which is listed with the rest. No'
             . ' content: read one with get-revision, restore one with restore-revision.'
             . ' Returns count, page, limit, has_more and items. Needs permission to edit'
@@ -2245,18 +2273,18 @@ function wpmcp_revision_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Restore a post to one of its revisions. Args: revision_id'
-            . ' (integer, required). Copies back title, content and excerpt, plus meta that'
-            . ' WordPress or plugins keep with revisions - core\'s footnotes, and ACF field'
-            . ' values. Author, slug and terms stay; status is re-derived as on any update,'
-            . ' so a scheduled post whose date has passed is published. The current text is'
-            . ' saved as a revision first, so title, content, excerpt and core\'s revisioned'
-            . ' meta can be restored back; ACF values cannot - that copy holds none, so a'
-            . ' restore\'s rewind of ACF fields is not undoable here. Refused, saying why,'
-            . ' while another user is editing the post, or when revisions are off for it'
-            . ' and this is not an autosave. Returns id, restored_from, fields (the post'
-            . ' columns only), autosave and new_revision_id - null when no revision was'
-            . ' saved: revisions are off, or the post already held that text. Needs'
-            . ' permission to edit the post; anything else answers like a missing id.',
+            . ' (integer, required). Copies back title, content and excerpt, plus revisioned'
+            . ' meta - footnotes and ACF fields. Author, slug and terms stay; status is'
+            . ' re-derived as on any update, so a scheduled post whose date has passed is'
+            . ' published. The current text is saved as a revision first, so it can be put'
+            . ' back; that copy holds no ACF values, so an ACF rewind is not undoable here.'
+            . ' Refused, saying why, while another user is editing the post, or when revisions'
+            . ' are off for it and this is not an autosave. Returns id, restored_from, fields'
+            . ' (the post columns only), autosave, pre_restore_revision_id - the revision'
+            . ' holding what the post said BEFORE this call, the one that undoes it - and'
+            . ' new_revision_id, holding the RESTORED text. Either is null when nothing needed'
+            . ' saving. Needs permission to edit the post; anything else answers like a'
+            . ' missing id.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'revision_id' => array('type' => 'integer', 'description' => 'Revision ID, from list-revisions.'),
         ), 'required' => array('revision_id')),
@@ -2285,23 +2313,36 @@ function wpmcp_revision_tools() {
             $locked = wpmcp_post_lock_refusal($post->ID);
             if ($locked) { return $locked; }
 
-            // THE UNDO BASELINE, before the write - see update-post. Normally a no-op:
-            // the latest revision already matches the post (revision.php:159-212).
-            wp_save_post_revision($post->ID);
-
-            $fields = wpmcp_revision_restored_fields($revision);
-
-            // THE REVISION THE RESTORE ITSELF MAKES, caught as core makes it rather than
-            // guessed at afterwards: _wp_put_post_revision fires once per revision stored,
-            // with the parent's id, and fires not at all when the restored text already
-            // matched the post. Attached AFTER the baseline, so it cannot catch that one.
-            $created = null;
-            $catch   = static function ($revisionId, $parentId = 0) use (&$created, $post) {
-                if ((int) $parentId === (int) $post->ID) { $created = (int) $revisionId; }
+            // BOTH REVISIONS THIS CALL CAN STORE, caught as core stores them rather than
+            // guessed at afterwards: _wp_put_post_revision fires once per revision saved,
+            // with the parent's id, and not at all when the text already matched.
+            //
+            //   the BASELINE, from wp_save_post_revision() below, holds what the post said
+            //   BEFORE this restore - that is the copy that makes the restore undoable;
+            //   the one core stores inside wp_restore_post_revision() holds the RESTORED
+            //   text, and that is what `new_revision_id` has always reported.
+            //
+            // The two were read as one on a live site (2026-09-16): restoring 966 answered
+            // new_revision_id 968, the restored text, while the pre-restore text sat in 967.
+            // Both ids are returned now, each under its own name.
+            $saved = array();
+            $catch = static function ($revisionId, $parentId = 0) use (&$saved, $post) {
+                if ((int) $parentId === (int) $post->ID) { $saved[] = (int) $revisionId; }
             };
             add_action('_wp_put_post_revision', $catch, 10, 2);
 
+            $baseline = null;
+            $created  = null;
+
             try {
+                // THE UNDO BASELINE, before the write - see update-post. Normally a no-op:
+                // the latest revision already matches the post (revision.php:159-212).
+                wp_save_post_revision($post->ID);
+
+                $baseline = $saved ? (int) end($saved) : null;
+                $before   = count($saved);
+                $fields   = wpmcp_revision_restored_fields($revision);
+
                 // NOT SLASHED BY US. wp_restore_post_revision() reads the revision from the
                 // database and slashes it itself (revision.php:498, "Since data is from
                 // DB") before wp_update_post() unslashes it. Every other write in this file
@@ -2309,6 +2350,7 @@ function wpmcp_revision_tools() {
                 // at all, only an id, and slashing here would add a backslash to every
                 // escape it restores.
                 $restored = wp_restore_post_revision($revision->ID);
+                $created  = count($saved) > $before ? (int) end($saved) : null;
             } finally {
                 remove_action('_wp_put_post_revision', $catch, 10);
             }
@@ -2319,11 +2361,12 @@ function wpmcp_revision_tools() {
             }
 
             return array(
-                'id'              => (int) $post->ID,
-                'restored_from'   => (int) $revision->ID,
-                'fields'          => $fields,
-                'autosave'        => (bool) wp_is_post_autosave($revision),
-                'new_revision_id' => $created,
+                'id'                      => (int) $post->ID,
+                'restored_from'           => (int) $revision->ID,
+                'fields'                  => $fields,
+                'autosave'                => (bool) wp_is_post_autosave($revision),
+                'pre_restore_revision_id' => $baseline,
+                'new_revision_id'         => $created,
             );
         },
     ),
@@ -2678,7 +2721,8 @@ function wpmcp_media_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List media attachments. Args: search, mime_type, page (default 1), per_page (default 20, max 100).',
+        'description' => 'List media attachments. Args: search, mime_type, page (default 1), per_page'
+            . ' (default 20, max 100). Each item is id, title (the stored column), mime, url and date.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'search' => array('type' => 'string'), 'mime_type' => array('type' => 'string'),
             'page' => array('type' => 'integer'), 'per_page' => array('type' => 'integer'),
@@ -2702,7 +2746,7 @@ function wpmcp_media_tools() {
                 // post_status=inherit, so the filter has to be here.
                 if (!current_user_can('read_post', (int) $p->ID)) { continue; }
 
-                $out[] = array('id' => $p->ID, 'title' => get_the_title($p), 'mime' => $p->post_mime_type,
+                $out[] = array('id' => $p->ID, 'title' => wpmcp_raw_title($p), 'mime' => $p->post_mime_type,
                     'url' => wp_get_attachment_url($p->ID), 'date' => $p->post_date_gmt);
             }
             return array('count' => count($out), 'items' => $out);
@@ -2717,7 +2761,9 @@ function wpmcp_media_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Get one media item. Args: id (required).',
+        'description' => 'Get one media item. Args: id (required). Returns id, title, mime,'
+            . ' url, alt, caption, filesize, width and height. title, alt and caption are stored'
+            . ' columns or meta, as written; url is the rendered link.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('id' => array('type' => 'integer')), 'required' => array('id')),
         'run' => function ($a) {
@@ -2732,7 +2778,7 @@ function wpmcp_media_tools() {
             $meta = wp_get_attachment_metadata($id);
             $file = get_attached_file($id);
             return array(
-                'id' => $id, 'title' => get_the_title($p), 'mime' => $p->post_mime_type,
+                'id' => $id, 'title' => wpmcp_raw_title($p), 'mime' => $p->post_mime_type,
                 'url' => wp_get_attachment_url($id),
                 'alt' => get_post_meta($id, '_wp_attachment_image_alt', true),
                 'caption' => $p->post_excerpt,
@@ -4300,6 +4346,27 @@ function wpmcp_menu_item_visible($setup) {
     return false;
 }
 
+/**
+ * The label a menu item shows, as the database holds it.
+ *
+ * An item with no label of its own shows the linked object's title, and core's
+ * wp_setup_nav_menu_item() runs a POST's title through `the_title` on the way
+ * (nav-menu.php:897) - so a page titled with a straight quote reached the caller texturized
+ * and no longer matched the page. A term's name is already taken raw (`:939`, get_term_field
+ * with the 'raw' context) and a post-type archive's label is a registered string rather than
+ * stored text, so both keep core's value. A linked post with an empty title gives an empty
+ * label here, where core shows "#123 (no title)".
+ */
+function wpmcp_menu_linked_title($setup) {
+    if ((string) $setup->type === 'post_type') {
+        $linked = get_post((int) $setup->object_id);
+
+        return $linked ? wpmcp_raw_title($linked) : (string) $setup->title;
+    }
+
+    return (string) $setup->title;
+}
+
 /** One item as get-menu shows it, children not included. */
 function wpmcp_menu_item_out($row, $parent, $position) {
     $setup   = wp_setup_nav_menu_item(clone $row);
@@ -4312,7 +4379,10 @@ function wpmcp_menu_item_out($row, $parent, $position) {
 
     return array(
         'id'         => (int) $row->ID,
-        'title'      => $visible ? (string) $setup->title : null,
+        // The item's own label is its post_title column; only the fallback needs core.
+        'title'      => $visible
+            ? ((string) $row->post_title !== '' ? (string) $row->post_title : wpmcp_menu_linked_title($setup))
+            : null,
         'type'       => (string) $setup->type,
         'object'     => (string) $setup->object,
         'object_id'  => ($visible && in_array($setup->type, array('post_type', 'taxonomy'), true)) ? (int) $setup->object_id : null,
@@ -4456,7 +4526,8 @@ function wpmcp_menu_bad_parent($parentId, $menu) {
 }
 
 function wpmcp_menu_tools() {
-    $itemFields = 'id, title (the label shown), type (post_type, taxonomy, post_type_archive or'
+    $itemFields = 'id, title (the label shown, as stored - an item with no label of its own'
+        . ' shows the linked page\'s stored title), type (post_type, taxonomy, post_type_archive or'
         . ' custom), object (such as page, category or custom), object_id, url, target, classes,'
         . ' parent (0 at the top level), position (among its siblings, from 1), menu_order (its'
         . ' place in the whole menu) and status';
