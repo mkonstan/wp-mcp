@@ -11,14 +11,15 @@
  * would reach for - a locking read, an INTO OUTFILE, a stacked statement, a bare UPDATE -
  * and assert both halves: the call fails, AND the row it aimed at is still what it was.
  *
- * THE SWITCH IS ARMED PER REQUEST, not per class, and that is a decision about this
+ * THE SWITCH IS SET PER REQUEST, not per class, and that is a decision about this
  * SITE rather than about the test. A mu-plugin answering `pre_option_wpmcp_sql_enabled`
  * with 1 for as long as the class runs would put every table the WordPress database user
  * can read - `wp_users` and its password hashes included - in front of every admin-scope
  * token on the site, on a stress site that belongs to a real client. The fixture here
- * answers 1 only for a request carrying this run's id AND the arming header, so the
- * switch is on for exactly the calls that ask for it and the "switch off" half of the
- * gate can be tested by the same class simply not sending it.
+ * answers only for a request carrying this run's id AND the arming header - 1 when that
+ * header says `on`, 0 when it says `off` - so the switch is on for exactly the calls that
+ * ask for it, and the "switch off" half of the gate is tested by the same class saying so.
+ * That is what makes both halves true on a site whose operator has SQL reads switched on.
  *
  * NOTHING WRITES THE OPTION. The stored value is read before the class runs and asserted
  * unchanged after it, because an option is a shared value with no room for a run prefix:
@@ -902,7 +903,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
         $response = $this->mcp($token)->post(
             'tools/list',
             [],
-            $armed ? [self::ARM_HEADER => 'on'] : []
+            [self::ARM_HEADER => $armed ? 'on' : 'off']
         );
 
         $body = json_decode((string) $response->getBody(), true);
@@ -921,7 +922,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
         $response = $this->mcp($token)->post(
             'tools/call',
             ['name' => $name, 'arguments' => $arguments],
-            $armed ? [self::ARM_HEADER => 'on'] : []
+            [self::ARM_HEADER => $armed ? 'on' : 'off']
         );
 
         $body = json_decode((string) $response->getBody(), true);
@@ -949,9 +950,16 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     /**
      * The fixture: the per-request switch, and the end-of-request write probe.
      *
-     * THE SWITCH ANSWERS 1 ONLY FOR THIS RUN'S ARMED REQUESTS. `false` from a
-     * `pre_option_` filter means "no short-circuit", so every other request on the site -
-     * including this run's own unarmed ones - reads the stored option and sees it off.
+     * THE SWITCH ANSWERS FOR THIS RUN'S REQUESTS ONLY, and in both directions: 1 for a
+     * request carrying `on`, 0 for one carrying `off`, and `$pre` - "no short-circuit",
+     * which is the stored option - for every other request on the site.
+     *
+     * THE `off` DIRECTION IS NOT SYMMETRY FOR ITS OWN SAKE (sprint 14b). An operator may
+     * have switched SQL reads on for their own site, and both local dev sites have, for
+     * their MCP servers. Without it, "with the switch off the tool is not listed" was a
+     * claim about the OPERATOR's option rather than about the code, and it went red on
+     * such a site while the suite still wrote nothing - which is the rule that matters.
+     * Each request now says which half of the gate it is testing.
      *
      * THE PROBE IS A WRITE THAT CHANGES NOTHING: a DELETE whose WHERE matches no row.
      * MySQL refuses it with 1792 inside a READ ONLY transaction whether or not it would
@@ -974,15 +982,26 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
  * HEADERS, so it changes nothing for anybody else. If you are reading this on a live
  * site, the run that wrote it crashed; deleting the file is safe.
  */
-\$wpmcp_test_sql_armed = static function () {
-    return isset(\$_SERVER['{$header}'])
-        && \$_SERVER['{$header}'] === '{$run}'
-        && isset(\$_SERVER['{$arm}'])
-        && \$_SERVER['{$arm}'] === 'on';
+\$wpmcp_test_sql_switch = static function () {
+    if (!isset(\$_SERVER['{$header}']) || \$_SERVER['{$header}'] !== '{$run}'
+        || !isset(\$_SERVER['{$arm}'])) {
+        return null;
+    }
+
+    if (\$_SERVER['{$arm}'] === 'on')  { return 1; }
+    if (\$_SERVER['{$arm}'] === 'off') { return 0; }
+
+    return null;
 };
 
-add_filter('pre_option_wpmcp_sql_enabled', static function (\$pre) use (\$wpmcp_test_sql_armed) {
-    return \$wpmcp_test_sql_armed() ? 1 : \$pre;
+\$wpmcp_test_sql_armed = static function () use (\$wpmcp_test_sql_switch) {
+    return \$wpmcp_test_sql_switch() === 1;
+};
+
+add_filter('pre_option_wpmcp_sql_enabled', static function (\$pre) use (\$wpmcp_test_sql_switch) {
+    \$forced = \$wpmcp_test_sql_switch();
+
+    return \$forced === null ? \$pre : \$forced;
 });
 
 add_action('shutdown', static function () use (\$wpmcp_test_sql_armed) {
