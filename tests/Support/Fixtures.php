@@ -1453,6 +1453,29 @@ final class Fixtures
     }
 
     /**
+     * Revoke token rows BY ID - the only shape in which a test may delete a row whose
+     * label it does not own (round 2, review S3).
+     *
+     * `bin/dev-tokens.php`'s `label` and `mint` write the fixed label
+     * `claude-code dev (local)`, which is also the label an operator gives their own dev
+     * tokens, so no label and no id range can tell one from the other. A test that causes
+     * such a row to exist records the id the script printed and hands it here; anything it
+     * did not cause is not its to remove.
+     *
+     * @param list<int> $ids
+     */
+    public static function revokeTokenIds(array $ids): void
+    {
+        foreach ($ids as $id) {
+            $id = (int) $id;
+
+            if ($id > 0) {
+                WpCli::tryEvaluate(sprintf('wpmcp_revoke(%d); echo "ok";', $id));
+            }
+        }
+    }
+
+    /**
      * Delete every user, post, term, token and mu-plugin THIS RUN created, and report
      * - without deleting - anything another run left behind.
      *
@@ -1638,14 +1661,23 @@ final class Fixtures
      * prefix, so it is findable and attributable. An option is a single shared value with
      * no room for a prefix.
      *
-     * `wpmcp_sql_enabled` IS A NOTICE, NOT DEBRIS (sprint 14b). No test writes it:
-     * SqlSelectTest arms the switch with a `pre_option_` filter in a mu-plugin, gated on a
-     * per-request header, and asserts the stored option is unchanged afterwards. So when
-     * it is ON, an operator switched it on - both local test sites keep SQL reads on for
-     * their dev MCP servers - and calling that debris turned every clean run red. It is
-     * still printed, because sql-select reads every table the database user can read and
-     * an operator should see that it is on; it no longer fails the check. The guard against
-     * a TEST writing it is SqlSelectTest's own before/after assertion.
+     * `wpmcp_sql_enabled` IS A NOTICE, NOT DEBRIS (sprint 14b). No test LEAVES it changed,
+     * which is the precise claim (round 2, review S2): SqlSelectTest arms the switch with a
+     * `pre_option_` filter in a mu-plugin, gated on a per-request header, and asserts the
+     * stored option is unchanged afterwards; PostMetaToolsTest's settings round trip DOES
+     * write it, through wpmcp_save_settings(), and writes back the value it read a moment
+     * earlier in the same `wp eval` - a killed run cannot fall between the two. So when the
+     * option is ON, an operator switched it on - both local test sites keep SQL reads on
+     * for their dev MCP servers - and calling that debris turned every clean run red. It is
+     * still printed, because sql-select reads every table the database user can read and an
+     * operator should see that it is on; it no longer fails the check.
+     *
+     * WHAT THAT GIVES UP, deliberately: a future test that wrote the option from a class of
+     * its own and did not restore it would no longer be caught here, because this check
+     * cannot tell such a test from an operator. The remaining guard is
+     * SqlSelectTest::testZTheStoredSwitchIsExactlyWhatItWas, which sees only its own class.
+     * A site-wide backstop would have to snapshot the option before the run and compare
+     * after it - the runner's job, not this file's.
      *
      * A `wpmcp-test-` KEY IN `wpmcp_meta_keys` IS STILL DEBRIS. The option is shared, but
      * the keys inside it are fixture names, and one can only have come from a run: every
@@ -1692,7 +1724,10 @@ final class Fixtures
 
         if ($sqlOn) {
             $notices .= "NOTICE: option wpmcp_sql_enabled is ON - sql-select is exposed to every admin-scope token on this site.\n"
-                . "  No test writes that option (tests filter it per request), so an operator switched it on. Not debris.\n";
+                . "  No test LEAVES that option changed: the SQL tests filter it per request, and the one test that writes it\n"
+                . "  restores the operator's value in the same process. So an operator switched it on, and this is not debris.\n"
+                . "  A future test that wrote it and did not restore it would not be caught here; that backstop was dropped\n"
+                . "  deliberately, because this check cannot tell such a test from an operator.\n";
         }
 
         $ours = array_values(array_filter(
@@ -1836,7 +1871,9 @@ final class Fixtures
      * mints a sentinel whose label carries the run prefix after other text, so that every
      * prefix-anchored write in the harness treats it as a developer's row; a crashed run
      * must still leave it findable. The value returned starts AT the prefix, so runIdIn(),
-     * ours() and foreign() read it like any other fixture name.
+     * ours() and foreign() read it like any other fixture name. The SQL only finds
+     * candidates; the shape test below is what keeps an operator's own label out of the
+     * report (review round 1, S6).
      *
      * @return array<int, string> row id => label, from the prefix on
      */
@@ -1859,7 +1896,17 @@ final class Fixtures
                 continue;
             }
 
-            $found[(int) $parts[0]] = substr($parts[1], $at);
+            $name = substr($parts[1], $at);
+
+            // An operator's own label that merely CONTAINS the prefix is not debris
+            // (review round 1, S6). Keep a row only when the prefix starts the label -
+            // the legacy pre-run-id name - or is followed by this harness's shape, eight
+            // hex digits and a dash.
+            if ($at !== 0 && self::runIdIn($name) === '') {
+                continue;
+            }
+
+            $found[(int) $parts[0]] = $name;
         }
 
         return $found;
