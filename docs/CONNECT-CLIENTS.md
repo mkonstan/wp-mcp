@@ -253,12 +253,18 @@ accepted request writes nothing at all, so silence after a working connection is
 
 On a site whose environment type is exactly `local`, a token may be minted with an active
 window of up to **30 days** (README, *Active window and Lifetime*), so a developer's client
-does not meet a dormant token every morning. Two helpers, neither shipped in the release
-zip:
+does not meet a dormant token every morning. Mint one in Settings > WP MCP with the window
+field set to what you want; the form states this site's ceiling.
+
+That window is honoured by the site that serves the request. A local database moved to a
+site that reports anything else keeps its rows, and each of those tokens is dormant twelve
+hours after its last renewal there, needing one ordinary **Renew**.
+
+**A helper for that chore lives in the plugin's source repository**, not in this zip:
+`bin/dev-tokens.php`, run against one site with wp-cli.
 
 ```bash
-DEVTOKENS_MCP_JSON=/path/to/.mcp.json bin/dev-tokens.sh status   # jaygroup, then sample
-DEVTOKENS_CMD=status DEVTOKENS_MCP_JSON=/path/to/.mcp.json     wp eval-file bin/dev-tokens.php                              # one site
+DEVTOKENS_CMD=status DEVTOKENS_MCP_JSON=/path/to/.mcp.json wp eval-file bin/dev-tokens.php
 ```
 
 `status` reports each server's token as active, dormant or dead, with the minutes left in
@@ -268,9 +274,10 @@ its window and the days left in its lifetime. `label` gives the matched rows the
 restart the client; it does NOT revoke the old token, so revoke it yourself in
 Settings > WP MCP.
 
-It only ever considers servers whose URL host is the site's own, it finds a row by the
-sha256 of the bearer value, it prints no token and no hash, and it refuses to run at all
-unless the site reports environment type `local`.
+It only ever considers servers in that file whose URL host is the site's own, it finds a row
+by the sha256 of the bearer value, it prints no token and no hash, and it refuses to run at
+all unless the site reports environment type `local`. The repository also carries
+`bin/dev-tokens.sh`, which runs it for each development site of that checkout in turn.
 
 ---
 

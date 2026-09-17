@@ -145,11 +145,14 @@ capabilities bound what the token can reach and scope narrows from there. This i
 that changed in 1.0: before it, every token ran as the admin who minted it, and an Editor's
 token could read anything.
 
-It expires within twelve hours - thirty days on a site whose environment type is `local`,
-see `wpmcp_max_window()` - checked on every request rather than by the cleanup cron,
-and the row is deleted the moment an expired token is presented. What the cap buys is a
-bounded window, and that is all it buys: a token used inside its window has its full scope
-for that window, so the cap is no reason to mint `admin` casually.
+Its active window closes within twelve hours - thirty days on a site whose environment
+type is `local`, see `wpmcp_max_window()` - checked on every request rather than by the
+cleanup cron, and the window a row is honoured for is this site's ceiling whatever the row
+itself was granted, so a database copied here from a site with a wider ceiling brings no
+wider window with it. A refused row is KEPT, not deleted: dormant is what **Renew** exists
+for, and only the hourly cron removes a row, once it is past its hard lifetime. What the
+cap buys is a bounded window, and that is all it buys: a token used inside its window has
+its full scope for that window, so the cap is no reason to mint `admin` casually.
 
 With no live token in the table, every request gets 401. Activating the plugin opens
 nothing; deleting the tokens closes it again.

@@ -25,6 +25,14 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Why:** a dormant token makes a local MCP server fail to connect at the next client
   start, and the daily human checkpoint the 12-hour cap exists for is about connectors on
   sites the internet can reach.
+- **The cap is enforced where a token is USED, not only where one is written.** A row's
+  window is honoured as `min(the window it was granted, this site's maximum)`, counted from
+  the moment that window last started, so a database copied from a local site to a public
+  one carries no 30-day windows with it: those rows are **dormant** 12 hours after their
+  last renewal there, and an ordinary **Renew** restores them at 12 hours. Nothing is
+  deleted or revoked. Renew stores a clamp it had to apply, so the row it writes says what
+  the site actually granted; the admin table shows the moment the window really ends and
+  says when it was capped.
 - **Unchanged:** the lifetime still bounds the window (Renew is still
   `min(now + window, expires_at)`), the default window is still 6 hours everywhere, and the
   v2 -> v3 migration still caps a backfilled window at `WPMCP_MAX_WINDOW`, so a database
@@ -36,13 +44,15 @@ admin can renew them for thirty days from when they were minted - see below.
   `wp eval-file`, and the wrapper `bin/dev-tokens.sh`. `status`, `label` and `mint` for the
   `.mcp.json` servers whose URL host is this site's own, found by the sha256 of their
   bearer value. It refuses any site that is not `local`, prints no token and no hash, and
-  `mint` backs the file up and replaces only the matching servers' `Authorization` values,
-  without revoking the old tokens.
+  `mint` backs the file up, writes the new file beside it and renames it into place -
+  never a truncating write - and replaces only the matching servers' `Authorization`
+  values, without revoking the old tokens. Every failure names the backup.
 
 ### Changed: the debris check no longer calls an operator's switch debris
 
 - `wpmcp_sql_enabled` left ON is a **notice**, and the report still says clean. No test
-  writes that option - the SQL tests arm it with a per-request filter - so when it is on,
+  LEAVES that option changed - the SQL tests arm it with a per-request filter, and the one
+  test that writes it restores the operator's value in the same process - so when it is on,
   an operator turned it on. A `wpmcp-test-` key left in the post-meta allow-list is still
   debris and still fails the check, as is any foreign fixture.
 

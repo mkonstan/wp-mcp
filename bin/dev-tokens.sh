@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Run bin/dev-tokens.php against both Local sites: jaygroup, then sample.
+# Run bin/dev-tokens.php against both of THIS CHECKOUT's Local sites: jaygroup, then
+# sample. Those two are this machine's; another copy of the repository edits run_site
+# below. docs/CONNECT-CLIENTS.md section 3b documents the PHP script, which is general -
+# and this wrapper is named there rather than spelled out, because it is not in the zip.
 #
 #   DEVTOKENS_MCP_JSON=/d/Projects/wp-mcp-adapter/.mcp.json bin/dev-tokens.sh status
 #   DEVTOKENS_MCP_JSON=... bin/dev-tokens.sh label

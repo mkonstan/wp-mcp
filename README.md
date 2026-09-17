@@ -70,9 +70,14 @@ The token itself never changes, so whatever is holding it needs no edit.
 the form says so. Any other answer, `development` and `staging` included, keeps the
 12-hour cap: a development server can face the internet. The daily checkpoint exists for
 connectors on sites the internet can reach; on a developer's own machine it only makes an
-MCP client fail to connect every morning. The lifetime still bounds the window, and
-nothing else changes: a token minted with a 30-day window on a local site is renewed for
-at most 12 hours if that same database is ever served from a site that is not local.
+MCP client fail to connect every morning. The lifetime still bounds the window.
+
+**The cap is the serving site's, and it holds on every request.** A row's window is read as
+`min(the window it was granted, this site's maximum)`, counted from the moment that window
+last started. So a database copied from a local site to a public one brings no 30-day
+windows with it: each of those tokens is **dormant** 12 hours after its last renewal there,
+and pressing Renew gives it 12 hours like any other token. The row is never deleted or
+revoked, the token itself never changes, and a local site goes on honouring its own 30 days.
 
 The *lifetime* - 30 days by default, 365 at most - is the hard end. Past it the token is
 **dead**: Renew is not offered, the hourly cleanup removes the row, and the only way on is
