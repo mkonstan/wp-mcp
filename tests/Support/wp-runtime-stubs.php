@@ -158,13 +158,29 @@ if (!function_exists('current_user_can')) {
 
 if (!function_exists('apply_filters')) {
     /**
-     * No filters are registered in the unit tier, so this returns the value unchanged
-     * - which is what real WordPress does with no callbacks attached. Reached from
-     * wpmcp_client_ip() (the wpmcp_client_ip filter) via wpmcp_auth_event().
+     * Returns the value unchanged unless a test attached a callback to $hook through
+     * WordPressRuntime::addFilter() - which is what real WordPress does with no
+     * callbacks attached. Reached from wpmcp_client_ip() (the wpmcp_client_ip filter)
+     * via wpmcp_auth_event(), and since sprint 14b from wpmcp_is_local_environment().
      */
     function apply_filters($hook, $value, ...$args)
     {
-        return $value;
+        $callback = $GLOBALS['wpmcp_test_wp']['filters'][$hook] ?? null;
+
+        return $callback === null ? $value : $callback($value, ...$args);
+    }
+}
+
+if (!function_exists('wp_get_environment_type')) {
+    /**
+     * ADDED FOR SPRINT 14B. The window cap depends on it. Real WordPress caches its
+     * answer for the process; this one reads the global each time, which is what lets a
+     * unit test put both branches under the same loaded plugin. Defaults to
+     * 'production', core's answer when nothing is configured.
+     */
+    function wp_get_environment_type()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['environment'] ?? 'production');
     }
 }
 

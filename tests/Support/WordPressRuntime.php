@@ -33,6 +33,8 @@ final class WordPressRuntime
             'options'         => [],
             'stylesheet_dir'  => '',
             'stylesheet'      => '',
+            'environment'     => 'production',
+            'filters'         => [],
         ];
 
         $wpdb = new FakeWpdb();
@@ -58,6 +60,24 @@ final class WordPressRuntime
     {
         $GLOBALS['wpmcp_test_wp']['stylesheet_dir'] = $directory;
         $GLOBALS['wpmcp_test_wp']['stylesheet']     = $slug;
+    }
+
+    /**
+     * Make wp_get_environment_type() return $type. install() resets it to 'production',
+     * WordPress's own answer when nothing is configured (sprint 14b).
+     */
+    public static function setEnvironmentType(string $type): void
+    {
+        $GLOBALS['wpmcp_test_wp']['environment'] = $type;
+    }
+
+    /**
+     * Attach ONE callback to $hook for apply_filters(). The unit tier had no filters at
+     * all until sprint 14b, whose narrowing seam is a filter; nothing else registers one.
+     */
+    public static function addFilter(string $hook, callable $callback): void
+    {
+        $GLOBALS['wpmcp_test_wp']['filters'][$hook] = $callback;
     }
 
     /** Make get_userdata($id) return a user. */

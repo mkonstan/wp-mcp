@@ -134,6 +134,22 @@ final class WpCli
         return self::run($args);
     }
 
+    /**
+     * `wp eval <php>` with the exit code, stdout and stderr, never throwing.
+     *
+     * For a script whose REFUSAL is the thing under test (sprint 14b, bin/dev-tokens.php):
+     * run() would turn the non-zero exit into an exception and fold both streams into
+     * its message, and the test needs to assert on each of the three separately.
+     *
+     * @return array{0:int,1:string,2:string} [exit code, stdout, stderr]
+     */
+    public static function evaluateWithStatus(string $php): array
+    {
+        [$code, $out, $err] = self::attempt(['eval', $php]);
+
+        return [$code, self::clean($out), trim($err)];
+    }
+
     /** `wp eval <php>`, failure swallowed. */
     public static function tryEvaluate(string $php): string
     {
