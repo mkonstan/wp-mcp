@@ -52,13 +52,16 @@ function wpmcp_endpoint_url() {
  * somebody's laptop that should stop answering by the end of the working day. Twelve is
  * the ceiling, and the way to keep a connector alive past it is Renew, not a longer
  * window.
+ *
+ * THE CEILING IS wpmcp_max_window(), in hours (sprint 14b): 12, or 720 on a site whose
+ * environment type is 'local'. The default stays six hours on both.
  */
 function wpmcp_form_window_secs($hours) {
     if ($hours === null || $hours === '' || !is_numeric($hours)) {
         return WPMCP_DEFAULT_WINDOW;
     }
 
-    $hours = min(12.0, max(0.5, (float) $hours));
+    $hours = min(wpmcp_max_window() / HOUR_IN_SECONDS, max(0.5, (float) $hours));
 
     return (int) round($hours * HOUR_IN_SECONDS);
 }
@@ -194,6 +197,10 @@ function wpmcp_render_admin() {
 
     global $wpdb;
     $rows = $wpdb->get_results('SELECT * FROM ' . wpmcp_table() . ' ORDER BY created_at DESC');
+
+    // The window field's ceiling, in hours: 12, or 720 on a local site (sprint 14b).
+    $local        = wpmcp_is_local_environment();
+    $window_hours = (int) (wpmcp_max_window() / HOUR_IN_SECONDS);
     ?>
     <div class="wrap">
       <h1>WP MCP</h1>
@@ -270,12 +277,15 @@ function wpmcp_render_admin() {
           </tr>
           <tr>
             <th scope="row"><label for="wpmcp-window">Active window (hours)</label></th>
-            <td><input name="window_hours" id="wpmcp-window" type="number" min="0.5" max="12" step="0.5" value="6">
+            <td><input name="window_hours" id="wpmcp-window" type="number" min="0.5" max="<?php echo (int) $window_hours; ?>" step="0.5" value="6">
               <p class="description">How long the token answers before it goes
                  <strong>dormant</strong>. A dormant token is refused like any other bad
                  credential, but its row stays here and <strong>Renew</strong> restarts
                  the window &mdash; the token itself never changes, so the client does not
-                 have to be touched. Hard cap 12 h.</p></td>
+                 have to be touched. Hard cap <?php echo esc_html(wpmcp_format_duration(wpmcp_max_window())); ?>.</p>
+              <?php if ($local): ?>
+                <p class="description"><?php echo esc_html('This site reports environment type "local", so tokens may stay active up to 30 days.'); ?></p>
+              <?php endif; ?></td>
           </tr>
           <tr>
             <th scope="row"><label for="wpmcp-lifetime">Lifetime (days)</label></th>

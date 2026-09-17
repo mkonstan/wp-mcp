@@ -18,7 +18,8 @@
  * Auth model (by design):
  *  - Admin mints a token in Settings > WP MCP. Token is shown ONCE.
  *  - Token is a 256-bit random value; only its SHA-256 hash is stored.
- *  - TWO TIMERS. An active window (6h by default, 12h at most) after which the token
+ *  - TWO TIMERS. An active window (6h by default, 12h at most - 30 days on a site whose
+ *    environment type is 'local', see wpmcp_max_window()) after which the token
  *    goes DORMANT: refused, row kept, and an admin's Renew restarts the window without
  *    changing the token. A hard lifetime (30 days by default, 365 at most) after which
  *    it is DEAD: refused, not renewable, removed by the hourly cron. Both enforced on
@@ -89,6 +90,20 @@ define('WPMCP_VERSIONS_TABLE', 'wpmcp_file_versions');
 define('WPMCP_MAX_WINDOW', 12 * HOUR_IN_SECONDS);   // 43200s
 define('WPMCP_MAX_LIFETIME', 365 * DAY_IN_SECONDS); // 31536000s
 
+/**
+ * The active-window cap on a LOCAL development site, and nowhere else (sprint 14b).
+ *
+ * WPMCP_MAX_WINDOW above keeps its meaning - the cap on every other site - and every
+ * place that must stay at twelve hours whatever the site says still names it. The
+ * places that follow the site (mint, renew, the mint form) ask wpmcp_max_window().
+ *
+ * WHY A LOCAL SITE MAY WAIT A MONTH. The twelve-hour ceiling makes a human look at a
+ * connector token every day, which is right for a site the internet can reach. On a
+ * developer's own machine it only makes Claude's MCP servers fail to connect every
+ * morning. The lifetime still bounds the window, as everywhere.
+ */
+define('WPMCP_LOCAL_MAX_WINDOW', 30 * DAY_IN_SECONDS); // 2592000s
+
 /** The shortest active window that can be minted. Below this, nothing could use it. */
 define('WPMCP_MIN_WINDOW', 60);
 
@@ -102,6 +117,36 @@ define('WPMCP_MIN_WINDOW', 60);
  */
 define('WPMCP_DEFAULT_WINDOW', 6 * HOUR_IN_SECONDS);
 define('WPMCP_DEFAULT_LIFETIME', 30 * DAY_IN_SECONDS);
+
+/**
+ * Is this site a LOCAL development environment, for the purpose of the token window?
+ *
+ * EXACTLY 'local', and nothing else. 'development' and 'staging' are refused on purpose:
+ * a development server can face the internet, and WordPress's own documentation lets a
+ * host set either on a public machine. Setting WP_ENVIRONMENT_TYPE to 'local' on a public
+ * server widens every token's window to thirty days there; SECURITY.md says so.
+ *
+ * THE FILTER CAN ONLY NARROW. It is asked only once the site already reports 'local', so
+ * no filter can make any other site local. It exists for the test suite, which needs the
+ * twelve-hour branch on a local site: core caches wp_get_environment_type() for the life
+ * of the process, so the answer cannot be changed any other way. Nothing reads it from a
+ * request.
+ */
+function wpmcp_is_local_environment() {
+    if (wp_get_environment_type() !== 'local') {
+        return false;
+    }
+
+    return (bool) apply_filters('wpmcp_local_environment', true);
+}
+
+/**
+ * The longest active window this site allows: WPMCP_LOCAL_MAX_WINDOW on a local site,
+ * WPMCP_MAX_WINDOW everywhere else. Mint, renew and the mint form all clamp to this.
+ */
+function wpmcp_max_window() {
+    return wpmcp_is_local_environment() ? (int) WPMCP_LOCAL_MAX_WINDOW : (int) WPMCP_MAX_WINDOW;
+}
 
 // Token-table schema revision. Bump it whenever the CREATE TABLE below changes:
 // wpmcp_maybe_upgrade() compares it against the wpmcp_db_ver option on every load and
@@ -603,6 +648,13 @@ function wpmcp_collect_stale_backups($dir, $suffix, &$out, $depth) {
  *       Renew would hand out a 90-day active window on a model whose whole point is a
  *       twelve-hour ceiling.
  *
+ *       TWELVE HOURS EVEN ON A LOCAL SITE, and not wpmcp_max_window() (sprint 14b). Every
+ *       row this touches was minted by a version that capped windows at twelve hours, so
+ *       twelve is the most any of them was ever granted; a site's environment type says
+ *       nothing about a grant made before this migration existed. And a migration's
+ *       result should not depend on where it happened to run: a database upgraded on a
+ *       local copy and pushed to a public site would otherwise carry thirty-day windows.
+ *
  *   expires_at   = created_at + WPMCP_DEFAULT_LIFETIME
  *       So the row is RENEWABLE, which is the half that was wrong in the first cut of this
  *       function. Setting the hard lifetime to the old expiry as well made the row go
@@ -1054,7 +1106,8 @@ function wpmcp_attach_default_auth_log() {
  * TWO TIMERS, BOTH IN SECONDS.
  *
  *   $window_secs    how long the token answers before going DORMANT. Clamped to
- *                   [WPMCP_MIN_WINDOW, WPMCP_MAX_WINDOW]. A dormant token is refused
+ *                   [WPMCP_MIN_WINDOW, wpmcp_max_window()] - twelve hours, or thirty
+ *                   days on a local site. A dormant token is refused
  *                   like any other bad credential and its row is kept, so an admin can
  *                   press Renew and the client never has to be touched.
  *   $lifetime_secs  the hard end. Clamped to [$window_secs, WPMCP_MAX_LIFETIME]. Past
@@ -1074,7 +1127,7 @@ function wpmcp_attach_default_auth_log() {
 function wpmcp_mint($scope, $label, $window_secs, $lifetime_secs, $user_id = 0) {
     global $wpdb;
     $scope       = ($scope === 'admin') ? 'admin' : 'read';
-    $window_secs = max(WPMCP_MIN_WINDOW, min(WPMCP_MAX_WINDOW, (int) $window_secs));
+    $window_secs = max(WPMCP_MIN_WINDOW, min(wpmcp_max_window(), (int) $window_secs));
     $lifetime_secs = max($window_secs, min(WPMCP_MAX_LIFETIME, (int) $lifetime_secs));
     $user_id     = (int) $user_id;
     if ($user_id === 0) { $user_id = (int) get_current_user_id(); }
@@ -1298,8 +1351,8 @@ function wpmcp_validate($raw, $ip) {
  * would make expires_at decorative, and a token nobody chose to keep would live forever
  * one press at a time.
  *
- * AND IT CANNOT HAND OUT A WINDOW LONGER THAN WPMCP_MAX_WINDOW, whatever the row says.
- * See the comment on the clamp below.
+ * AND IT CANNOT HAND OUT A WINDOW LONGER THAN wpmcp_max_window(), whatever the row says:
+ * twelve hours, or thirty days on a local site. See the comment on the clamp below.
  *
  * A DEAD ROW IS REFUSED rather than quietly clamped to its own end. Setting
  * active_until = expires_at on a row whose expires_at is in the past would "succeed" and
@@ -1344,7 +1397,11 @@ function wpmcp_renew($id) {
     // ninety days. Without the upper clamp, that single row is a way around the twelve-
     // hour ceiling the whole model exists to enforce; min(..., $lifetime) below only
     // hides it while the lifetime happens to be near.
-    $window   = min(WPMCP_MAX_WINDOW, max(WPMCP_MIN_WINDOW, (int) $row->window_secs));
+    //
+    // THE CEILING IS THE SITE'S, read now (sprint 14b). A row minted with a thirty-day
+    // window on a local site renews for thirty days there - and for twelve hours on any
+    // other site, which is what a database copied from a local site to a public one needs.
+    $window   = min(wpmcp_max_window(), max(WPMCP_MIN_WINDOW, (int) $row->window_secs));
     $lifetime = strtotime($row->expires_at . ' UTC');
     $until    = gmdate('Y-m-d H:i:s', min(time() + $window, $lifetime));
 
