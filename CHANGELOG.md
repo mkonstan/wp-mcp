@@ -13,6 +13,39 @@ after the plugin files change. Existing tokens keep answering until exactly the 
 they always would have; at that moment they go **dormant** instead of vanishing, and an
 admin can renew them for thirty days from when they were minted - see below.
 
+### Added: a 30-day active window on a local development site
+
+- **The window cap now follows the site's environment type.** `wpmcp_max_window()` answers
+  30 days (`WPMCP_LOCAL_MAX_WINDOW`) when `wp_get_environment_type()` is exactly `local`,
+  and 12 hours (`WPMCP_MAX_WINDOW`, unchanged) everywhere else. Mint, Renew and the mint
+  form's hours field all clamp to it, and the mint form states the 30-day cap on a local
+  site. `development` and `staging` do NOT qualify: a development server can face the
+  internet. Setting `WP_ENVIRONMENT_TYPE` to `local` on a public server widens that site's
+  windows to 30 days - see SECURITY.md.
+- **Why:** a dormant token makes a local MCP server fail to connect at the next client
+  start, and the daily human checkpoint the 12-hour cap exists for is about connectors on
+  sites the internet can reach.
+- **Unchanged:** the lifetime still bounds the window (Renew is still
+  `min(now + window, expires_at)`), the default window is still 6 hours everywhere, and the
+  v2 -> v3 migration still caps a backfilled window at `WPMCP_MAX_WINDOW`, so a database
+  upgraded on a local copy carries no 30-day windows.
+- **New filter `wpmcp_local_environment`**, asked only on a site that already reports
+  `local`. It can turn the relaxation OFF; nothing can turn it on anywhere else. The test
+  suite uses it, because WordPress caches the environment type for the life of a process.
+- **New: `bin/dev-tokens.php`** (not shipped in the release zip), run with
+  `wp eval-file`, and the wrapper `bin/dev-tokens.sh`. `status`, `label` and `mint` for the
+  `.mcp.json` servers whose URL host is this site's own, found by the sha256 of their
+  bearer value. It refuses any site that is not `local`, prints no token and no hash, and
+  `mint` backs the file up and replaces only the matching servers' `Authorization` values,
+  without revoking the old tokens.
+
+### Changed: the debris check no longer calls an operator's switch debris
+
+- `wpmcp_sql_enabled` left ON is a **notice**, and the report still says clean. No test
+  writes that option - the SQL tests arm it with a per-request filter - so when it is on,
+  an operator turned it on. A `wpmcp-test-` key left in the post-meta allow-list is still
+  debris and still fails the check, as is any foreign fixture.
+
 ### Security: a theme file's backup is no longer served over the web
 
 - **Nothing is written beside a theme file any more.** `code-write` used to copy the file

@@ -63,6 +63,17 @@ When it elapses the token goes **dormant**: refused with the same anonymous `401
 other bad credential, but its row stays in the table and **Renew** restarts the window.
 The token itself never changes, so whatever is holding it needs no edit.
 
+**On a local development site the window may run to 30 days.** If
+`wp_get_environment_type()` answers exactly `local` - WordPress reads that from the
+`WP_ENVIRONMENT_TYPE` constant or environment variable, and Local by Flywheel and
+`wp-env` both set it - mint, Renew and the mint form allow a window of up to 30 days, and
+the form says so. Any other answer, `development` and `staging` included, keeps the
+12-hour cap: a development server can face the internet. The daily checkpoint exists for
+connectors on sites the internet can reach; on a developer's own machine it only makes an
+MCP client fail to connect every morning. The lifetime still bounds the window, and
+nothing else changes: a token minted with a 30-day window on a local site is renewed for
+at most 12 hours if that same database is ever served from a site that is not local.
+
 The *lifetime* - 30 days by default, 365 at most - is the hard end. Past it the token is
 **dead**: Renew is not offered, the hourly cleanup removes the row, and the only way on is
 a new token.

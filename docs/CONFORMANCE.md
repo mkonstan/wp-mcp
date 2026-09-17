@@ -68,7 +68,7 @@ One line each, with the reason rather than a promise.
 | Sessions | Every request carries its own credential and is validated on its own. No session id, no server-side state between requests, nothing to expire or to fixate. |
 | SSE and streaming | One JSON response per POST. A streamable HTTP server has to hold a connection open inside PHP-FPM, which is the wrong shape for WordPress on shared hosting. |
 | stdio | There is no local process to speak to. The server is a WordPress site. |
-| OAuth | The token scheme is the authentication: minted by an admin, bound to a WordPress user, hashed at rest, answering only inside an active window of at most 12 hours and never past a hard lifetime of at most a year. An OAuth authorization server inside a WordPress plugin would be a larger attack surface than the thing it protects. |
+| OAuth | The token scheme is the authentication: minted by an admin, bound to a WordPress user, hashed at rest, answering only inside an active window of at most 12 hours - 30 days on a site whose environment type is `local` - and never past a hard lifetime of at most a year. An OAuth authorization server inside a WordPress plugin would be a larger attack surface than the thing it protects. |
 | Revision `2026-07-28` | No client speaks it yet. Supporting two eras at once doubles the negotiation paths and the tests for a capability nobody can use. It is the next revision to add. |
 | Abilities API bridge | WordPress core registers three read-only abilities today. The bridge becomes worth building when plugins with real abilities ship. |
 

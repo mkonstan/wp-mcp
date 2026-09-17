@@ -145,7 +145,8 @@ capabilities bound what the token can reach and scope narrows from there. This i
 that changed in 1.0: before it, every token ran as the admin who minted it, and an Editor's
 token could read anything.
 
-It expires within twelve hours, checked on every request rather than by the cleanup cron,
+It expires within twelve hours - thirty days on a site whose environment type is `local`,
+see `wpmcp_max_window()` - checked on every request rather than by the cleanup cron,
 and the row is deleted the moment an expired token is presented. What the cap buys is a
 bounded window, and that is all it buys: a token used inside its window has its full scope
 for that window, so the cap is no reason to mint `admin` casually.

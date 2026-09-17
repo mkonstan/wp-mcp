@@ -242,10 +242,35 @@ accepted request writes nothing at all, so silence after a working connection is
 | `insecure_deny` | The request arrived as plain HTTP. | The URL must be `https://`. |
 | `content_type_deny content_type=...` | The POST was not `application/json`. | A client bug. Report the value. |
 | `validate_fail reason=missing` | No `Authorization: Bearer` header reached PHP. | Normal once, during a claude.ai *Connect* probe. Every time means the client is not sending it, or Apache under CGI/FastCGI is eating it - see the `.htaccess` block in section 2. |
-| `validate_fail reason=dormant` | The active window has closed. | Press **Renew** on that row in Settings > WP MCP. The token does not change, so the connector needs no edit. |
+| `validate_fail reason=dormant` | The active window has closed. | Press **Renew** on that row in Settings > WP MCP. The token does not change, so the connector needs no edit. On a LOCAL site, mint with a window of up to 30 days instead, or run `bin/dev-tokens.sh status` (below). |
 | `validate_fail reason=expired` | The token is past its hard lifetime. | Mint a new token, then delete and re-add the connector with the new header value. |
 | `validate_fail reason=not_found` | The token is not in the table. | A truncated paste, or the row was revoked. |
 | HTTP 400, `-32600`, "Unsupported MCP-Protocol-Version" | The client declared a revision this server does not speak. | The message names the three it does. There is nothing to configure, so report the value. |
+
+---
+
+## 3b. Keeping a LOCAL site's MCP server connected
+
+On a site whose environment type is exactly `local`, a token may be minted with an active
+window of up to **30 days** (README, *Active window and Lifetime*), so a developer's client
+does not meet a dormant token every morning. Two helpers, neither shipped in the release
+zip:
+
+```bash
+DEVTOKENS_MCP_JSON=/path/to/.mcp.json bin/dev-tokens.sh status   # jaygroup, then sample
+DEVTOKENS_CMD=status DEVTOKENS_MCP_JSON=/path/to/.mcp.json     wp eval-file bin/dev-tokens.php                              # one site
+```
+
+`status` reports each server's token as active, dormant or dead, with the minutes left in
+its window and the days left in its lifetime. `label` gives the matched rows the label
+`claude-code dev (local)`. `mint` mints a 30-day admin token per matching server, backs the
+`.mcp.json` up first, replaces only that server's `Authorization` value, and tells you to
+restart the client; it does NOT revoke the old token, so revoke it yourself in
+Settings > WP MCP.
+
+It only ever considers servers whose URL host is the site's own, it finds a row by the
+sha256 of the bearer value, it prints no token and no hash, and it refuses to run at all
+unless the site reports environment type `local`.
 
 ---
 
