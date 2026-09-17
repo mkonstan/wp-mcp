@@ -224,6 +224,116 @@ final class LocalWindowTest extends TestCase
         self::assertSame(12 * self::HOUR, \wpmcp_form_window_secs('720'));
     }
 
+    /**
+     * B1, round 2: the cap holds ON USE. A row whose stored window is wider than this
+     * site's ceiling answers only for the ceiling, counted from the moment its window
+     * last started - so a database copied from a local site to a public one carries
+     * tokens that are dormant twelve hours after their last renewal, not thirty days.
+     *
+     * @group sprint-14b
+     */
+    public function testAThirtyDayRowAnswersOnALocalSiteAndIsDormantOffOne(): void
+    {
+        $now = time();
+
+        foreach (['local' => 'active', 'production' => 'dormant', 'staging' => 'dormant'] as $type => $state) {
+            WordPressRuntime::setEnvironmentType($type);
+
+            // Minted a day ago with a thirty-day window: 29 days left by the column.
+            $row = $this->row($now + 29 * self::DAY, $now + 300 * self::DAY, 30 * self::DAY);
+
+            self::assertSame(
+                $state,
+                \wpmcp_token_state($row),
+                "A 30-day row reads '" . \wpmcp_token_state($row) . "' on a '{$type}' site."
+            );
+
+            $this->wpdb->row = $row;
+            $seen = \wpmcp_validate(self::TOKEN, '203.0.113.9');
+
+            if ($state === 'active') {
+                self::assertFalse(\is_wp_error($seen), "The row was refused on a '{$type}' site.");
+                continue;
+            }
+
+            self::assertTrue(\is_wp_error($seen), "The row still answers on a '{$type}' site.");
+            self::assertSame('dormant', $seen->get_error_code());
+        }
+    }
+
+    /**
+     * The same row, still inside the ceiling, is untouched: the cap subtracts only what
+     * the row was granted beyond it.
+     *
+     * @group sprint-14b
+     */
+    public function testARowInsideTheCeilingIsNotShortenedByIt(): void
+    {
+        $now = time();
+
+        foreach (['local', 'production'] as $type) {
+            WordPressRuntime::setEnvironmentType($type);
+
+            $row = $this->row($now + 5 * self::HOUR, $now + 30 * self::DAY, 6 * self::HOUR);
+
+            self::assertSame('active', \wpmcp_token_state($row), "A 6-hour row is not active on a '{$type}' site.");
+            self::assertSame(
+                strtotime($row->active_until . ' UTC'),
+                \wpmcp_effective_active_until($row),
+                'The effective end moved for a row inside the ceiling.'
+            );
+        }
+
+        // And a row past its lifetime is dead on both, whatever the window says.
+        WordPressRuntime::setEnvironmentType('local');
+        self::assertSame('dead', \wpmcp_token_state($this->row($now + 29 * self::DAY, $now - 60, 30 * self::DAY)));
+    }
+
+    /**
+     * Renew rewrites the stored window when it had to clamp it, and only then. Without
+     * that, the row it leaves behind - a twelve-hour active_until beside a thirty-day
+     * grant - would read as dormant the instant it was written, and Renew would be a
+     * button that does nothing.
+     *
+     * @group sprint-14b
+     */
+    public function testRenewOffALocalSiteNarrowsTheStoredWindowSoTheRowIsConsistent(): void
+    {
+        $now = time();
+
+        WordPressRuntime::setEnvironmentType('production');
+        $this->wpdb->row = $this->row($now - 60, $now + 300 * self::DAY, 30 * self::DAY);
+
+        $until = \wpmcp_renew(77);
+
+        self::assertIsString($until);
+        self::assertCount(1, $this->wpdb->updates);
+        self::assertSame(
+            ['active_until', 'window_secs'],
+            array_keys($this->wpdb->updates[0]['data']),
+            'Renew clamped the window without storing the clamp, so the row it wrote is'
+            . ' dormant the moment it exists.'
+        );
+        self::assertSame(12 * self::HOUR, $this->wpdb->updates[0]['data']['window_secs']);
+
+        // The row as renew left it: active for twelve hours, not dormant.
+        $this->wpdb->row = $this->row(strtotime($until . ' UTC'), $now + 300 * self::DAY, 12 * self::HOUR);
+        self::assertSame('active', \wpmcp_token_state($this->wpdb->row));
+
+        // On a local site the same row is renewed for thirty days and the grant stands.
+        WordPressRuntime::setEnvironmentType('local');
+        $this->wpdb->updates = [];
+        $this->wpdb->row = $this->row($now - 60, $now + 300 * self::DAY, 30 * self::DAY);
+
+        \wpmcp_renew(77);
+
+        self::assertSame(
+            ['active_until'],
+            array_keys($this->wpdb->updates[0]['data']),
+            'Renew rewrote a window it did not have to clamp.'
+        );
+    }
+
     private function row(int $activeUntil, int $expiresAt, int $window): object
     {
         return (object) [

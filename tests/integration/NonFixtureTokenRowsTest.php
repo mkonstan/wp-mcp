@@ -17,6 +17,11 @@
  *   wpmcp_migrate_token_lifetimes()      WHERE window_secs = 0 (TokenLifetimeMigrationTest)
  *   wpmcp_migrate_token_user_ids()       WHERE user_id = 0 (TokenUserIdMigrationTest)
  *   wpmcp_migrate_drop_address_column()  a column, not a row (BoundIpDropMigrationTest)
+ *   Fixtures::revokeTokenIds()           DevTokensScriptTest's teardown, by id only
+ *                                        (round 2: it used to sweep by the fixed dev
+ *                                        label and an id range, which would have taken
+ *                                        a token an operator minted or labelled while
+ *                                        the suite ran)
  *
  * THE ONE EXCEPTION, BY DESIGN: a row that is already DEAD. The flush deletes it, and so
  * does the plugin's own hourly cron whether a suite runs or not. Dead rows are left out
@@ -44,9 +49,23 @@ use WpMcp\Tests\Support\WpCli;
 final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
 {
     private static function sentinelLabel(): string { return 'dev sentinel ' . Fixtures::name('g6-sentinel'); }
+
+    /**
+     * THE EXACT LABEL `bin/dev-tokens.php` writes, on a row this class did not mint
+     * through the script - the operator's own dev token, as it will look the moment the
+     * queen runs `dev-tokens.sh label`. Nothing in a run may delete it.
+     */
+    private static function operatorLabel(): string { return 'claude-code dev (local)'; }
     private static function scratchLabel(): string { return Fixtures::name('g6-scratch'); }
+    private static function decoyLabel(): string { return 'dev decoy ' . Fixtures::name('g6-operator'); }
+    private static function lookalikeSeedLabel(): string { return 'lookalike seed ' . Fixtures::name('g6-lookalike'); }
 
     private static int $sentinelId = 0;
+    private static int $operatorId = 0;
+    private static int $lookalikeId = 0;
+
+    /** An operator's own label that merely CONTAINS the prefix, with no run id after it. */
+    private static function lookalikeLabel(): string { return 'ops notes ' . Fixtures::PREFIX . 'keepme'; }
 
     public static function setUpBeforeClass(): void
     {
@@ -72,6 +91,34 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         if (self::$sentinelId === 0) {
             throw new \RuntimeException('The G6 sentinel row was not minted.');
         }
+
+        // The decoy: minted with a prefixed label so a crash leaves it findable, then
+        // relabelled by id to the operator's own label. Deleted by id in teardown.
+        Fixtures::mintToken('read', self::decoyLabel(), 1);
+
+        self::$operatorId = (int) WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare("SELECT id FROM " . wpmcp_table() . " WHERE label = %%s", %s));',
+            self::literal(self::decoyLabel())
+        ));
+
+        if (self::$operatorId === 0) {
+            throw new \RuntimeException('The G6 operator-token decoy was not minted.');
+        }
+
+        WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
+            self::literal(self::operatorLabel()),
+            self::$operatorId
+        ));
+
+        Fixtures::mintToken('read', self::lookalikeSeedLabel(), 1);
+        self::$lookalikeId = Fixtures::tokenIdLabelled(self::lookalikeSeedLabel());
+
+        WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
+            self::literal(self::lookalikeLabel()),
+            self::$lookalikeId
+        ));
     }
 
     public static function tearDownAfterClass(): void
@@ -83,6 +130,16 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        if (self::$lookalikeId > 0) {
+            Fixtures::revokeTokenIds([self::$lookalikeId]);
+            self::$lookalikeId = 0;
+        }
+
+        if (self::$operatorId > 0) {
+            Fixtures::revokeTokenIds([self::$operatorId]);
+            self::$operatorId = 0;
+        }
+
         if (self::$sentinelId > 0) {
             WpCli::tryEvaluate(sprintf(
                 'global $wpdb; echo (int) $wpdb->delete(wpmcp_table(), array("id" => %d, "label" => %s));',
@@ -93,6 +150,9 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         }
 
         Fixtures::deleteTokensLabelled(self::scratchLabel());
+        Fixtures::deleteTokensLabelled(self::scratchLabel() . '-dev');
+        Fixtures::deleteTokensLabelled(self::decoyLabel());
+        Fixtures::deleteTokensLabelled(self::lookalikeSeedLabel());
         Fixtures::purge();
     }
 
@@ -119,6 +179,27 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         Fixtures::deleteTokensLabelled(self::scratchLabel());
         Fixtures::mintToken('read', self::scratchLabel(), 1);
         WpCli::evaluate(sprintf('wpmcp_revoke(%d); echo "ok";', Fixtures::tokenIdLabelled(self::scratchLabel())));
+
+        // DevTokensScriptTest's teardown, replayed with the ids IT would have: the ones
+        // its script printed. The operator's own row carries the same fixed label and is
+        // not among them, so it must survive.
+        Fixtures::mintToken('read', self::scratchLabel() . '-dev', 1);
+        $mintedByAScript = Fixtures::tokenIdLabelled(self::scratchLabel() . '-dev');
+        WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
+            self::literal(self::operatorLabel()),
+            $mintedByAScript
+        ));
+        Fixtures::revokeTokenIds([$mintedByAScript]);
+
+        self::assertSame(
+            0,
+            (int) WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM " . wpmcp_table() . " WHERE id = %%d", %d));',
+                $mintedByAScript
+            )),
+            'The dev-token teardown did not revoke the row it was given.'
+        );
 
         // The site-wide plugin functions the suite calls.
         WpCli::evaluate('wpmcp_flush_expired_cb(); echo "ok";');
@@ -157,6 +238,15 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         self::assertArrayHasKey(self::$sentinelId, $found, 'leftoverTokenLabels() cannot see a prefix inside a label.');
         self::assertSame(Fixtures::runId(), Fixtures::runIdIn($found[self::$sentinelId]));
         self::assertArrayHasKey(self::$sentinelId, Fixtures::ours($found));
+
+        // And an operator's own label that merely contains the prefix is NOT debris
+        // (round 2, review S6): nothing follows the prefix that this harness would write,
+        // so nobody should go hunting for the run that left it.
+        self::assertArrayNotHasKey(
+            self::$lookalikeId,
+            $found,
+            'A label that merely contains the fixture prefix is reported as foreign debris.'
+        );
     }
 
     /**

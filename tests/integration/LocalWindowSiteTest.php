@@ -39,6 +39,7 @@ final class LocalWindowSiteTest extends FixtureIntegrationTestCase
     private static function login(): string { return Fixtures::name('localwin-admin'); }
     private static function localLabel(): string { return Fixtures::name('localwin-local'); }
     private static function remoteLabel(): string { return Fixtures::name('localwin-notlocal'); }
+    private static function useLabel(): string { return Fixtures::name('localwin-onuse'); }
 
     private static int $userId = 0;
 
@@ -69,6 +70,7 @@ final class LocalWindowSiteTest extends FixtureIntegrationTestCase
         Fixtures::deleteUser(self::$userId);
         Fixtures::deleteTokensLabelled(self::localLabel());
         Fixtures::deleteTokensLabelled(self::remoteLabel());
+        Fixtures::deleteTokensLabelled(self::useLabel());
         Fixtures::purge();
     }
 
@@ -151,6 +153,65 @@ final class LocalWindowSiteTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * G1b / B1. The cap holds ON USE, not only at mint and renew: the very row minted
+     * here with thirty days is active on this local site and DORMANT through the seam,
+     * which is the site the same database would be served from after a copy. Renew there
+     * brings it back for twelve hours and narrows the stored grant to match.
+     *
+     * @group sprint-14b
+     */
+    public function testAThirtyDayRowIsActiveHereAndDormantOnASiteThatIsNotLocal(): void
+    {
+        $minted = $this->mint(self::useLabel(), '');
+
+        self::assertSame(30 * self::DAY, $minted['window_secs']);
+        self::assertSame('active', $minted['state']);
+
+        // Twenty days into its window: still ten days from its own active_until, and long
+        // past the twelve hours any other site would have granted it. A row minted a
+        // moment ago is inside BOTH windows, so it could not tell the two apart.
+        WpCli::evaluate(sprintf(
+            'global $wpdb; echo (int) $wpdb->query($wpdb->prepare("UPDATE " . wpmcp_table()'
+            . ' . " SET active_until = %%s WHERE id = %%d", gmdate("Y-m-d H:i:s", time() + 10 * DAY_IN_SECONDS), %d));',
+            $minted['id']
+        ));
+
+        self::assertSame(
+            'dormant',
+            $this->stateOf($minted['id'], self::NOT_LOCAL),
+            'A row carrying a 30-day window still answers on a site that is not local, so'
+            . ' a database copied from here keeps answering for the rest of that window.'
+        );
+        self::assertSame('active', $this->stateOf($minted['id'], ''), 'The local site stopped honouring its own window.');
+
+        // The admin table tells an operator the same story, on either site.
+        $here = $this->adminRowFor(self::useLabel(), '');
+        self::assertStringContainsString('<td>active</td>', $here);
+        self::assertStringContainsString('(30 d)', $here);
+        self::assertStringNotContainsString('capped', $here);
+
+        $there = $this->adminRowFor(self::useLabel(), self::NOT_LOCAL);
+        self::assertStringContainsString('<td>dormant</td>', $there, 'The admin table calls a capped row active.');
+        self::assertStringContainsString('capped from 30 d', $there, 'The table does not say the window was capped.');
+
+        $renewed = $this->renew($minted['id'], self::NOT_LOCAL);
+
+        self::assertEqualsWithDelta($renewed['now'] + 12 * self::HOUR, $renewed['returned'], 60);
+        self::assertSame(12 * self::HOUR, $renewed['window_secs'], 'Renew clamped the window without storing the clamp.');
+        self::assertSame(
+            'active',
+            $this->stateOf($minted['id'], self::NOT_LOCAL),
+            'The row Renew just wrote is dormant, so Renew is a button that does nothing.'
+        );
+
+        $row = $this->adminRowFor(self::useLabel(), self::NOT_LOCAL);
+
+        self::assertStringContainsString('<td>active</td>', $row);
+        self::assertStringContainsString('(12 h)', $row, 'The window cell does not show the window this site honours.');
+        self::assertStringNotContainsString('capped', $row, 'The renewed row is still reported as capped.');
+    }
+
+    /**
      * G3. The mint form states the thirty-day cap on a local site, and only there.
      *
      * @group sprint-14b
@@ -215,6 +276,35 @@ final class LocalWindowSiteTest extends FixtureIntegrationTestCase
         self::assertIsArray($data, 'Renew did not answer with a row: ' . substr($json, 0, 200));
 
         return $data;
+    }
+
+    /** wpmcp_token_state() for one row, with or without the narrowing filter. */
+    private function stateOf(int $id, string $prefix): string
+    {
+        return WpCli::evaluate(sprintf(
+            '%s global $wpdb; $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM " . wpmcp_table() . " WHERE id = %%d", %d));'
+            . ' echo $row ? wpmcp_token_state($row) : "NO-ROW";',
+            $prefix,
+            $id
+        ));
+    }
+
+    /** The admin table's `<tr>` for a labelled row, rendered as user 1. */
+    private function adminRowFor(string $label, string $prefix): string
+    {
+        $html = WpCli::evaluate(
+            $prefix . ' require_once ABSPATH . "wp-admin/includes/template.php";'
+            . ' ob_start(); wpmcp_render_admin(); $h = ob_get_clean();'
+            . ' $at = strpos($h, ' . self::literal($label) . ');'
+            . ' if ($at === false) { echo "NO-ROW"; return; }'
+            . ' $s = strrpos(substr($h, 0, $at), "<tr"); $e = strpos($h, "</tr>", $at);'
+            . ' echo substr($h, $s, $e - $s);',
+            1
+        );
+
+        self::assertStringNotContainsString('NO-ROW', $html, 'The fixture row is not on the admin page.');
+
+        return html_entity_decode($html, ENT_QUOTES | ENT_HTML5);
     }
 
     /** The mint form's HTML as user 1, entity-decoded so the sentence reads as text. */

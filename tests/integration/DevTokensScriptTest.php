@@ -52,11 +52,18 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
     private static string $host = '';
     private static string $dir  = '';
 
-    /** Rows this class wrote without the prefix, deleted in teardown whatever happened. */
+    /**
+     * Rows this class caused to exist without the test prefix - every id the script
+     * printed as `minted row N`, captured the moment it printed it. Teardown deletes
+     * EXACTLY these and nothing else.
+     *
+     * A sweep by label was the first shape and it was wrong (review round 1, S3): the
+     * label is fixed, so `DELETE ... WHERE label = 'claude-code dev (local)' AND id >
+     * <max at start>` would take a token an operator minted or labelled WHILE the suite
+     * ran - and giving the two real dev tokens exactly that label is what the `label`
+     * command exists for.
+     */
     private static array $unprefixedIds = [];
-
-    /** The highest token id before this class ran; nothing below it is ours. */
-    private static int $maxIdBefore = 0;
 
     public static function setUpBeforeClass(): void
     {
@@ -69,10 +76,6 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
     private static function build(): void
     {
         Fixtures::purge();
-
-        self::$maxIdBefore = (int) WpCli::evaluate(
-            'global $wpdb; echo (int) $wpdb->get_var("SELECT COALESCE(MAX(id), 0) FROM " . wpmcp_table());'
-        );
 
         self::$userId = Fixtures::createUser(self::login(), 'administrator');
         self::$host   = WpCli::evaluate('echo strtolower((string) wp_parse_url(home_url(), PHP_URL_HOST));');
@@ -111,24 +114,9 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
-        foreach (self::$unprefixedIds as $id) {
-            WpCli::tryEvaluate(sprintf('wpmcp_revoke(%d); echo "ok";', $id));
-        }
+        Fixtures::revokeTokenIds(self::$unprefixedIds);
 
         self::$unprefixedIds = [];
-
-        // THE BACKSTOP for a run that failed between minting and reading the file back:
-        // every row this class's `mint` could have written carries the fixed dev label and
-        // an id above the one the table had when the class started. A developer's own row,
-        // labelled or not, is older than that and is never matched.
-        if (self::$maxIdBefore > 0) {
-            WpCli::tryEvaluate(sprintf(
-                'global $wpdb; echo (int) $wpdb->query($wpdb->prepare("DELETE FROM " . wpmcp_table()'
-                . ' . " WHERE label = %%s AND id > %%d", %s, %d));',
-                self::literal(self::DEV_LABEL),
-                self::$maxIdBefore
-            ));
-        }
 
         Fixtures::deleteUser(self::$userId);
 
@@ -364,16 +352,30 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
         return $path;
     }
 
-    /** @return array{0:int,1:string,2:string} */
+    /**
+     * @return array{0:int,1:string,2:string}
+     *
+     * Every `minted row N` the script prints is recorded before the caller sees the
+     * output, so a failure between here and the assertions still leaves teardown able to
+     * revoke exactly the rows this class caused - and nothing else.
+     */
     private function runScript(string $cmd, string $path, string $prefix): array
     {
-        return WpCli::evaluateWithStatus(sprintf(
+        $result = WpCli::evaluateWithStatus(sprintf(
             '%s putenv("DEVTOKENS_CMD=" . %s); putenv("DEVTOKENS_MCP_JSON=" . %s);'
             . ' require dirname((new ReflectionFunction("wpmcp_mint"))->getFileName()) . "/bin/dev-tokens.php";',
             $prefix,
             self::literal($cmd),
             self::literal($path)
         ));
+
+        if (preg_match_all('/minted row (\d+)/', $result[1], $m)) {
+            foreach ($m[1] as $id) {
+                self::$unprefixedIds[] = (int) $id;
+            }
+        }
+
+        return $result;
     }
 
     private function readSiteFile(string $path): string
