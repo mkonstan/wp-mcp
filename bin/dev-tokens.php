@@ -267,13 +267,32 @@ if (!function_exists('wpmcp_devtokens_main')) {
 
         $new = strtr($text, $replacements);
 
-        if (!copy($path, $backup) || file_put_contents($path, $new, LOCK_EX) !== strlen($new)) {
+        // BACKUP, THEN A WHOLE FILE AT ONCE. copy() first, so nothing is written unless a
+        // byte-identical copy already exists; then the new text goes to a temporary file
+        // beside the original and is RENAMED over it, because a truncating write that
+        // fails midway - a full disk, an editor holding the file open on Windows - would
+        // leave a half-written .mcp.json and no client able to read it (review round 1,
+        // S1). rename() within one directory replaces the file in one step.
+        $tmp    = $path . '.tmp-' . getmypid();
+        $failed = '';
+
+        if (!copy($path, $backup)) {
+            $failed = 'could not write the backup ' . $backup . '; the .mcp.json was not touched';
+        } elseif (file_put_contents($tmp, $new, LOCK_EX) !== strlen($new)) {
+            @unlink($tmp);
+            $failed = 'could not write ' . $tmp . '; the .mcp.json is unchanged and a backup is at ' . $backup;
+        } elseif (!rename($tmp, $path)) {
+            @unlink($tmp);
+            $failed = 'could not replace ' . $path . ' with the rewritten file; the previous file is unchanged and also copied to ' . $backup;
+        }
+
+        if ($failed !== '') {
             // Never leave a token live that nobody holds.
             foreach ($minted_ids as $id) {
                 wpmcp_revoke($id);
             }
 
-            fwrite(STDERR, 'dev-tokens: could not write the backup or the new .mcp.json; the new tokens were revoked.' . "\n");
+            fwrite(STDERR, 'dev-tokens: ' . $failed . '. The newly minted token(s) were revoked, so the old ones still work.' . "\n");
 
             return 1;
         }
