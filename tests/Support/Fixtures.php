@@ -1632,54 +1632,36 @@ final class Fixtures
     }
 
     /**
-     * The one piece of debris that is not a NAME: an opt-in switch left on.
+     * The two debris checks that are not a NAME: shared options a run could have left on.
      *
-     * '' when the sql-select switch is off, a report when it is on.
-     *
-     * WHY THIS ONE IS WORTH A CHECK. Every other fixture this suite makes carries the run
+     * WHY THEY ARE WORTH A CHECK. Every other fixture this suite makes carries the run
      * prefix, so it is findable and attributable. An option is a single shared value with
-     * no room for a prefix: turn `wpmcp_sql_enabled` on and you have turned it on for the
-     * site, for good, for every admin-scope token - and sql-select reads every table the
-     * WordPress database user can read, wp_users among them. A test run that left that
-     * behind would be the single most expensive thing this suite could do to a site.
+     * no room for a prefix.
      *
-     * SO NO TEST WRITES IT. SqlSelectTest arms the switch with a `pre_option_` filter in a
-     * mu-plugin, gated on a per-request header, and asserts the stored option is the same
-     * value afterwards as before. This check is the backstop for the day somebody reaches
-     * for update_option() instead, and for a run that was killed mid-test.
+     * `wpmcp_sql_enabled` IS A NOTICE, NOT DEBRIS (sprint 14b). No test writes it:
+     * SqlSelectTest arms the switch with a `pre_option_` filter in a mu-plugin, gated on a
+     * per-request header, and asserts the stored option is unchanged afterwards. So when
+     * it is ON, an operator switched it on - both local test sites keep SQL reads on for
+     * their dev MCP servers - and calling that debris turned every clean run red. It is
+     * still printed, because sql-select reads every table the database user can read and
+     * an operator should see that it is on; it no longer fails the check. The guard against
+     * a TEST writing it is SqlSelectTest's own before/after assertion.
      *
-     * An operator who turned the switch on deliberately on their own site will see this
-     * line too. That is the right trade: a false alarm costs one sentence, and the failure
-     * it guards against is silent.
+     * A `wpmcp-test-` KEY IN `wpmcp_meta_keys` IS STILL DEBRIS. The option is shared, but
+     * the keys inside it are fixture names, and one can only have come from a run: every
+     * meta test arms the list through a `pre_option_` filter, and the one settings round
+     * trip that writes the option restores the operator's value in the same process. This
+     * is the backstop for the run that was killed in between.
+     *
+     * @return array{notices: string, debris: string} each '' when there is nothing to say
      */
-    public static function switchesLeftOn(): string
+    public static function switchState(): array
     {
-        $report = '';
-
-        $value = trim(WpCli::evaluate(
+        $sqlOn = trim(WpCli::evaluate(
             'echo get_option("wpmcp_sql_enabled") ? "ON" : "OFF";'
-        ));
+        )) === 'ON';
 
-        if ($value === 'ON') {
-            $report .= "OPT-IN SWITCH LEFT ON.\n"
-                . "  option wpmcp_sql_enabled is ON - sql-select is exposed to every"
-                . " admin-scope token on this site.\n"
-                . "  No test in this suite writes that option (they filter it per request), so"
-                . " a suite run that turned it\n"
-                . "  on is a bug. Turn it off in Settings > WP MCP, or with"
-                . " `wp option update wpmcp_sql_enabled 0`.\n";
-        }
-
-        // THE OTHER SHARED VALUE, sprint 11: the meta allow-list. It has the same shape of
-        // problem - one option, no room for a run prefix - with one difference that makes
-        // it checkable: the KEYS inside it are fixture names, so a leftover is findable by
-        // the shared prefix even though the option itself is not.
-        //
-        // Every meta test arms the list through a `pre_option_` filter and writes nothing,
-        // exactly as SqlSelectTest does. The one test that DOES write the option is the
-        // settings round trip, which restores the operator's value in the same process.
-        // This is the backstop for the run that was killed in between.
-        $leftover = array_values(array_filter(array_map(
+        $keys = array_values(array_filter(array_map(
             'trim',
             preg_split('/\r\n|\r|\n/', WpCli::evaluate(
                 '$keys = get_option("wpmcp_meta_keys", array());'
@@ -1687,15 +1669,39 @@ final class Fixtures
             ))
         )));
 
+        return self::switchReports($sqlOn, $keys);
+    }
+
+    /** switchState()'s debris half: '' when no run left a key in the meta allow-list. */
+    public static function switchesLeftOn(): string
+    {
+        return self::switchState()['debris'];
+    }
+
+    /**
+     * switchState() without the site: what the two options' values mean. Pure, so both
+     * branches are tested everywhere (tests/unit/DebrisVerdictTest.php).
+     *
+     * @param list<string> $metaKeys the stored wpmcp_meta_keys
+     * @return array{notices: string, debris: string}
+     */
+    public static function switchReports(bool $sqlOn, array $metaKeys): array
+    {
+        $notices = '';
+        $debris  = '';
+
+        if ($sqlOn) {
+            $notices .= "NOTICE: option wpmcp_sql_enabled is ON - sql-select is exposed to every admin-scope token on this site.\n"
+                . "  No test writes that option (tests filter it per request), so an operator switched it on. Not debris.\n";
+        }
+
         $ours = array_values(array_filter(
-            $leftover,
+            array_map('strval', $metaKeys),
             static fn (string $k) => str_starts_with($k, self::PREFIX)
         ));
 
         if ($ours !== []) {
-            if ($report !== '') { $report .= "\n"; }
-
-            $report .= "FIXTURE META KEYS LEFT IN THE ALLOW-LIST.\n"
+            $debris .= "FIXTURE META KEYS LEFT IN THE ALLOW-LIST.\n"
                 . "  option wpmcp_meta_keys still names " . count($ours) . " test key(s), so"
                 . " get-post-meta and set-post-meta are\n"
                 . "  exposed on this site and can reach them:\n"
@@ -1704,7 +1710,28 @@ final class Fixtures
                 . " `wp option update wpmcp_meta_keys --format=json '[]'`.\n";
         }
 
-        return $report;
+        return ['notices' => $notices, 'debris' => $debris];
+    }
+
+    /**
+     * What bin/debris-check.php prints, and its exit code. Notices come first and never
+     * change the verdict; foreign fixtures or switch debris make it 1.
+     *
+     * @return array{0: int, 1: string} [exit code, output]
+     */
+    public static function debrisVerdict(string $foreign, string $notices, string $switchDebris): array
+    {
+        if ($foreign === '' && $switchDebris === '') {
+            return [0, $notices
+                . "debris-check: clean - no wpmcp-test-* users, posts, terms, menus, menu items, menu location assignments, tokens, mu-plugins,"
+                . " transients, theme files, upload files or file-version rows, and no test key left in the post-meta allow-list.\n"];
+        }
+
+        $out = $notices . $foreign;
+
+        if ($foreign !== '' && $switchDebris !== '') { $out .= "\n"; }
+
+        return [1, $out . $switchDebris];
     }
 
     /** foreignDebris() to STDERR, at most once per distinct report per process. */
@@ -1805,7 +1832,13 @@ final class Fixtures
     /**
      * Fixture-labelled token rows still in the table.
      *
-     * @return array<int, string> row id => label
+     * THE PREFIX ANYWHERE IN THE LABEL, not only at its start (sprint 14b). The G6 test
+     * mints a sentinel whose label carries the run prefix after other text, so that every
+     * prefix-anchored write in the harness treats it as a developer's row; a crashed run
+     * must still leave it findable. The value returned starts AT the prefix, so runIdIn(),
+     * ours() and foreign() read it like any other fixture name.
+     *
+     * @return array<int, string> row id => label, from the prefix on
      */
     public static function leftoverTokenLabels(): array
     {
@@ -1813,19 +1846,20 @@ final class Fixtures
             'global $wpdb; $rows = $wpdb->get_results($wpdb->prepare('
             . '"SELECT id, label FROM " . wpmcp_table() . " WHERE label LIKE %%s", %s));'
             . ' foreach ((array) $rows as $r) { echo (int) $r->id, "\t", $r->label, "\n"; }',
-            self::phpString(self::PREFIX . '%')
+            self::phpString('%' . self::PREFIX . '%')
         ));
 
         $found = array();
 
         foreach (explode("\n", $raw) as $line) {
             $parts = explode("\t", trim($line, "\r\n"));
+            $at    = count($parts) === 2 ? strpos($parts[1], self::PREFIX) : false;
 
-            if (count($parts) !== 2 || !str_starts_with($parts[1], self::PREFIX)) {
+            if ($at === false) {
                 continue;
             }
 
-            $found[(int) $parts[0]] = $parts[1];
+            $found[(int) $parts[0]] = substr($parts[1], $at);
         }
 
         return $found;

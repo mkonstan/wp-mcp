@@ -6,7 +6,8 @@
  *
  * Run it AFTER a suite run, and after a crashed one. Exit code 0 means the site is
  * clean; 1 means something prefixed `wpmcp-test-` is still there, and the listing says
- * what, of which kind, and which run id it carries.
+ * what, of which kind, and which run id it carries. A NOTICE line - SQL reads switched on
+ * by an operator - is printed above the verdict and does not change it.
  *
  * THIS PROCESS CREATES NOTHING, so it deliberately does not inherit a run id: it
  * invents its own, which makes every fixture on the site "foreign" and therefore
@@ -41,23 +42,18 @@ if ($reason !== '') {
     exit(2);
 }
 
-// TWO KINDS, and the second one has no name to match on: an opt-in surface is a shared
-// OPTION, so "did a run leave it on" cannot be answered by the run prefix. Two of them
-// now - the sql-select switch, and the post-meta allow-list, whose KEYS are prefixed even
-// though the option holding them is not. See Fixtures::switchesLeftOn().
-$report   = Fixtures::foreignDebris();
-$switches = Fixtures::switchesLeftOn();
+// TWO KINDS, and the second one has no name to match on: a shared OPTION, so "did a run
+// leave it on" cannot be answered by the run prefix. The post-meta allow-list's KEYS are
+// prefixed, so a leftover key is debris. The sql-select switch is not: no test writes it,
+// so when it is on an operator put it there, and it prints as a NOTICE that leaves the
+// verdict clean (sprint 14b). See Fixtures::switchState().
+$switches = Fixtures::switchState();
 
-if ($report === '' && $switches === '') {
-    echo "debris-check: clean - no wpmcp-test-* users, posts, terms, menus, menu items, menu location assignments, tokens, mu-plugins,"
-        . " transients, theme files, upload files or file-version rows, no opt-in switch"
-        . " left on, and no test key left in the post-meta allow-list.\n";
-    exit(0);
-}
+[$code, $output] = Fixtures::debrisVerdict(
+    Fixtures::foreignDebris(),
+    $switches['notices'],
+    $switches['debris']
+);
 
-echo $report;
-
-if ($report !== '' && $switches !== '') { echo "\n"; }
-
-echo $switches;
-exit(1);
+echo $output;
+exit($code);
