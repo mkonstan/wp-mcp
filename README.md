@@ -260,6 +260,13 @@ decided from their capabilities first; filters only narrow inside that.
 `modified` and `modified_gmt` as ISO 8601, `featured_image` as `{id, url}` or `null`,
 `terms` keyed by taxonomy with `{id, name, slug}` entries, and `revisions`.
 
+The title, like `content` and `excerpt`, is the stored column, not WordPress's display
+rendering, so quotes, apostrophes, ampersands and backslashes read back as stored. That is
+a promise about reading, not about a round trip: `update-post` strips HTML tags from a
+title, and for a caller without `unfiltered_html` WordPress's kses filter encodes some
+characters on the way in. A title holding tags or entities is not guaranteed to survive
+being read and written back unchanged.
+
 Three details in that list are decisions rather than data:
 
 - The author is a **display name** and an id. Never the login, which is half of a
@@ -341,12 +348,17 @@ it, that save is skipped and costs nothing.
   and terms are not revisioned and do not change. Status and date normally do not either,
   but a restore is an ordinary update, so WordPress re-derives the status: a scheduled post
   whose date has already passed is published, and a published post dated in the future
-  becomes scheduled. The text it replaces is saved first and the restored text becomes the
+  becomes scheduled. The text it replaces is kept as a revision first and the restored text becomes the
   newest revision, so the title, content and excerpt of a restore can be undone. The reply
-  gives `fields`, `pre_restore_revision_id` - the revision holding what the post said *before*
-  the call, which is the copy that undoes it - and `new_revision_id`, the revision holding the
-  *restored* text. Either is null when nothing needed saving: revisions are off for the post,
-  or it already held that text.
+  gives `fields`, `new_revision_id` - the revision holding the *restored* text - and
+  `pre_restore_revision_id`, a revision saved by this call of what the post said *before* it.
+  **`pre_restore_revision_id` is null in the ordinary case**: after any edit made through
+  these tools or wp-admin, the newest revision already holds the current text, so there is
+  nothing to save. The undo copy is then that revision - the newest non-autosave one
+  `list-revisions` showed before the restore. It is non-null only when the post was changed
+  without a revision, such as by an import or a direct database edit. `new_revision_id` is
+  null when the post already held the restored text. Both are null when revisions are off
+  for the post, because nothing could be saved.
 
 **A restore also brings back what WordPress and plugins keep with revisions, and not all of
 it can be taken back.** WordPress copies the meta it revisions (core's `footnotes`, and any

@@ -1683,10 +1683,13 @@ function wpmcp_core_tools() {
                 . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
                 . ' entry {id, name, slug}, and revisions - the number of stored'
                 . ' revisions, or null when the caller may read the post but not edit'
-                . ' it. title, content and excerpt are the stored columns byte for byte, so'
-                . ' what you read here can be written back unchanged; link is the rendered'
-                . ' permalink. A post the caller may not read, a post that is not there, and an'
-                . ' id of the wrong kind of thing all answer identically.',
+                . ' it. title, content and excerpt are the stored columns, not the display'
+                . ' rendering: quotes, apostrophes, ampersands and backslashes read back as'
+                . ' stored. Writing one back is not guaranteed unchanged: update-post strips'
+                . ' tags from a title, and without unfiltered_html WordPress encodes some'
+                . ' characters. link is the rendered permalink. A post the caller may not read,'
+                . ' a post that is not there, and an id of the wrong kind of thing all answer'
+                . ' identically.',
             'inputSchema' => array('type' => 'object',
                 'properties' => array('id' => array('type' => 'integer', 'description' => 'Post ID.')),
                 'required' => array('id')),
@@ -2117,8 +2120,9 @@ function wpmcp_revision_for_edit($revisionId) {
 
 /**
  * The fields of one revision every revision tool reports, in get-post's own conventions:
- * the title through get_the_title(), the date through wpmcp_iso_date(), and the author as
- * an id and a DISPLAY NAME - never the login, for get-post's reason.
+ * the title as the stored column through wpmcp_raw_title() - never get_the_title() - the
+ * date through wpmcp_iso_date(), and the author as an id and a DISPLAY NAME - never the
+ * login, for get-post's reason.
  */
 function wpmcp_revision_summary($revision) {
     $author = get_userdata((int) $revision->post_author);
@@ -2276,15 +2280,16 @@ function wpmcp_revision_tools() {
             . ' (integer, required). Copies back title, content and excerpt, plus revisioned'
             . ' meta - footnotes and ACF fields. Author, slug and terms stay; status is'
             . ' re-derived as on any update, so a scheduled post whose date has passed is'
-            . ' published. The current text is saved as a revision first, so it can be put'
+            . ' published. The current text is kept as a revision first, so it can be put'
             . ' back; that copy holds no ACF values, so an ACF rewind is not undoable here.'
             . ' Refused, saying why, while another user is editing the post, or when revisions'
             . ' are off for it and this is not an autosave. Returns id, restored_from, fields'
-            . ' (the post columns only), autosave, pre_restore_revision_id - the revision'
-            . ' holding what the post said BEFORE this call, the one that undoes it - and'
-            . ' new_revision_id, holding the RESTORED text. Either is null when nothing needed'
-            . ' saving. Needs permission to edit the post; anything else answers like a'
-            . ' missing id.',
+            . ' (post columns only), autosave, new_revision_id (the RESTORED text, null if'
+            . ' the post held it) and pre_restore_revision_id (the text BEFORE). That is'
+            . ' usually null: after any edit here or in wp-admin, the newest non-autosave'
+            . ' revision list-revisions showed before the call holds it and is the undo'
+            . ' copy. Both are null with revisions off.'
+            . ' Needs permission to edit the post; anything else answers like a missing id.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'revision_id' => array('type' => 'integer', 'description' => 'Revision ID, from list-revisions.'),
         ), 'required' => array('revision_id')),
@@ -2318,7 +2323,9 @@ function wpmcp_revision_tools() {
             // with the parent's id, and not at all when the text already matched.
             //
             //   the BASELINE, from wp_save_post_revision() below, holds what the post said
-            //   BEFORE this restore - that is the copy that makes the restore undoable;
+            //   BEFORE this restore - but it is stored only when no revision holds that text
+            //   yet, which is rare: after any edit through these tools or wp-admin the newest
+            //   non-autosave revision already does, is the undo copy, and $baseline is null;
             //   the one core stores inside wp_restore_post_revision() holds the RESTORED
             //   text, and that is what `new_revision_id` has always reported.
             //

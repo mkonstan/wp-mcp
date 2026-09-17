@@ -228,6 +228,9 @@ admin can renew them for thirty days from when they were minted - see below.
   `A\B &#8220;quoted&#8221;`, so a client that read a title and wrote it back corrupted the
   post - and straight quotes, apostrophes and ampersands make that routine. Content and
   excerpt were always the stored columns; titles now match them. Found on a live site.
+  Reading is now exact; a round trip still passes through the write side, where
+  `update-post` strips HTML tags from a title and, for a caller without `unfiltered_html`,
+  WordPress's kses filter encodes some characters.
 - **A menu item's label** now follows the linked page's stored title rather than the filtered
   one, in `get-menu`.
 - **No more `Private: ` and `Protected: ` prefixes** on the titles of private and
@@ -243,10 +246,13 @@ admin can renew them for thirty days from when they were minted - see below.
 
 ### Changed: `restore-revision` names both revisions it can store
 
-- The reply now carries `pre_restore_revision_id` - the revision holding what the post said
-  *before* the call, which is the copy that undoes it - beside `new_revision_id`, which holds
-  the *restored* text. The description said the current text is saved first but named only one
-  id, so the two were easy to confuse.
+- The reply now carries `pre_restore_revision_id` - a revision this call saved of what the
+  post said *before* it - beside `new_revision_id`, which holds the *restored* text. The
+  description said the current text is saved first but named only one id, so the two were
+  easy to confuse. `pre_restore_revision_id` is null in the ordinary case: after any edit
+  made through these tools or wp-admin, the newest non-autosave revision already holds the
+  current text, and that revision, as `list-revisions` showed it before the restore, is the
+  undo copy. Both ids are null when revisions are off for the post.
 
 ### Fixed: every write tool dropped a backslash (since 1.0.0)
 
