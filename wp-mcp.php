@@ -1179,6 +1179,38 @@ function wpmcp_mint($scope, $label, $window_secs, $lifetime_secs, $user_id = 0) 
 }
 
 /**
+ * When this row's active window actually ends ON THIS SITE, as a UNIX time.
+ *
+ * THE CAP HAS TO HOLD WHERE A TOKEN IS USED, not only where one is written (sprint 14b
+ * round 2, review B1). Mint and renew clamp to wpmcp_max_window(), so no row minted or
+ * renewed HERE can carry more than this site's ceiling - but a row does not have to have
+ * been written here. Copying a local database to staging or production, token table and
+ * all, is the ordinary WordPress workflow, and every 30-day row in it would otherwise go
+ * on answering there for the rest of those thirty days: the number SECURITY.md calls the
+ * bound on a leaked token would be one this site never agreed to.
+ *
+ * So the window is read as min(window_secs, wpmcp_max_window()) counted from the moment
+ * it last started - active_until minus the grant - and whatever a row was granted beyond
+ * this site's ceiling is subtracted from its end. On a local site nothing is subtracted,
+ * and a row inside the ceiling is untouched everywhere.
+ *
+ * NOTHING IS DELETED OR REVOKED. Such a row is simply DORMANT, which is the state the
+ * model already has for "the window closed": the operator presses Renew and gets a
+ * twelve-hour window on this site, without the token changing.
+ *
+ * Renew stores the clamp it applies (see wpmcp_renew), so a row it wrote is consistent:
+ * without that, a twelve-hour active_until beside a thirty-day grant would read here as
+ * dormant the instant Renew wrote it.
+ */
+function wpmcp_effective_active_until($row) {
+    $until  = strtotime($row->active_until . ' UTC');
+    $window = (int) $row->window_secs;
+    $cap    = wpmcp_max_window();
+
+    return $window > $cap ? $until - ($window - $cap) : $until;
+}
+
+/**
  * Which of the three states a token row is in, right now.
  *
  *   active   inside its window - the only state that answers
@@ -1192,12 +1224,16 @@ function wpmcp_mint($scope, $label, $window_secs, $lifetime_secs, $user_id = 0) 
  * A row whose lifetime has passed is DEAD whatever its window says: renewing a window
  * cannot reach past the hard end, so a row in that shape is a bug elsewhere and dead is
  * the safe reading of it.
+ *
+ * THE WINDOW IS THIS SITE'S, not the column's: wpmcp_effective_active_until() shortens a
+ * row granted more than this site's ceiling allows, which is what makes a copied database
+ * behave here the way a token minted here would.
  */
 function wpmcp_token_state($row) {
     $now = time();
 
-    if (strtotime($row->expires_at . ' UTC') <= $now)   { return 'dead'; }
-    if (strtotime($row->active_until . ' UTC') <= $now) { return 'dormant'; }
+    if (strtotime($row->expires_at . ' UTC') <= $now) { return 'dead'; }
+    if (wpmcp_effective_active_until($row) <= $now)   { return 'dormant'; }
 
     return 'active';
 }
@@ -1352,7 +1388,9 @@ function wpmcp_validate($raw, $ip) {
  * one press at a time.
  *
  * AND IT CANNOT HAND OUT A WINDOW LONGER THAN wpmcp_max_window(), whatever the row says:
- * twelve hours, or thirty days on a local site. See the comment on the clamp below.
+ * twelve hours, or thirty days on a local site. It also STORES that clamp when it has to
+ * apply one, so the row it leaves is consistent with how the window is read on use. See
+ * the comment on the clamp below.
  *
  * A DEAD ROW IS REFUSED rather than quietly clamped to its own end. Setting
  * active_until = expires_at on a row whose expires_at is in the past would "succeed" and
@@ -1405,11 +1443,26 @@ function wpmcp_renew($id) {
     $lifetime = strtotime($row->expires_at . ' UTC');
     $until    = gmdate('Y-m-d H:i:s', min(time() + $window, $lifetime));
 
+    // AND IT STORES A CLAMP IT HAD TO APPLY, and only then (sprint 14b round 2). The
+    // window is read on use as the grant capped by this site's ceiling
+    // (wpmcp_effective_active_until), so a row left holding a thirty-day grant beside the
+    // twelve-hour active_until this renew just wrote would read as dormant the instant it
+    // was written - Renew would be a button that changes nothing. Writing the clamped
+    // grant makes the row say what this site actually gave it. A window inside the
+    // ceiling is not rewritten, so an ordinary renew still touches active_until alone.
+    $data    = array('active_until' => $until);
+    $formats = array('%s');
+
+    if ($window !== (int) $row->window_secs) {
+        $data['window_secs'] = $window;
+        $formats[]           = '%d';
+    }
+
     $wpdb->update(
         wpmcp_table(),
-        array('active_until' => $until),
+        $data,
         array('id' => $id),
-        array('%s'), array('%d')
+        $formats, array('%d')
     );
 
     wpmcp_auth_event('renew', array(
@@ -1446,12 +1499,23 @@ function wpmcp_revoke($id) {
     return $deleted;
 }
 
-/** How many tokens are ACTIVE - inside their window, and therefore answering. */
+/**
+ * How many tokens are ACTIVE - inside their window, and therefore answering.
+ *
+ * The window is this site's, exactly as wpmcp_effective_active_until() reads it: a row
+ * granted more than this site's ceiling counts as answering only for the ceiling. Nothing
+ * in the plugin calls this today; it is kept in step because "how many tokens answer"
+ * must not have two different answers in one codebase.
+ */
 function wpmcp_active_count() {
     global $wpdb;
+    $cap = (int) wpmcp_max_window();
+
     return (int) $wpdb->get_var(
         'SELECT COUNT(*) FROM ' . wpmcp_table()
-        . ' WHERE active_until > UTC_TIMESTAMP() AND expires_at > UTC_TIMESTAMP()'
+        . ' WHERE active_until - INTERVAL GREATEST(CAST(window_secs AS SIGNED) - '
+        . $cap . ', 0) SECOND > UTC_TIMESTAMP()'
+        . ' AND expires_at > UTC_TIMESTAMP()'
     );
 }
 

@@ -367,8 +367,21 @@ function wpmcp_render_admin() {
                 : '<em>' . esc_html('deleted user #' . (int) $r->user_id) . '</em>'; ?></td>
             <td><?php echo esc_html($r->scope); ?></td>
             <td><?php echo esc_html(str_replace('_', ' ', $status)); ?></td>
-            <td><?php echo esc_html($r->active_until); ?>
-                <span class="description">(<?php echo esc_html(wpmcp_format_duration($r->window_secs)); ?>)</span></td>
+            <?php
+            // THE WINDOW THIS SITE HONOURS, not the one the column happens to hold
+            // (sprint 14b round 2). A row copied in from a site with a wider ceiling - a
+            // local development database moved to staging - stops answering earlier here
+            // than its own column says, and an operator reading this table has to see the
+            // moment the endpoint will actually use, or "dormant" looks like a bug.
+            $honoured = min((int) $r->window_secs, wpmcp_max_window());
+            $ends     = gmdate('Y-m-d H:i:s', wpmcp_effective_active_until($r));
+            ?>
+            <td><?php echo esc_html($ends); ?>
+                <span class="description">(<?php echo esc_html(wpmcp_format_duration($honoured)); ?><?php
+                    if ($honoured !== (int) $r->window_secs) {
+                        echo esc_html(', capped from ' . wpmcp_format_duration((int) $r->window_secs) . ' by this site');
+                    }
+                ?>)</span></td>
             <td><?php echo esc_html($r->expires_at); ?></td>
             <td><?php echo esc_html($r->last_used_at ? $r->last_used_at : '-'); ?></td>
             <td><?php echo (int) $r->use_count; ?></td>
