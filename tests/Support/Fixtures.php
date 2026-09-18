@@ -1453,6 +1453,85 @@ final class Fixtures
     }
 
     /**
+     * Remember a directory this run writes OUTSIDE the database, so a killed run leaves a
+     * name behind (round 3, review R2-1).
+     *
+     * WHY A TRANSIENT AND NOT A LISTING. One test writes a `.mcp.json` for
+     * bin/dev-tokens.php, and that file holds raw fixture tokens. It goes under the site's
+     * temp directory, which is not served over the web - but on this machine that
+     * directory is `C:\Windows\TEMP`, which the site's user may WRITE and may not
+     * ENUMERATE: `scandir()` returns false and `glob()` returns an empty array there
+     * (measured). So no debris check can find such a file by looking. This records the
+     * path in a fixture-named transient instead, which the debris check already lists and
+     * purge() already removes - and the value tells a human exactly which file to delete.
+     *
+     * The uploads directory would be listable and is the wrong answer: it is served over
+     * the web, and a file of live tokens under a URL is the trap SECURITY.md's own backup
+     * story is about.
+     */
+    public static function noteTempPath(string $path): void
+    {
+        WpCli::tryEvaluate(sprintf(
+            '$k = %s; $paths = (array) get_transient($k); $paths[] = %s;'
+            . ' echo (int) set_transient($k, array_values(array_unique($paths)), DAY_IN_SECONDS);',
+            self::phpString(self::name('tempfile')),
+            self::phpString($path)
+        ));
+    }
+
+    /**
+     * Every remembered path still on the site, by the transient that names it.
+     *
+     * @return array<string, list<string>> transient name => the paths it remembers
+     */
+    public static function leftoverTempPaths(): array
+    {
+        $raw = WpCli::evaluate(sprintf(
+            'global $wpdb; $names = $wpdb->get_col($wpdb->prepare('
+            . '"SELECT option_name FROM $wpdb->options WHERE option_name LIKE %%s", %s));'
+            . ' foreach ((array) $names as $n) { $t = substr($n, strlen("_transient_"));'
+            . ' foreach ((array) get_transient($t) as $p) { echo $t, "\t", (string) $p, "\n"; } }',
+            self::phpString('_transient_' . self::PREFIX . '%-tempfile')
+        ));
+
+        $found = array();
+
+        foreach (explode("\n", $raw) as $line) {
+            $parts = explode("\t", trim($line, "\r\n"));
+
+            if (count($parts) === 2 && str_starts_with($parts[0], self::PREFIX) && $parts[1] !== '') {
+                $found[$parts[0]][] = $parts[1];
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Delete every remembered path, the directories they sat in, and the transient itself.
+     *
+     * BY EXACT PATH, never by listing. On this machine the site's temp directory refuses
+     * enumeration even for a directory the site itself created - `glob()` answers an empty
+     * array and `scandir()` false, while `unlink()` on a known name succeeds (measured) -
+     * so a cleanup that globbed removed nothing and said nothing.
+     *
+     * @param list<string> $paths
+     */
+    public static function forgetTempPath(string $transient, array $paths): void
+    {
+        self::assertPrefixed($transient);
+
+        $php = '';
+
+        foreach ($paths as $path) {
+            $php .= '$p = ' . self::phpString((string) $path) . ';'
+                . ' if (is_file($p)) { @unlink($p); } @rmdir(is_dir($p) ? $p : dirname($p));';
+        }
+
+        WpCli::tryEvaluate($php . ' echo (int) delete_transient(' . self::phpString($transient) . ');');
+    }
+
+    /**
      * Revoke token rows BY ID - the only shape in which a test may delete a row whose
      * label it does not own (round 2, review S3).
      *
@@ -1544,6 +1623,16 @@ final class Fixtures
             self::deleteThemeDir((string) $relative);
         }
 
+        // The site's temp directory: one test writes a .mcp.json of fixture tokens there,
+        // and remembers the path in a transient because that directory cannot be listed.
+        // Keyed by the TRANSIENT, so ours()/foreign() - which read the value - cannot be
+        // used here: the value is a path, and a path does not start with the run prefix.
+        foreach (self::leftoverTempPaths() as $transient => $paths) {
+            if (str_starts_with((string) $transient, self::runPrefix())) {
+                self::forgetTempPath((string) $transient, (array) $paths);
+            }
+        }
+
         WpCli::tryEvaluate(sprintf(
             'if (!function_exists("wpmcp_versions_table")) { return; }'
             . ' global $wpdb; echo (int) $wpdb->query($wpdb->prepare('
@@ -1555,6 +1644,14 @@ final class Fixtures
         MuPlugin::removeOurs();
 
         foreach (self::ours(self::leftoverTransients()) as $name) {
+            // NOT the marker that names what this run wrote outside the database: it is
+            // deleted by forgetTempPath() above, once the files it names are gone. Deleting
+            // it here as well would mean a failed file cleanup lost the only record of
+            // where those files are - which is the whole point of the marker.
+            if (str_ends_with($name, '-tempfile')) {
+                continue;
+            }
+
             WpCli::tryEvaluate(sprintf('echo (int) delete_transient(%s);', self::phpString($name)));
         }
 
@@ -1622,6 +1719,16 @@ final class Fixtures
             $lines[] = '  upload file       ' . $relative;
         }
 
+        foreach (self::leftoverTempPaths() as $transient => $paths) {
+            if (str_starts_with((string) $transient, self::runPrefix())) {
+                continue;
+            }
+
+            foreach ((array) $paths as $path) {
+                $lines[] = '  temp file         ' . $path . ' (may hold raw fixture tokens; named by transient ' . $transient . ')';
+            }
+        }
+
         foreach (self::foreign(self::leftoverFileVersions()) as $id => $path) {
             $lines[] = sprintf('  version %-5s     %s', (string) $id, $path);
         }
@@ -1640,6 +1747,10 @@ final class Fixtures
             array_values(self::foreign(self::leftoverTransients())),
             array_values(self::foreign(self::leftoverThemeFiles())),
             array_values(self::foreign(self::leftoverUploadFiles())),
+            array_values(self::foreign(array_combine(
+                array_keys(self::leftoverTempPaths()),
+                array_keys(self::leftoverTempPaths())
+            ) ?: array())),
             array_values(self::foreign(self::leftoverFileVersions())),
             array_values(self::foreign(self::leftoverMenuItems())),
             array_values(self::foreign(self::leftoverMenuLocations()))
@@ -1899,9 +2010,13 @@ final class Fixtures
             $name = substr($parts[1], $at);
 
             // An operator's own label that merely CONTAINS the prefix is not debris
-            // (review round 1, S6). Keep a row only when the prefix starts the label -
-            // the legacy pre-run-id name - or is followed by this harness's shape, eight
-            // hex digits and a dash.
+            // (review round 1, S6). Keep a row when the prefix STARTS the label - whatever
+            // follows, so a bare `wpmcp-test-` name from before run ids is still reported -
+            // or when the prefix sits later in the label AND carries this harness's shape,
+            // eight hex digits and a dash. What that leaves invisible is exactly one shape:
+            // the prefix after the first character with no run id behind it, which no
+            // fixture name has. Round 2's report called this hole wider than it is
+            // (review round 3, R2-5).
             if ($at !== 0 && self::runIdIn($name) === '') {
                 continue;
             }
