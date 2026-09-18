@@ -187,6 +187,71 @@ final class UpdatePostContractTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * G5, round 2: the SECOND unsent change. A status-only update that PUBLISHES a post
+     * with no slug makes core derive one from the title, and `changed` has to say so.
+     *
+     * Round 1's README claimed "exactly one exception" to "only the fields you send
+     * change" and a review doubted it. MEASURED on the bare site before this was written:
+     * `draft -> publish` slugs a slug-less post; `draft -> pending` does not, because
+     * core fills post_name only when the status leaves the draft/pending set; and a post
+     * that already has a slug keeps it.
+     *
+     * @group sprint-14c
+     */
+    public function testPublishingASlugLessDraftDerivesASlugAndSaysSo(): void
+    {
+        $slugless = $this->newPost([
+            'post_title'  => Fixtures::name('updpost-slugless one two'),
+            'post_status' => 'draft',
+        ]);
+
+        self::assertSame(
+            '',
+            Fixtures::postField($slugless, 'post_name'),
+            'The fixture draft was created with a slug, so the case under test is not the'
+            . ' one being measured.'
+        );
+
+        $data = $this->update($slugless, ['status' => 'publish']);
+
+        self::assertNotSame('', Fixtures::postField($slugless, 'post_name'), 'no slug was derived');
+        self::assertContains('status', $data['changed'] ?? []);
+        self::assertContains(
+            'slug',
+            $data['changed'] ?? [],
+            'Publishing derived a slug and `changed` did not name it, so a caller reading'
+            . ' the result does not know the post has a URL it never chose. changed: '
+            . implode(', ', (array) ($data['changed'] ?? []))
+        );
+
+        // `pending` is NOT a publish: core leaves the slug empty, so nothing is claimed.
+        $pending = $this->newPost([
+            'post_title'  => Fixtures::name('updpost-slugless three'),
+            'post_status' => 'draft',
+        ]);
+        $data = $this->update($pending, ['status' => 'pending']);
+
+        self::assertSame('', Fixtures::postField($pending, 'post_name'));
+        self::assertNotContains(
+            'slug',
+            $data['changed'] ?? [],
+            'changed named `slug` on a move to pending, where core derives none.'
+        );
+
+        // A post that already has a slug keeps it, and is not reported either.
+        $chosen = $this->newPost([
+            'post_title'  => Fixtures::name('updpost-slugged four'),
+            'post_status' => 'draft',
+            'post_name'   => Fixtures::name('updpost-chosen-slug'),
+        ]);
+        $before = Fixtures::postField($chosen, 'post_name');
+        $data   = $this->update($chosen, ['status' => 'publish']);
+
+        self::assertSame($before, Fixtures::postField($chosen, 'post_name'));
+        self::assertNotContains('slug', $data['changed'] ?? []);
+    }
+
+    /**
      * G5. The revision an edit creates holds the NEW text; the pre-edit text is the one
      * below it, and that is the one restore-revision undoes to.
      *
@@ -272,8 +337,19 @@ final class UpdatePostContractTest extends FixtureIntegrationTestCase
         );
 
         self::assertStringContainsString('re-dates', $update, 'update-post no longer names the re-dating case.');
+        self::assertStringContainsString('slugs a slug-less', $update, 'update-post no longer names the slug case.');
         self::assertStringContainsString('NEWEST revision', $update, 'update-post no longer says which revision is which.');
         self::assertStringContainsString('pre-edit', $update, 'update-post no longer names the undo copy.');
+        // Round 2: the revision sentence must be conditional on a TEXT change, because a
+        // status-only, terms-only or same-text update creates no revision at all and the
+        // "one below" is then some earlier edit's.
+        self::assertStringContainsString(
+            'TEXT change',
+            $update,
+            'update-post claims a revision for every update again. An agent that "undid" a'
+            . ' status change by restoring the revision below the newest would rewind'
+            . ' content it never touched.'
+        );
         self::assertStringContainsString('restore-revision', $update);
 
         self::assertStringContainsString(

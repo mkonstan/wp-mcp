@@ -127,6 +127,11 @@ final class BuildStampTest extends TestCase
             'over forty chars'  => str_repeat('a', 41),
             'empty'             => '',
             'leading dash'      => '-deadbee',
+            // The unknown word matches the pattern perfectly well, so it has to be
+            // refused by name. Otherwise a hand-edited `short=source`, or a filter
+            // returning it, renders "build `source` - the commit this zip was built
+            // from": a sentence about a build that does not exist.
+            'the unknown word'  => \WPMCP_BUILD_UNKNOWN,
         ];
 
         foreach ($refused as $why => $value) {
@@ -145,6 +150,45 @@ final class BuildStampTest extends TestCase
         foreach (['04fd033', '04fd0331899d8f8d6e7e41bf90710e929d13cfd8', 'r2026.09.18+4'] as $ok) {
             self::assertTrue(\wpmcp_build_id_valid($ok), "A real build id was refused: {$ok}");
         }
+    }
+
+    /**
+     * The placeholder guard is NOT redundant with the shape check, and this is the case
+     * that shows it: the parse is a fold over lines and keys are last-wins, while the
+     * shape check runs once, on the last value.
+     *
+     * Round 1 reported this guard as unobservable and said so in the code, in the report
+     * and in the KB. All three were wrong, and a review found the case. What the guard
+     * buys is the first row below - a stamped build whose file has had a placeholder line
+     * appended still reports the build it was cut from. What it costs is the second: a
+     * checkout with a valid line ABOVE the placeholder claims that build. Both take a
+     * hand edit; `git archive` substitutes in place and never duplicates a key.
+     *
+     * @group sprint-14c
+     */
+    public function testTheGuardDecidesWhichOfTwoValuesForOneKeyWins(): void
+    {
+        $placeholder = '$' . 'Format:%h' . '$';
+
+        self::assertSame(
+            '04fd033',
+            \wpmcp_build_stamp_parse("short=04fd033\nshort={$placeholder}\n")['short'],
+            'A placeholder line appended below a real one erased the build. Without the'
+            . ' guard the placeholder wins the fold and the shape check then empties it,'
+            . ' so the zip falls back to reporting `source`.'
+        );
+
+        self::assertSame(
+            '04fd033',
+            \wpmcp_build_stamp_parse("short={$placeholder}\nshort=04fd033\n")['short'],
+            'Last-wins for two real values is unaffected by the guard.'
+        );
+
+        self::assertSame(
+            'aaaaaaa',
+            \wpmcp_build_stamp_parse("short=04fd033\nshort=aaaaaaa\n")['short'],
+            'Two valid values for one key: the last one wins, as every other key does.'
+        );
     }
 
     /**
@@ -189,16 +233,29 @@ final class BuildStampTest extends TestCase
     }
 
     /**
-     * The filter is a seam for a packager that stamps some other way - and it cannot
-     * put a sentence, a version or an empty string on the admin page or on the wire.
+     * The filter is SHAPE-CONSTRAINED, not narrow-only, and the round-1 test name said
+     * otherwise. It is a seam for a packager that stamps some other way, and PHP on the
+     * site can use it to make a checkout claim any build it likes - which is what the
+     * gate's own G2 does. What the shape check guarantees is only that whatever appears
+     * on the admin page and on the wire LOOKS like a build id: never a sentence, a
+     * version, the unknown word, or an empty string.
      *
      * @group sprint-14c
      */
-    public function testTheFilterMaySetABuildIdAndMayNotInventOne(): void
+    public function testTheFilterMaySetAnyBuildIdThatLooksLikeOne(): void
     {
         WordPressRuntime::addFilter('wpmcp_build_id', static fn () => 'deadbee');
         self::assertSame('deadbee', \wpmcp_build_id());
         self::assertSame('deadbee', \wpmcp_build_label());
+
+        WordPressRuntime::addFilter('wpmcp_build_id', static fn () => \WPMCP_BUILD_UNKNOWN);
+        self::assertSame(
+            'source',
+            \wpmcp_build_label(),
+            'The word survives as if it were a build id, so the settings page would call'
+            . ' it "the commit this zip was built from".'
+        );
+        self::assertSame('', \wpmcp_build_id());
 
         WordPressRuntime::addFilter('wpmcp_build_id', static fn () => 'not a build id');
         self::assertSame('', \wpmcp_build_id());
@@ -206,6 +263,46 @@ final class BuildStampTest extends TestCase
 
         WordPressRuntime::addFilter('wpmcp_build_id', static fn () => null);
         self::assertSame('source', \wpmcp_build_label());
+    }
+
+    /**
+     * The date belongs to the build in the FILE, so a filtered id is shown without one.
+     *
+     * A PURE FUNCTION, BECAUSE THE INTERESTING CASE CANNOT EXIST ON A CHECKOUT: build.txt
+     * here carries no date at all, so asserting `wpmcp_build_date() === ''` on this
+     * machine passes whatever the rule is - the first version of this test did exactly
+     * that and a mutation of the rule stayed green. This one hands the decision a stamp
+     * that has a date.
+     *
+     * @group sprint-14c
+     */
+    public function testAFilteredBuildIdIsShownWithoutTheFileSDate(): void
+    {
+        $stamp = \wpmcp_build_stamp_parse(self::SUBSTITUTED);
+
+        self::assertSame(
+            '2026-09-18T10:15:23-04:00',
+            \wpmcp_build_date_of($stamp, '04fd033'),
+            "The build in the file is the one being reported, so it is shown with the"
+            . ' file\'s own date.'
+        );
+        self::assertSame(
+            '',
+            \wpmcp_build_date_of($stamp, 'deadbee'),
+            'A build id that did not come from this file was shown beside this file\'s'
+            . " date - two builds on one line, which is the class of lie this sprint"
+            . ' exists to remove.'
+        );
+        self::assertSame(
+            '',
+            \wpmcp_build_date_of($stamp, ''),
+            'A copy with no build at all was given a date.'
+        );
+        self::assertSame(
+            '',
+            \wpmcp_build_date_of(['commit' => '', 'short' => 'abc1234', 'date' => ''], 'abc1234'),
+            'A stamp with no date produced one.'
+        );
     }
 
     /**
@@ -282,14 +379,19 @@ final class BuildStampTest extends TestCase
             . ' list, so the zip a human builds from it reports `source`.'
         );
 
+        $workflow = (string) file_get_contents(\WPMCP_PLUGIN_DIR . '/.github/workflows/release.yml');
+
         self::assertTrue(
-            str_contains(
-                (string) file_get_contents(\WPMCP_PLUGIN_DIR . '/.github/workflows/release.yml'),
-                'git archive --format=tar HEAD build.txt'
-            ),
+            str_contains($workflow, 'git archive --format=tar HEAD build.txt'),
             'The release workflow no longer takes build.txt from `git archive`, so the'
             . ' published zip carries the unsubstituted placeholders - `cp` cannot'
             . ' substitute them.'
+        );
+        self::assertTrue(
+            str_contains($workflow, 'tar -xf - -C dist/stamp'),
+            'The stamping step no longer passes `-f -`. A bare `tar -x` reads stdin only'
+            . ' because GNU tar on Debian and Ubuntu is built that way; on another runner'
+            . ' image, or with bsdtar, it reads a tape device and the release dies there.'
         );
     }
 
