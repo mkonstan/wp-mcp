@@ -1517,6 +1517,12 @@ final class Fixtures
         return $found;
     }
 
+    /** Does this path exist on the site? By exact name, which is all that works here. */
+    public static function pathExists(string $path): bool
+    {
+        return WpCli::evaluate(sprintf('echo file_exists(%s) ? "1" : "0";', self::phpString($path))) === '1';
+    }
+
     /**
      * Delete every remembered path and the directories they sat in, and forget ONLY what is
      * really gone.
@@ -1748,13 +1754,19 @@ final class Fixtures
             $lines[] = '  upload file       ' . $relative;
         }
 
+        // Only paths that are STILL THERE. A marker whose files are gone but whose row
+        // survived - a crashed cleanup, a hand removal by path - would otherwise send a
+        // reader hunting for a file that does not exist. The row itself is still reported,
+        // as a foreign transient, which is the honest way round.
         foreach (self::leftoverTempPaths() as $transient => $paths) {
             if (str_starts_with((string) $transient, self::runPrefix())) {
                 continue;
             }
 
             foreach ((array) $paths as $path) {
-                $lines[] = '  temp file         ' . $path . ' (may hold raw fixture tokens; named by transient ' . $transient . ')';
+                if (self::pathExists((string) $path)) {
+                    $lines[] = '  temp file         ' . $path . ' (may hold raw fixture tokens; named by transient ' . $transient . ')';
+                }
             }
         }
 
