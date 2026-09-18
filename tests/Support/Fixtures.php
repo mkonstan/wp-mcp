@@ -1542,9 +1542,19 @@ final class Fixtures
      * would otherwise fail its `rmdir` while those files were still there, and be recorded
      * as a survivor of a cleanup that in fact worked.
      *
+     * AND THREE TRIES, 200 ms apart (round 5, review R4-1). On Windows a delete is not
+     * final while any handle is open: Defender or the search indexer opening the file this
+     * suite has just written keeps its directory entry alive for a moment, so the `rmdir`
+     * microseconds later fails, the marker correctly keeps the path, and a test that had
+     * every right to expect an empty directory goes red. That is the one unexplained
+     * failure of round 4 - 29 tests, 309 assertions - diagnosed by the reviewer. The retry
+     * costs nothing when the first pass works, and a path that outlives all three tries is
+     * still reported as a survivor: this waits for the race, it does not hide a leak.
+     *
      * @param list<string> $paths
+     * @return list<string> the paths that were STILL there when it gave up
      */
-    public static function forgetTempPath(string $transient, array $paths): void
+    public static function forgetTempPath(string $transient, array $paths): array
     {
         self::assertPrefixed($transient);
 
@@ -1554,15 +1564,23 @@ final class Fixtures
             $list .= ($list === '' ? '' : ', ') . self::phpString((string) $path);
         }
 
-        WpCli::tryEvaluate(
+        $out = WpCli::tryEvaluate(
             '$paths = array(' . $list . ');'
-            . ' foreach ($paths as $p) { if (is_file($p)) { @unlink($p); } }'
-            . ' foreach ($paths as $p) { @rmdir(is_dir($p) ? $p : dirname($p)); }'
-            . ' $left = array_values(array_filter($paths, "file_exists"));'
+            . ' $left = $paths;'
+            . ' for ($try = 0; $try < 3 && $left; $try++) {'
+            . '  if ($try > 0) { usleep(200000); }'
+            . '  clearstatcache();'
+            . '  foreach ($paths as $p) { if (is_file($p)) { @unlink($p); } }'
+            . '  foreach ($paths as $p) { @rmdir(is_dir($p) ? $p : dirname($p)); }'
+            . '  clearstatcache();'
+            . '  $left = array_values(array_filter($paths, "file_exists"));'
+            . ' }'
             . ' $k = ' . self::phpString($transient) . ';'
-            . ' echo $left ? ("kept " . count($left)) : (int) delete_transient($k);'
-            . ' if ($left) { set_transient($k, $left, 0); }'
+            . ' if ($left) { set_transient($k, $left, 0); } else { delete_transient($k); }'
+            . ' foreach ($left as $p) { echo $p, "\n"; }'
         );
+
+        return array_values(array_filter(array_map('trim', explode("\n", $out))));
     }
 
     /**
@@ -1754,19 +1772,22 @@ final class Fixtures
             $lines[] = '  upload file       ' . $relative;
         }
 
-        // Only paths that are STILL THERE. A marker whose files are gone but whose row
-        // survived - a crashed cleanup, a hand removal by path - would otherwise send a
-        // reader hunting for a file that does not exist. The row itself is still reported,
-        // as a foreign transient, which is the honest way round.
+        // Every remembered path, and whether it is still there. A marker whose files are
+        // gone but whose row survived - a crashed cleanup, a hand removal by path - must
+        // not send a reader hunting for a file that does not exist; but dropping the line
+        // altogether hid the fact that something was remembered and could not be checked,
+        // which is a silence a debris report has no business keeping (round 5, review
+        // R4-3). `file_exists()` false can also mean "this process may not stat it".
         foreach (self::leftoverTempPaths() as $transient => $paths) {
             if (str_starts_with((string) $transient, self::runPrefix())) {
                 continue;
             }
 
             foreach ((array) $paths as $path) {
-                if (self::pathExists((string) $path)) {
-                    $lines[] = '  temp file         ' . $path . ' (may hold raw fixture tokens; named by transient ' . $transient . ')';
-                }
+                $lines[] = '  temp file         ' . $path
+                    . (self::pathExists((string) $path)
+                        ? ' (may hold raw fixture tokens; named by transient ' . $transient . ')'
+                        : ' (not found at that path now; named by transient ' . $transient . ')');
             }
         }
 
