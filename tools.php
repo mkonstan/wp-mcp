@@ -1898,18 +1898,18 @@ function wpmcp_content_tools() {
         'description' => 'Update a post or page. Args: id (required) plus any of title,'
             . ' content, status, excerpt, slug, terms, date, author and featured_image.'
             . ' Only the fields you send change, and each REPLACES what was there - except'
-            . ' that core re-dates a draft nobody dated on ANY update, and `changed`'
-            . ' names `date`. Set'
-            . ' status "publish" to publish. `date` is ISO 8601; without a UTC offset it'
-            . ' means this site\'s local time, and is kept even on a draft. To SCHEDULE,'
-            . ' send a future date with status "future" - status "publish" plus a future'
-            . ' date becomes "future" anyway, and "future" plus a past date publishes now,'
-            . ' so read `status` and `date` in the result. `author` is a user id or login'
-            . ' and needs the capability to edit others\' posts. `featured_image` is an'
-            . ' image attachment id you may edit, or 0 to remove it. Refused, naming who,'
-            . ' while another user has the post open in the editor. Afterwards the NEWEST'
-            . ' revision holds what you just sent; the one below it is the pre-edit text'
-            . ' that restore-revision undoes to.',
+            . ' two core does itself: it re-dates an undated draft, and slugs a slug-less'
+            . ' one on publishing. `changed` names both. Set'
+            . ' status "publish" to publish. `date` is ISO 8601; with no UTC offset it is'
+            . ' this site\'s local time, and is kept on a draft. To SCHEDULE, send a future'
+            . ' date with status "future"; core stores "future" for a future date and'
+            . ' publishes a past one whatever you sent, so read `status` and `date` in'
+            . ' the result. `author` is a user id or login and needs the capability to edit'
+            . ' others\' posts. `featured_image` is an image attachment id you may edit, or'
+            . ' 0 to clear. Refused, naming who, while another user is editing it.'
+            . ' After a TEXT change the'
+            . ' NEWEST revision holds what you sent and the one below is the pre-edit text'
+            . ' restore-revision undoes to; no text change, no revision.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
             'content' => array('type' => 'string'), 'status' => array('type' => 'string'),
@@ -1999,9 +1999,20 @@ function wpmcp_content_tools() {
             // the post's date, and a caller that read `changed` and saw only `title`
             // learned the opposite of what happened. A dated draft and a published post
             // are untouched, so this fires exactly when something really moved.
+            //
+            // AND `slug` FOR THE SAME REASON, which round 1 missed and a review caught.
+            // MEASURED on the bare site, WP 7.0: a post whose post_name is still empty -
+            // which is every draft nobody gave a slug, because core derives one only when
+            // the status LEAVES the draft/pending set - is slugged from its title the
+            // moment a status-only update publishes it. `draft -> pending` does not do
+            // it; `draft -> publish` does. So there are exactly two fields core changes
+            // without being asked, and `changed` names both or it names neither honestly.
             $moved = get_post($id);
             if ($moved && $moved->post_date !== $p0->post_date && !in_array('date', $changed, true)) {
                 $changed[] = 'date';
+            }
+            if ($moved && $moved->post_name !== $p0->post_name && !in_array('slug', $changed, true)) {
+                $changed[] = 'slug';
             }
 
             $out = array('id' => $id, 'link' => get_permalink($id));
