@@ -1491,7 +1491,7 @@ function wpmcp_core_tools() {
             // build is this site running" is a question an agent has to be able to
             // answer without leaving the tool surface - see wpmcp_build_label().
             'description' => 'Get name, URL, WP version, theme, plugin count. Also wp_mcp:'
-                . ' this plugin's own version, and the build - the commit a zip was built'
+                . ' this plugin\'s own version, and the build - the commit a zip was built'
                 . ' from, or "source" when the site runs it from a checkout.',
             // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
             // makes an empty `properties` serialize as `{}` wherever it appears, at any
@@ -1897,16 +1897,19 @@ function wpmcp_content_tools() {
         ),
         'description' => 'Update a post or page. Args: id (required) plus any of title,'
             . ' content, status, excerpt, slug, terms, date, author and featured_image.'
-            . ' Only the fields you send change, and each REPLACES what was there. Set'
+            . ' Only the fields you send change, and each REPLACES what was there - except'
+            . ' that core re-dates a draft nobody dated on ANY update, and `changed`'
+            . ' names `date`. Set'
             . ' status "publish" to publish. `date` is ISO 8601; without a UTC offset it'
-            . ' means this site\'s local time, and it is kept even on a draft. To SCHEDULE,'
+            . ' means this site\'s local time, and is kept even on a draft. To SCHEDULE,'
             . ' send a future date with status "future" - status "publish" plus a future'
             . ' date becomes "future" anyway, and "future" plus a past date publishes now,'
             . ' so read `status` and `date` in the result. `author` is a user id or login'
             . ' and needs the capability to edit others\' posts. `featured_image` is an'
             . ' image attachment id you may edit, or 0 to remove it. Refused, naming who,'
-            . ' while another user has the post open in the editor. The current title,'
-            . ' content and excerpt are saved as a revision first, for restore-revision.',
+            . ' while another user has the post open in the editor. Afterwards the NEWEST'
+            . ' revision holds what you just sent; the one below it is the pre-edit text'
+            . ' that restore-revision undoes to.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
             'content' => array('type' => 'string'), 'status' => array('type' => 'string'),
@@ -1987,6 +1990,20 @@ function wpmcp_content_tools() {
 
             $r = wp_update_post(wp_slash($upd), true);
             if (is_wp_error($r)) { return $r; }
+
+            // `changed` NAMES WHAT CHANGED, NOT ONLY WHAT WAS ASKED FOR - and `date` is
+            // the one field where those differ. MEASURED on WP 7.1: a draft whose
+            // post_date_gmt is still the zero date is one nobody dated, and
+            // wp_update_post re-dates it to now on ANY update ("drafts shouldn't be
+            // assigned a date unless the user did so"). So editing a title alone moves
+            // the post's date, and a caller that read `changed` and saw only `title`
+            // learned the opposite of what happened. A dated draft and a published post
+            // are untouched, so this fires exactly when something really moved.
+            $moved = get_post($id);
+            if ($moved && $moved->post_date !== $p0->post_date && !in_array('date', $changed, true)) {
+                $changed[] = 'date';
+            }
+
             $out = array('id' => $id, 'link' => get_permalink($id));
             if (!empty($a['terms']) && is_array($a['terms'])) {
                 $t = wpmcp_apply_terms($id, $a['terms']);
