@@ -8,6 +8,12 @@
 #   DEVTOKENS_MCP_JSON=... bin/dev-tokens.sh label
 #   DEVTOKENS_MCP_JSON=... bin/dev-tokens.sh mint
 #
+# THE LABEL IS THE SCRIPT'S OWN, always: this wrapper UNSETS DEVTOKENS_LABEL before each
+# site. That variable is the test suite's seam, and a copy left in your shell from debugging
+# a test would otherwise be written onto your real dev tokens by `label`. To choose a label
+# deliberately, set DEVTOKENS_WRAPPER_LABEL - the wrapper passes that one through, and the
+# script's first output line always names the label a write would use.
+#
 # The .mcp.json path is never assumed: DEVTOKENS_MCP_JSON is required. Each site runs in
 # its own subshell, with its variables set BEFORE bin/local-env.sh is sourced - that file
 # keeps any value already set, so a variable set after it would be silently ignored and
@@ -22,7 +28,7 @@ cmd="${1:-}"
 
 case "$cmd" in
     status|label|mint) ;;
-    *) echo "usage: DEVTOKENS_MCP_JSON=<path to .mcp.json> $0 status|label|mint" >&2; exit 2 ;;
+    *) echo "usage: DEVTOKENS_MCP_JSON=<path to .mcp.json> [DEVTOKENS_WRAPPER_LABEL=<label>] $0 status|label|mint" >&2; exit 2 ;;
 esac
 
 if [ -z "${DEVTOKENS_MCP_JSON:-}" ]; then
@@ -49,10 +55,18 @@ run_site() {
         # A value inherited from the caller's shell would win over local-env.sh's
         # default, so jaygroup starts from nothing and sample sets its own.
         unset PHPRC PHP WPCLI WPMCP_LOCAL_SITE_ID WPMCP_SITE_PATH WPMCP_TEST_URL
+        # And the suite's label seam never reaches an operator's run by accident: a stray
+        # `export DEVTOKENS_LABEL=...` would otherwise be written onto real dev tokens.
+        unset DEVTOKENS_LABEL
         for pair in "$@"; do export "$pair"; done
         # shellcheck source=/dev/null
         source "$here/local-env.sh" >/dev/null
         export DEVTOKENS_CMD="$cmd" DEVTOKENS_MCP_JSON="$json"
+
+        if [ -n "${DEVTOKENS_WRAPPER_LABEL:-}" ]; then
+            export DEVTOKENS_LABEL="$DEVTOKENS_WRAPPER_LABEL"
+        fi
+
         wp eval-file "$script"
     ) || status=1
 }
