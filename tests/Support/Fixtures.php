@@ -1468,12 +1468,22 @@ final class Fixtures
      * The uploads directory would be listable and is the wrong answer: it is served over
      * the web, and a file of live tokens under a URL is the trap SECURITY.md's own backup
      * story is about.
+     *
+     * NO EXPIRY (round 4, review R3-2). A marker exists for the run nobody cleaned up at
+     * once; a day-long expiry would have made exactly that file nameless again, quietly,
+     * while `leftoverTransients()` and `purge()` find fixture transients by NAME in
+     * wp_options rather than by expiry. It stays until a purge or a human removes it, like
+     * every other fixture.
+     *
+     * NOTE THE PATH BEFORE WRITING IT (round 4, review R3-3). A note for a file that was
+     * never written costs one failed `is_file()` in cleanup; a file written before its note
+     * is a file nothing names if the process dies in between.
      */
     public static function noteTempPath(string $path): void
     {
         WpCli::tryEvaluate(sprintf(
             '$k = %s; $paths = (array) get_transient($k); $paths[] = %s;'
-            . ' echo (int) set_transient($k, array_values(array_unique($paths)), DAY_IN_SECONDS);',
+            . ' echo (int) set_transient($k, array_values(array_unique($paths)), 0);',
             self::phpString(self::name('tempfile')),
             self::phpString($path)
         ));
@@ -1508,12 +1518,23 @@ final class Fixtures
     }
 
     /**
-     * Delete every remembered path, the directories they sat in, and the transient itself.
+     * Delete every remembered path and the directories they sat in, and forget ONLY what is
+     * really gone.
      *
      * BY EXACT PATH, never by listing. On this machine the site's temp directory refuses
      * enumeration even for a directory the site itself created - `glob()` answers an empty
      * array and `scandir()` false, while `unlink()` on a known name succeeds (measured) -
      * so a cleanup that globbed removed nothing and said nothing.
+     *
+     * AND THE MARKER OUTLIVES A FAILED DELETE (round 4, review R3-1). The first version
+     * deleted the transient whatever `unlink()` returned, which destroyed the only record
+     * of the one file it could not remove - the case the marker exists for. A path that
+     * still exists afterwards is written back, so the next purge tries again and any other
+     * run's `foreignDebris()` prints it. When nothing is left, the marker goes.
+     *
+     * TWO PASSES, files then directories: a directory noted before the files inside it
+     * would otherwise fail its `rmdir` while those files were still there, and be recorded
+     * as a survivor of a cleanup that in fact worked.
      *
      * @param list<string> $paths
      */
@@ -1521,14 +1542,21 @@ final class Fixtures
     {
         self::assertPrefixed($transient);
 
-        $php = '';
+        $list = '';
 
         foreach ($paths as $path) {
-            $php .= '$p = ' . self::phpString((string) $path) . ';'
-                . ' if (is_file($p)) { @unlink($p); } @rmdir(is_dir($p) ? $p : dirname($p));';
+            $list .= ($list === '' ? '' : ', ') . self::phpString((string) $path);
         }
 
-        WpCli::tryEvaluate($php . ' echo (int) delete_transient(' . self::phpString($transient) . ');');
+        WpCli::tryEvaluate(
+            '$paths = array(' . $list . ');'
+            . ' foreach ($paths as $p) { if (is_file($p)) { @unlink($p); } }'
+            . ' foreach ($paths as $p) { @rmdir(is_dir($p) ? $p : dirname($p)); }'
+            . ' $left = array_values(array_filter($paths, "file_exists"));'
+            . ' $k = ' . self::phpString($transient) . ';'
+            . ' echo $left ? ("kept " . count($left)) : (int) delete_transient($k);'
+            . ' if ($left) { set_transient($k, $left, 0); }'
+        );
     }
 
     /**
@@ -1644,10 +1672,11 @@ final class Fixtures
         MuPlugin::removeOurs();
 
         foreach (self::ours(self::leftoverTransients()) as $name) {
-            // NOT the marker that names what this run wrote outside the database: it is
-            // deleted by forgetTempPath() above, once the files it names are gone. Deleting
-            // it here as well would mean a failed file cleanup lost the only record of
-            // where those files are - which is the whole point of the marker.
+            // NOT the marker that names what this run wrote outside the database.
+            // forgetTempPath() above deletes it once every path it names is gone, and
+            // KEEPS it - rewritten to the survivors - when a file would not delete.
+            // Deleting it here as well would throw away that record, which is the one case
+            // the marker exists for (round 4, review R3-1).
             if (str_ends_with($name, '-tempfile')) {
                 continue;
             }
