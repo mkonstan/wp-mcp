@@ -38,9 +38,17 @@ admin can renew them for thirty days from when they were minted - see below.
 - **Why:** every dev zip so far reported `Version: 1.1.0`, so an installed zip could not be
   told from an older installed zip at all. Only the filename distinguished them, and a
   filename is gone the moment the plugin is installed.
-- New filter **`wpmcp_build_id`**, for a packager that stamps builds some other way. It can
-  only supply a value that already looks like a build id; it cannot put a sentence, a
-  version number or an empty string on the admin page or on the wire.
+- New filter **`wpmcp_build_id`**, for a packager that stamps builds some other way. It is
+  shape-constrained, not narrow: PHP on the site can make a checkout claim any build id
+  that looks like one, which is the ordinary power of site PHP and is not reachable from a
+  request. What the check guarantees is that a sentence, a version number, a placeholder,
+  the word `source` or an empty string can never appear as a build. There is deliberately
+  no filter on the build DATE: it is shown only while the reported id is still the one in
+  `build.txt`, so a packager's id is never printed beside git's date for another commit.
+- **The stamp names the zip, not the folder.** Replace the plugin rather than copying new
+  files over an installed one: a hand copy leaves the previous `build.txt` behind and the
+  plugin then reports a build it is not running. Nothing git or the recipes do can produce
+  that. README and `docs/RELEASE.md` both say so.
 
 ### Fixed: two sentences in `update-post` that described the opposite of what it does
 
@@ -57,8 +65,17 @@ admin can renew them for thirty days from when they were minted - see below.
   `restore-revision` as what undoes to the lower one; `restore-revision`'s own wording,
   corrected earlier, already said the same thing and the two now agree. README's *Undoing a
   content edit* carries the measured table.
-- Both were found by a client reading the tool's own contract on a real site, not by the
-  test suite.
+- **And a second unsent change, measured after the first was fixed:** publishing a post
+  whose slug is still empty makes core derive one from the title, so a status-only update
+  changes `slug` as well. `changed` names that too. Moving the same draft to `pending`
+  does not - core fills `post_name` only when a status leaves the draft/pending set - and
+  a post that already has a slug keeps it.
+- **The revision sentence now needs a text change.** Core saves a revision only when
+  title, content or excerpt differ, so after a status-only, terms-only or same-text update
+  there is no new revision and "the one below the newest" is some earlier edit's text.
+- Both of the original two were found by a client reading the tool's own contract on a
+  real site, not by the test suite; the slug case was found by a review doubting the word
+  "exactly one".
 
 ### Added: a 30-day active window on a local development site
 

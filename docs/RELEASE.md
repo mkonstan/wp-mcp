@@ -58,7 +58,15 @@ reports `source`, which looks exactly like a checkout and tells nobody anything.
 
 After sending one, say in the message which file it is and that it replaces the earlier
 one. After installing it, the check is: open the Plugins screen and read `Build:` in the
-wp-mcp row, or ask the site `site-info` and read `wp_mcp.build`. It must equal `<sha>`.
+wp-mcp row, or ask the site `site-info` and read `wp_mcp.build`. It must **start with**
+`<sha>` - `%h` abbreviates to whatever length that repository needs, so a build named
+with a 7-character hash can report 8 once the history grows.
+
+**Replace the plugin; do not copy files over it.** Deactivate and delete the old copy,
+then install the new zip. Copying new PHP files into an existing `wp-mcp/` folder leaves
+the previous `build.txt` in place, and the plugin then reports a build it is not running -
+the stamp names the ZIP it came in, not whatever is in the folder now. Git and the two
+recipes here cannot produce that; a hurried person can.
 
 ## A release
 
@@ -69,7 +77,7 @@ heading in `CHANGELOG.md` are the same string. A unit test enforces it, so
 Then tag and push:
 
 ```bash
-git tag v1.0.0 && git push origin v1 --tags
+git tag v1.1.0 && git push origin v1.1 --tags
 ```
 
 The tag push triggers `.github/workflows/release.yml`. It lints every PHP file, runs the

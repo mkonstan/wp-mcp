@@ -60,6 +60,13 @@ site; that is how the plugin is developed. But if a site you *uploaded a zip to*
 `source`, that zip was not built by the recipe in [`docs/RELEASE.md`](docs/RELEASE.md) and
 there is no way to tell which one it is.
 
+**The stamp names the zip, not the folder - so replace the plugin rather than copying
+files over it.** `build.txt` arrives with the zip and is not touched again. If you copy new
+PHP files into an existing `wp-mcp/` folder instead of deleting the old plugin and
+installing the new one, the previous build's `build.txt` stays behind and the plugin
+cheerfully reports a build it is not running. Nothing git or the recipes do can produce
+that; only a hand copy can.
+
 The `Version:` header, `WPMCP_VER` and `serverInfo.version` stay a plain semantic version
 on every build; the build sits beside the version and never inside it.
 
@@ -373,16 +380,25 @@ someone else's - whose post the file happens to be attached to makes no differen
 way - and it has to be an image. `0` removes the image. It round-trips through
 `get-post`'s `featured_image`.
 
-**A draft nobody dated is re-dated by every update, including one that only touches the
-title.** WordPress treats a draft whose `post_date_gmt` is still empty as undated and moves
-it to "now" on any update - core's own "drafts shouldn't be assigned a date unless the user
-did so" rule. So "only the fields you send change" has exactly one exception, and it is
-this one. `update-post` names `date` in `changed` when that happened and returns the new
-`date` and `date_gmt` beside it, so you never have to re-read the post to find out. A draft
-you *did* date, and any published post, are left alone.
+**"Only the fields you send change" has two exceptions, and both are WordPress rather
+than this plugin.** Measured on a bare site (WP 7.0), each through `update-post` itself:
 
-Both tools reply with `changed`: the fields this call named, in the order above - plus
-`date` on `update-post` when WordPress moved it without being asked.
+| Case | What else changed | `changed` |
+|---|---|---|
+| A draft whose `post_date_gmt` is still empty, any update at all (even title-only) | `date` moves to "now" - core's "drafts shouldn't be assigned a date unless the user did so" rule | names `date`, and the result carries the new `date` and `date_gmt` |
+| A post whose slug is still empty, when a status-only update **publishes** it | `slug` is derived from the title - core fills `post_name` when a status leaves the draft/pending set | names `slug` |
+| The same draft moved to `pending` instead | nothing; the slug stays empty | - |
+| A draft you *did* date, or any published post | nothing | - |
+
+`update-post` reports both, so you never have to re-read the post to find out. Nothing
+else changes unsent: status, terms, author, excerpt and the featured image are only ever
+what you asked for.
+
+Both tools reply with `changed`: every field this call actually changed. The fields you
+named come first, in the table's order above; then, on `update-post`, `date` and `slug`
+if WordPress moved them unasked; then `terms` last on both. So a title-and-terms update
+of an undated draft answers `["title","date","terms"]` - `terms` after the date, not in
+the order you sent them.
 
 Backslashes survive. A Windows path, a regular expression or a JSON document written
 into a title, a body, an excerpt, a term name, a media title or alt text, or a comment
