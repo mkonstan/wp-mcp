@@ -420,18 +420,21 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
 
         $json = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
 
-        $path = WpCli::evaluate(sprintf(
-            '$p = %s . "/" . %s . ".mcp.json"; echo file_put_contents($p, base64_decode(%s)) ? $p : "NO-WRITE";',
-            self::literal(self::$dir),
-            self::literal($name),
+        // NOTED BEFORE IT IS WRITTEN (round 4, review R3-3). The file holds raw fixture
+        // tokens and the site's temp directory cannot be listed, so a process that died
+        // between the write and the note would leave bytes nothing names. A note for a file
+        // that was never written costs one failed is_file() in cleanup.
+        $path = rtrim(self::$dir, '/\\') . '/' . $name . '.mcp.json';
+
+        Fixtures::noteTempPath($path);
+
+        $written = WpCli::evaluate(sprintf(
+            '$p = %s; wp_mkdir_p(dirname($p)); echo file_put_contents($p, base64_decode(%s)) ? $p : "NO-WRITE";',
+            self::literal($path),
             self::literal(base64_encode($json))
         ));
 
-        self::assertNotSame('NO-WRITE', $path);
-
-        // Remembered, because the site's temp directory cannot be listed and this file
-        // holds raw fixture tokens (round 3, review R2-1).
-        Fixtures::noteTempPath($path);
+        self::assertSame($path, $written, 'The fixture .mcp.json was not written where it was noted.');
 
         return $path;
     }

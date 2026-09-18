@@ -24,6 +24,12 @@
  * process does - nothing - and asserts that the ordinary cleanup finds and removes both the
  * row and the file.
  *
+ * ONE GAP STAYS, and it is named rather than papered over (round 4, review R3-3): the
+ * BACKUP the script writes cannot be noted before it exists, because only the script knows
+ * its timestamped name. A death between that write and the note leaves `<path>.backup-*`
+ * unnamed. Its contents are the OLD bearer values, whose rows carry this run's prefix and
+ * are revoked by the same purge, so those bytes are dead as soon as the run is cleaned up.
+ *
  * @group sprint-14b
  */
 
@@ -151,7 +157,82 @@ final class DevTokensKilledRunTest extends FixtureIntegrationTestCase
         self::$mintedIds = [];
     }
 
+    /**
+     * R3-1. The marker outlives a delete that FAILED, and goes when the delete worked.
+     *
+     * THE CASE IT EXISTS FOR. A cleanup that could not remove a file used to delete the
+     * only record of that file anyway, so nothing would ever name it again - and on this
+     * host nothing can find it by looking, because the temp directory refuses enumeration.
+     *
+     * The undeletable path here is a DIRECTORY with a file in it that the marker does not
+     * name: `@rmdir` fails, exactly as it would for a file another process holds open, and
+     * `file_exists()` still answers true.
+     *
+     * @group sprint-14b
+     */
+    public function testTheMarkerSurvivesADeleteThatFailedAndGoesWhenItWorked(): void
+    {
+        $blocked = rtrim(self::$dir, '/\\') . '/' . Fixtures::name('blocked-dir');
+        $hidden  = $blocked . '/not-named.json';
+
+        Fixtures::noteTempPath($blocked);
+
+        WpCli::evaluate(sprintf(
+            '$d = %s; wp_mkdir_p($d); file_put_contents($d . "/not-named.json", "x");'
+            . ' echo is_file($d . "/not-named.json") ? "made" : "NO";',
+            self::literal($blocked)
+        ));
+
+        $marker = Fixtures::name('tempfile');
+
+        // The marker never expires (round 4, review R3-2): a day-long expiry would have
+        // made exactly the file nobody cleaned up nameless again, quietly. WordPress writes
+        // no `_transient_timeout_` row for an expiry of 0.
+        self::assertSame(
+            '0',
+            WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->get_var($wpdb->prepare('
+                . '"SELECT COUNT(*) FROM $wpdb->options WHERE option_name = %%s", "_transient_timeout_" . %s));',
+                self::literal($marker)
+            )),
+            "The marker expires, so a killed run\'s file is nameless a day later."
+        );
+
+        // A path noted but never written is not an error: that is what lets the note come
+        // BEFORE the write (round 4, review R3-3).
+        Fixtures::noteTempPath(rtrim(self::$dir, '/\\') . '/' . Fixtures::name('never-written') . '.json');
+
+        // 1. The delete fails, and the record survives - rewritten to what is still there.
+        Fixtures::purge();
+
+        $kept = Fixtures::leftoverTempPaths();
+
+        self::assertArrayHasKey($marker, $kept, 'A failed delete threw away the only record of the file.');
+        self::assertContains($blocked, $kept[$marker], 'The surviving path is not the one that could not be deleted.');
+        self::assertSame('yes', $this->existsOnSite($blocked), 'The fixture directory is gone, so nothing failed to delete.');
+
+        // 2. Remove what was blocking it - the file the marker never knew about - and the
+        //    next purge takes both the directory and the marker.
+        WpCli::evaluate(sprintf('echo (int) @unlink(%s);', self::literal($hidden)));
+
+        Fixtures::purge();
+
+        self::assertArrayNotHasKey(
+            $marker,
+            Fixtures::leftoverTempPaths(),
+            'The marker outlived the files it named, so every clean run would report debris.'
+        );
+        self::assertSame('no', $this->existsOnSite($blocked));
+    }
+
     /* ------------------------------------------------------------------ helpers */
+
+    /** 'yes' or 'no': does this path exist on the site? */
+    private function existsOnSite(string $path): string
+    {
+        return WpCli::evaluate(sprintf('echo file_exists(%s) ? "yes" : "no";', self::literal($path)));
+    }
+
 
     /** One server on this host whose bearer value matches no row: the user-1 case. */
     private function writeConfig(): string
@@ -166,15 +247,19 @@ final class DevTokensKilledRunTest extends FixtureIntegrationTestCase
             ],
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
 
-        $path = WpCli::evaluate(sprintf(
-            '$p = %s . "/killed.mcp.json"; echo file_put_contents($p, base64_decode(%s)) ? $p : "NO-WRITE";',
-            self::literal(self::$dir),
+        // Noted first, written second (round 4, review R3-3): see writeConfig() in
+        // DevTokensScriptTest for why the order is the whole point.
+        $path = rtrim(self::$dir, '/\\') . '/killed.mcp.json';
+
+        Fixtures::noteTempPath($path);
+
+        $written = WpCli::evaluate(sprintf(
+            '$p = %s; wp_mkdir_p(dirname($p)); echo file_put_contents($p, base64_decode(%s)) ? $p : "NO-WRITE";',
+            self::literal($path),
             self::literal(base64_encode($json))
         ));
 
-        self::assertNotSame('NO-WRITE', $path);
-
-        Fixtures::noteTempPath($path);
+        self::assertSame($path, $written, 'The fixture .mcp.json was not written where it was noted.');
 
         return $path;
     }
