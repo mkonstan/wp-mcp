@@ -132,6 +132,10 @@ final class BuildStampTest extends TestCase
             // returning it, renders "build `source` - the commit this zip was built
             // from": a sentence about a build that does not exist.
             'the unknown word'  => \WPMCP_BUILD_UNKNOWN,
+            // In any case: a hand-edited `short=Source` is the same non-build, and the
+            // round-2 refusal compared exactly, so it passed.
+            'the word, capitalised' => 'Source',
+            'the word, shouted'     => 'SOURCE',
         ];
 
         foreach ($refused as $why => $value) {

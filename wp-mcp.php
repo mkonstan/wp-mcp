@@ -172,11 +172,12 @@ function wpmcp_build_stamp_parse($text) {
  * `source` matches it perfectly well, so a hand-edited `short=source` - or a filter
  * that returns the word - used to produce the settings line "build `source` - the
  * commit this zip was built from", which is a sentence about a build that does not
- * exist. The word means "there is no build"; it can never BE one.
+ * exist. The word means "there is no build"; it can never BE one - in any case, so
+ * `Source` and `SOURCE` are refused too (round 2 compared exactly and let them pass).
  */
 function wpmcp_build_id_valid($id) {
     return is_string($id)
-        && $id !== WPMCP_BUILD_UNKNOWN
+        && strcasecmp($id, WPMCP_BUILD_UNKNOWN) !== 0
         && preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/', $id) === 1;
 }
 
