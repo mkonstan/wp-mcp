@@ -131,12 +131,23 @@ function wpmcp_build_stamp_parse($text) {
 
         // AN UNSUBSTITUTED PLACEHOLDER IS NOT A VALUE. This is a checkout.
         //
-        // DELIBERATELY REDUNDANT with wpmcp_build_id_valid() below, which also refuses
-        // a `$`, so mutating this line alone changes no observable behaviour today. It
-        // stays because it is the only place that states the RULE rather than a shape:
-        // the day somebody loosens the id pattern - for a packager whose build ids are
-        // not hex - this is what still keeps `$Format:%h$` off the admin page, which is
-        // the exact bug the whole stamp exists to prevent.
+        // IT IS NOT REDUNDANT WITH wpmcp_build_id_valid(), although both refuse a `$`,
+        // and the first version of this comment said it was. This loop is a FOLD over
+        // lines and keys are last-wins, while the validity pass below runs once, on the
+        // last value only. So the two rules differ exactly where a file carries the same
+        // key twice:
+        //
+        //   short=abc1234        with this line: the placeholder is skipped and `short`
+        //   short=$Format:%h$    stays abc1234. Without it, line 2 overwrites and the
+        //                        validity pass then refuses the `$`, giving ''.
+        //
+        // What the guard buys is that a build whose stamp has had a placeholder line
+        // appended to it still reports the build it was cut from, instead of falling
+        // back to `source`. What it costs is the mirror image, which is why the order
+        // matters: a checkout whose build.txt has a valid line ABOVE the placeholder
+        // claims that build. Both take a hand edit of a file git wrote; neither is
+        // reachable from `git archive`, which substitutes each placeholder in place and
+        // never duplicates a key.
         if ($val[0] === '$') { continue; }
 
         $out[$key] = $val;
@@ -156,9 +167,17 @@ function wpmcp_build_stamp_parse($text) {
  * Plugins screen, the initialize result and a tool result, so a sentence, a path, a
  * fragment of markup or a half-substituted placeholder must be dropped rather than
  * shown. A git short hash passes; so does a packager's own `r2026.09.18+4`.
+ *
+ * AND THE UNKNOWN WORD ITSELF IS REFUSED, which the pattern alone does not do.
+ * `source` matches it perfectly well, so a hand-edited `short=source` - or a filter
+ * that returns the word - used to produce the settings line "build `source` - the
+ * commit this zip was built from", which is a sentence about a build that does not
+ * exist. The word means "there is no build"; it can never BE one.
  */
 function wpmcp_build_id_valid($id) {
-    return is_string($id) && preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/', $id) === 1;
+    return is_string($id)
+        && $id !== WPMCP_BUILD_UNKNOWN
+        && preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/', $id) === 1;
 }
 
 /** Could this be the build's date? An ISO 8601 instant, which is what %cI writes. */
@@ -191,11 +210,16 @@ function wpmcp_build_stamp() {
 /**
  * This build's short commit hash, or '' when this copy is not a build.
  *
- * THE FILTER CANNOT INVENT A SHAPE. `wpmcp_build_id` exists for a packager that stamps
- * builds some other way - and for this project's own suite, which has no second copy of
- * the plugin to point at and must not rewrite a file that is junctioned into two live
- * sites. Whatever it returns still has to pass wpmcp_build_id_valid(), so no filter can
- * put a sentence, a version number or an empty string on the admin page or on the wire.
+ * THE FILTER IS SHAPE-CONSTRAINED, NOT NARROW-ONLY, and the first version of this
+ * comment got that wrong. `wpmcp_build_id` exists for a packager that stamps builds some
+ * other way - and for this project's own suite, which has no second copy of the plugin to
+ * point at and must not rewrite a file that is junctioned into two live sites. What the
+ * shape check buys is that nothing can put a sentence, a version number, a placeholder or
+ * an empty string on the admin page or on the wire. What it does NOT buy is honesty: a
+ * filter can make a checkout claim any build id it likes, and the gate's own G2 does
+ * exactly that. That is the ordinary power of PHP running on the site - the filter is not
+ * reachable from a request, an argument or a header - so it is documented rather than
+ * defended against.
  */
 function wpmcp_build_id() {
     $stamp = wpmcp_build_stamp();
@@ -204,11 +228,33 @@ function wpmcp_build_id() {
     return wpmcp_build_id_valid($id) ? (string) $id : '';
 }
 
-/** The build's commit date, or '' - shown beside the build on the settings page. */
+/**
+ * The build's commit date, or '' - shown beside the build on the settings page.
+ *
+ * NOT FILTERED, AND THE DATE FOLLOWS THE ID RATHER THAN GETTING A SEAM OF ITS OWN.
+ * A second filter would be a second thing to keep in step for no caller that exists;
+ * worse, without one a packager filtering the ID on a git-archived zip would have its own
+ * build id printed beside GIT's date, for a different commit - two facts about two builds
+ * on one line, which is precisely the class of lie this sprint exists to remove. So the
+ * date is emitted only while the id still IS the file's, and a filtered id simply has no
+ * date. If a packager ever wants to carry one, it writes build.txt; that is what the file
+ * is for.
+ */
 function wpmcp_build_date() {
-    $stamp = wpmcp_build_stamp();
+    return wpmcp_build_date_of(wpmcp_build_stamp(), wpmcp_build_id());
+}
 
-    return $stamp['date'];
+/**
+ * The decision above, as a pure function, because the one that matters cannot be reached
+ * otherwise: a checkout's build.txt carries no date at all, so a test of
+ * wpmcp_build_date() on a checkout passes whatever the rule is. This takes the stamp and
+ * the id it is being shown beside.
+ *
+ * @param array{commit:string,short:string,date:string} $stamp
+ * @param string $id the id actually being reported, filter and all
+ */
+function wpmcp_build_date_of($stamp, $id) {
+    return ($id !== '' && $id === $stamp['short']) ? $stamp['date'] : '';
 }
 
 /**
