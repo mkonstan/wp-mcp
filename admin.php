@@ -11,6 +11,60 @@ add_action('admin_menu', function () {
 });
 
 /**
+ * The build, on the Plugins screen, right beside the version WordPress prints there.
+ *
+ * WHY HERE AND NOT IN THE `Version:` HEADER. The Plugins screen is where an operator
+ * looks first after uploading a zip - it is where the hour was lost on 2026-09-16 - so
+ * the build has to be visible there. It cannot be visible there by being part of the
+ * version: WordPress shows the header verbatim, the release tooling and the version
+ * consistency test read it, and a header reading `1.1.0-dev+3b5d129` would make the
+ * checkout's own header a lie too (the substitution happens in `git archive`, not in the
+ * tree). `plugin_row_meta` puts the fact next to the version without corrupting it.
+ *
+ * @param array  $links the row's meta links
+ * @param string $file  the plugin file this row is for, relative to the plugins dir
+ * @return array
+ */
+function wpmcp_plugin_row_meta($links, $file) {
+    if ($file !== plugin_basename(WPMCP_PLUGIN_FILE)) { return (array) $links; }
+
+    $links   = (array) $links;
+    $links[] = esc_html('Build: ' . wpmcp_build_label());
+
+    return $links;
+}
+add_filter('plugin_row_meta', 'wpmcp_plugin_row_meta', 10, 2);
+
+/**
+ * The one line that answers "which build is this site running", as HTML.
+ *
+ * A FUNCTION AND NOT INLINE TEMPLATE, for two reasons. The suite can read exactly what
+ * the page shows without scraping a page that also lists this site's tokens; and the
+ * settings page and the Plugins screen row are then provably the same fact, because
+ * both end at wpmcp_build_label().
+ *
+ * THE `source` CASE IS SPELLED OUT rather than left as a bare word. An operator who has
+ * just uploaded a zip and reads `build: source` needs to know that means "this is not a
+ * zip" and not "the build id is missing".
+ */
+function wpmcp_admin_build_line() {
+    $version = '<strong>Version</strong> <code>' . esc_html(WPMCP_VER) . '</code>';
+    $build   = ' &middot; <strong>build</strong> <code>' . esc_html(wpmcp_build_label()) . '</code>';
+
+    if (wpmcp_build_id() === '') {
+        return $version . $build
+            . ' &mdash; this copy is running from a source checkout, not from a built'
+            . ' zip, so there is no build to report.';
+    }
+
+    $date = wpmcp_build_date();
+
+    return $version . $build
+        . ($date === '' ? '' : ' (committed ' . esc_html($date) . ')')
+        . ' &mdash; the commit this zip was built from.';
+}
+
+/**
  * Can this site serve the endpoint at all?
  *
  * wpmcp_authorize() refuses every request that is not over HTTPS, so a site that
@@ -204,6 +258,7 @@ function wpmcp_render_admin() {
     ?>
     <div class="wrap">
       <h1>WP MCP</h1>
+      <p><?php echo wpmcp_admin_build_line(); // phpcs:ignore WordPress.Security.EscapeOutput -- built and escaped in wpmcp_admin_build_line() ?></p>
       <p>Short-lived, admin-minted tokens for the MCP endpoint. Read-only by default.</p>
 
       <?php if (wpmcp_site_is_https()): ?>

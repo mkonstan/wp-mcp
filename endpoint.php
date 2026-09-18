@@ -898,6 +898,29 @@ function wpmcp_negotiated_protocol_version($params) {
 }
 
 /**
+ * `serverInfo`: who is answering, which version, and which BUILD of it.
+ *
+ * NAME AND VERSION STAY EXACTLY WHAT THE SPEC ASKS FOR. `name` is an identifier and
+ * `version` a clean semantic version, because a client may display or compare them and
+ * MCP's Implementation object says so. The build is a THIRD key beside them, never a
+ * suffix on the version: the spec's objects carry keys a client does not know through
+ * untouched, so a client that ignores `build` is unaffected, and a client that wants to
+ * report which build a site is running has it without a tool call.
+ *
+ * `source` here means the site is running the plugin out of a git checkout rather than
+ * from a built zip. See wpmcp_build_label().
+ *
+ * @return array{name:string,version:string,build:string}
+ */
+function wpmcp_server_info() {
+    return array(
+        'name'    => 'wp-mcp',
+        'version' => WPMCP_VER,
+        'build'   => wpmcp_build_label(),
+    );
+}
+
+/**
  * What this server tells a client it is, once, at the handshake.
  *
  * THREE FACTS, AND THEY ARE THE THREE THAT CHANGE WHAT AN AGENT DOES. Not a feature
@@ -1094,7 +1117,7 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             return wpmcp_rpc_ok($id, array(
                 'protocolVersion' => wpmcp_negotiated_protocol_version($params),
                 'capabilities'    => wpmcp_objectify_object_map(array('tools' => array())),
-                'serverInfo'      => array('name' => 'wp-mcp', 'version' => WPMCP_VER),
+                'serverInfo'      => wpmcp_server_info(),
                 'instructions'    => wpmcp_server_instructions(),
             ));
 

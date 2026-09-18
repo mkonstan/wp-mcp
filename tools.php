@@ -1486,7 +1486,13 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'Get name, URL, WP version, theme, plugin count.',
+            // The first sentence still ends by character 50, which is all a client shows
+            // until a tool is loaded. The second says what wp_mcp is for, because "which
+            // build is this site running" is a question an agent has to be able to
+            // answer without leaving the tool surface - see wpmcp_build_label().
+            'description' => 'Get name, URL, WP version, theme, plugin count. Also wp_mcp:'
+                . ' this plugin's own version, and the build - the commit a zip was built'
+                . ' from, or "source" when the site runs it from a checkout.',
             // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
             // makes an empty `properties` serialize as `{}` wherever it appears, at any
             // depth, so the inline cast this used to carry is no longer the thing
@@ -1500,6 +1506,15 @@ function wpmcp_core_tools() {
                     'wp_version'     => get_bloginfo('version'),
                     'active_theme'   => $theme ? ($theme->get('Name') . ' ' . $theme->get('Version')) : null,
                     'active_plugins' => count((array) get_option('active_plugins', array())),
+                    // NESTED, and not `wpmcp_version` beside `wp_version`. Two keys one
+                    // character apart, one meaning WordPress and the other meaning this
+                    // plugin, is a misreading waiting to happen in exactly the situation
+                    // this field exists for: somebody trying to work out which of two
+                    // builds a site is running.
+                    'wp_mcp'         => array(
+                        'version' => WPMCP_VER,
+                        'build'   => wpmcp_build_label(),
+                    ),
                 );
             },
         ),

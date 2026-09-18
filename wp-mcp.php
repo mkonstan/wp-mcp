@@ -54,6 +54,170 @@ define('WPMCP_VER', '1.1.0');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 
 /**
+ * The plugin's own main file, for the one hook that has to name it (the Plugins screen
+ * row). admin.php cannot work it out from its own __FILE__.
+ */
+define('WPMCP_PLUGIN_FILE', __FILE__);
+
+/**
+ * THE BUILD STAMP. Which build is this, and it must not lie.
+ *
+ * WHY IT EXISTS. Every dev zip cut from this repository reported `Version: 1.1.0`, so
+ * the Plugins screen, initialize's serverInfo and site-info all said the same string for
+ * Sprint 10's build and for Sprint 14b's. On 2026-09-16 an older zip was installed on a
+ * live site, everything looked right, and about an hour went into diagnosing a "stale
+ * file" that was really a stale ZIP. Only the FILENAME told the two apart, and a
+ * filename is gone the moment the plugin is installed.
+ *
+ * GIT'S OWN SUBSTITUTION, NOT A NUMBER ANYBODY MAINTAINS. build.txt is marked
+ * `export-subst` in .gitattributes, so `git archive` - which is how every zip of this
+ * plugin is cut, dev or release - replaces its placeholders with the commit it is
+ * archiving. Nothing has to be bumped, and a build cannot claim a commit it was not
+ * built from.
+ *
+ * A CHECKOUT IS THE NORMAL CASE AND MUST NOT LOOK LIKE A BUILD. Running out of a git
+ * working tree leaves the placeholders literal: both Local development sites junction
+ * this tree into their plugins directory, and CI maps it into wp-env. There is then no
+ * build to report and the plugin says exactly that - WPMCP_BUILD_UNKNOWN, the word
+ * `source` - rather than falling back to the version, to a file's mtime, or to anything
+ * else that would read as a build id and be wrong. NOTHING fails, warns or behaves
+ * differently because the stamp is absent: an unstamped copy is a fact about the copy.
+ *
+ * THE VERSION IS NOT TOUCHED BY ANY OF THIS. WPMCP_VER, the `Version:` header and
+ * serverInfo.version stay a clean semantic version on every build; the stamp sits
+ * BESIDE the version and never inside it. docs/RELEASE.md carries the decision and what
+ * it costs.
+ */
+define('WPMCP_BUILD_STAMP_FILE', 'build.txt');
+
+/**
+ * The word every surface prints when this copy is not a build.
+ *
+ * `source` and not `dev`, `unknown` or an empty string: it answers the question a reader
+ * is actually asking - where did this code come from - it is a word no commit hash can
+ * ever collide with, and it reads as a sentence in every place it appears ("build:
+ * source"). An empty field would read as a bug; `unknown` says the plugin lost track of
+ * something, which is not what happened.
+ */
+define('WPMCP_BUILD_UNKNOWN', 'source');
+
+/**
+ * One build.txt, parsed. Returns commit, short and date, each '' when it is not there.
+ *
+ * PURE, SO THE RULE CAN BE TESTED WITHOUT A SITE - and the rule is the whole point: a
+ * value that still starts with a `$` is an unsubstituted git placeholder, which is the
+ * one thing that must never be reported as a build.
+ *
+ * @param string $text the file's contents
+ * @return array{commit:string,short:string,date:string}
+ */
+function wpmcp_build_stamp_parse($text) {
+    $out = array('commit' => '', 'short' => '', 'date' => '');
+
+    foreach ((array) preg_split('/\r\n|\r|\n/', (string) $text) as $line) {
+        $line = trim((string) $line);
+
+        if ($line === '' || $line[0] === '#') { continue; }
+
+        $eq = strpos($line, '=');
+        if ($eq === false) { continue; }
+
+        $key = trim(substr($line, 0, $eq));
+        $val = trim(substr($line, $eq + 1));
+
+        // A key nothing reads is ignored rather than collected: the file travels in a
+        // zip and whoever edits it is not necessarily us.
+        if (!array_key_exists($key, $out) || $val === '') { continue; }
+
+        // AN UNSUBSTITUTED PLACEHOLDER IS NOT A VALUE. This is a checkout.
+        if ($val[0] === '$') { continue; }
+
+        $out[$key] = $val;
+    }
+
+    if (!wpmcp_build_id_valid($out['commit']))  { $out['commit'] = ''; }
+    if (!wpmcp_build_id_valid($out['short']))   { $out['short']  = ''; }
+    if (!wpmcp_build_date_valid($out['date']))  { $out['date']   = ''; }
+
+    return $out;
+}
+
+/**
+ * Could this be a build id at all?
+ *
+ * THE SHAPE IS CHECKED BECAUSE THE VALUE IS PRINTED. It reaches the settings page, the
+ * Plugins screen, the initialize result and a tool result, so a sentence, a path, a
+ * fragment of markup or a half-substituted placeholder must be dropped rather than
+ * shown. A git short hash passes; so does a packager's own `r2026.09.18+4`.
+ */
+function wpmcp_build_id_valid($id) {
+    return is_string($id) && preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/', $id) === 1;
+}
+
+/** Could this be the build's date? An ISO 8601 instant, which is what %cI writes. */
+function wpmcp_build_date_valid($date) {
+    return is_string($date)
+        && preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:?[0-9]{2})$/', $date) === 1;
+}
+
+/**
+ * The stamp this copy carries, read from disk ONCE per request.
+ *
+ * A MISSING FILE IS NOT AN ERROR. A copy assembled by hand, or unpacked by something
+ * that dropped a text file, simply has no stamp - which is reported, not complained
+ * about. There is no warning, no notice and no admin nag anywhere in this path.
+ *
+ * @return array{commit:string,short:string,date:string}
+ */
+function wpmcp_build_stamp() {
+    static $stamp = null;
+
+    if ($stamp === null) {
+        $path  = plugin_dir_path(__FILE__) . WPMCP_BUILD_STAMP_FILE;
+        $text  = is_readable($path) ? file_get_contents($path) : '';
+        $stamp = wpmcp_build_stamp_parse($text === false ? '' : $text);
+    }
+
+    return $stamp;
+}
+
+/**
+ * This build's short commit hash, or '' when this copy is not a build.
+ *
+ * THE FILTER CANNOT INVENT A SHAPE. `wpmcp_build_id` exists for a packager that stamps
+ * builds some other way - and for this project's own suite, which has no second copy of
+ * the plugin to point at and must not rewrite a file that is junctioned into two live
+ * sites. Whatever it returns still has to pass wpmcp_build_id_valid(), so no filter can
+ * put a sentence, a version number or an empty string on the admin page or on the wire.
+ */
+function wpmcp_build_id() {
+    $stamp = wpmcp_build_stamp();
+    $id    = apply_filters('wpmcp_build_id', $stamp['short']);
+
+    return wpmcp_build_id_valid($id) ? (string) $id : '';
+}
+
+/** The build's commit date, or '' - shown beside the build on the settings page. */
+function wpmcp_build_date() {
+    $stamp = wpmcp_build_stamp();
+
+    return $stamp['date'];
+}
+
+/**
+ * What every surface prints: the build, or the word for "this is not a build".
+ *
+ * ONE FUNCTION, FOUR SURFACES. The settings page, the Plugins screen row, serverInfo
+ * and site-info all call this, which is what makes "they all say the same thing" a
+ * property of the code rather than a coincidence four places have to keep.
+ */
+function wpmcp_build_label() {
+    $id = wpmcp_build_id();
+
+    return $id === '' ? WPMCP_BUILD_UNKNOWN : $id;
+}
+
+/**
  * Where a theme file's previous contents go before code-write or code-delete changes
  * it on disk.
  *

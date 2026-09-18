@@ -2,3 +2,8 @@
 
 # Shell scripts must keep LF, or bash chokes on the CR (Git Bash locally, CI on Linux).
 *.sh text eol=lf
+
+# The build stamp, and this one file only: git archive substitutes the placeholders it
+# carries (see build.txt). LF so a zip built on any platform holds the same bytes, and
+# so the file the plugin parses does not depend on who checked it out.
+/build.txt export-subst text eol=lf
