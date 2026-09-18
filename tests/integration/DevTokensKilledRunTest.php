@@ -149,7 +149,17 @@ final class DevTokensKilledRunTest extends FixtureIntegrationTestCase
         Fixtures::purge();
 
         self::assertSame(0, $this->rowCount($id), 'purge() left a live admin token behind.');
-        self::assertArrayNotHasKey(Fixtures::name('tempfile'), Fixtures::leftoverTempPaths());
+
+        $left = $this->survivingPaths();
+
+        self::assertSame(
+            [],
+            $left,
+            'purge() left a remembered path behind: ' . implode(', ', $left)
+                . '. On Windows a delete is not final while a handle is open, so the retry'
+                . ' in forgetTempPath() should have taken it; a path that outlives that is'
+                . ' a leak, not a race.'
+        );
         // A digest, never the bytes: this file holds bearer values, and a failing
         // assertSame would print them into the run log.
         self::assertTrue($this->readSiteFile($path) === '', 'The file holding the raw token survived purge().');
@@ -217,15 +227,42 @@ final class DevTokensKilledRunTest extends FixtureIntegrationTestCase
 
         Fixtures::purge();
 
-        self::assertArrayNotHasKey(
-            $marker,
-            Fixtures::leftoverTempPaths(),
+        $left = $this->survivingPaths();
+
+        self::assertSame(
+            [],
+            $left,
             'The marker outlived the files it named, so every clean run would report debris.'
+                . ' Still there: ' . implode(', ', $left)
         );
-        self::assertSame('no', $this->existsOnSite($blocked));
+        self::assertSame('no', $this->existsOnSite($blocked), "The directory {$blocked} survived every retry.");
     }
 
     /* ------------------------------------------------------------------ helpers */
+
+    /**
+     * What this run's marker still names, after asking the cleanup to try again.
+     *
+     * THE RETRY IS THE POINT (round 5, review R4-1). A delete on Windows is not final while
+     * any handle is open, and Defender or the indexer opening a file this suite has just
+     * written keeps its directory entry alive for a moment - so `purge()` can leave a path
+     * the next attempt removes. `forgetTempPath()` already tries three times 200 ms apart;
+     * this asks for up to three more rounds of that, and then hands back whatever is left
+     * so the assertion can NAME it. Nothing here weakens the claim: a survivor still fails.
+     *
+     * @return list<string>
+     */
+    private function survivingPaths(int $rounds = 3): array
+    {
+        $marker = Fixtures::name('tempfile');
+        $left   = Fixtures::leftoverTempPaths()[$marker] ?? [];
+
+        for ($i = 0; $i < $rounds && $left !== []; $i++) {
+            $left = Fixtures::forgetTempPath($marker, $left);
+        }
+
+        return $left;
+    }
 
     /** 'yes' or 'no': does this path exist on the site? */
     private function existsOnSite(string $path): string

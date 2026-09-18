@@ -306,6 +306,15 @@ if (!function_exists('wpmcp_devtokens_main')) {
         // fails midway - a full disk, an editor holding the file open on Windows - would
         // leave a half-written .mcp.json and no client able to read it (review round 1,
         // S1). rename() within one directory replaces the file in one step.
+        //
+        // THE TEMP FILE IS NOT REMEMBERED ANYWHERE, and that is a deliberate small gap
+        // (round 5, review R4-2), the same shape as the backup one: it holds the NEW
+        // bearer values, it exists for the microseconds between the write and the rename,
+        // and every path out of here - success, a failed write, a failed rename - removes
+        // or replaces it. A process killed in that window would leave
+        // `<path>.tmp-<pid>` beside the .mcp.json; nothing in the harness names it, so
+        // what would find it is a human looking in the directory the backup line already
+        // printed, or the next `mint`, whose own temp name differs by pid.
         $tmp    = $path . '.tmp-' . getmypid();
         $failed = '';
 
