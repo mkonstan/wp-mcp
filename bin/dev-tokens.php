@@ -16,6 +16,12 @@
  *            the .mcp.json, replaces ONLY that server's Authorization header, and says
  *            Claude must be restarted. The OLD TOKEN IS NOT REVOKED.
  *
+ * `DEVTOKENS_LABEL` overrides the label `label` and `mint` write. It is a TEST SEAM - the
+ * suite sets it to a name carrying its run prefix, so a run killed mid-test leaves nothing
+ * the fixture purge and the debris check cannot see - and it is read from the environment
+ * of this wp-cli process, never from a request. Leave it unset and the label is
+ * `claude-code dev (local)`, which every command prints in its first line.
+ *
  * WHICH SERVERS. Only `.mcp.json` entries whose URL host equals this site's home host.
  * A server for any other site is never read past its URL, whatever its token.
  *
@@ -39,8 +45,30 @@ if (!defined('ABSPATH')) {
 }
 
 if (!function_exists('wpmcp_devtokens_main')) {
-    /** The label `label` and `mint` write. */
+    /** The label `label` and `mint` write, unless DEVTOKENS_LABEL overrides it. */
     define('WPMCP_DEVTOKENS_LABEL', 'claude-code dev (local)');
+
+    /**
+     * The label this run will write - the default, or DEVTOKENS_LABEL when that is set.
+     *
+     * A TEST SEAM, and it exists for a credential, not for tidiness. The suite runs the
+     * real `mint`, so a run killed between the mint and its teardown used to leave a live
+     * 30-day ADMIN token bound to user 1, wearing the label a developer's own dev tokens
+     * wear: the fixture purge (which matches `wpmcp-test-<run>-%`) could not see it, the
+     * debris check could not list it, and in the admin table it looked like the token Max
+     * uses. With this, a test mints rows whose label carries its run prefix, so the
+     * ordinary purge removes them and the ordinary debris check reports them.
+     *
+     * NOT SETTABLE FROM A REQUEST. It is an environment variable of the wp-cli process
+     * that runs this file; nothing here reads $_GET, $_POST, a header or an option, and
+     * the refusal to run anywhere but a local site happens before any command runs.
+     * An empty or whitespace value is ignored, so the default cannot be blanked away.
+     */
+    function wpmcp_devtokens_label_value() {
+        $label = trim((string) getenv('DEVTOKENS_LABEL'));
+
+        return $label === '' ? WPMCP_DEVTOKENS_LABEL : $label;
+    }
 
     /**
      * @return int exit code: 0 done, 1 refused or failed
@@ -85,7 +113,8 @@ if (!function_exists('wpmcp_devtokens_main')) {
         $servers = wpmcp_devtokens_servers($config['mcpServers'], $host);
 
         echo 'dev-tokens: ', $cmd, ' on ', $host, ' (environment type local), ', count($servers),
-            ' server(s) in .mcp.json for this host.', "\n";
+            ' server(s) in .mcp.json for this host; label and mint would write "',
+            wpmcp_devtokens_label_value(), '".', "\n";
 
         if ($cmd === 'status') {
             foreach ($servers as $name => $server) {
@@ -164,8 +193,12 @@ if (!function_exists('wpmcp_devtokens_main')) {
             return $name . ': no token row on this site matches this server\'s token.';
         }
 
+        // THE EFFECTIVE END, the same reading the state on this line comes from
+        // (review round 2, R2-4). The raw column and wpmcp_token_status() can disagree on
+        // a row granted a wider window than this site allows, and a line that says
+        // "dormant - 400 min left" tells an operator nothing they can act on.
         $now     = time();
-        $minutes = max(0, (int) floor((strtotime($row->active_until . ' UTC') - $now) / 60));
+        $minutes = max(0, (int) floor((wpmcp_effective_active_until($row) - $now) / 60));
         $days    = max(0, (int) floor((strtotime($row->expires_at . ' UTC') - $now) / DAY_IN_SECONDS));
 
         return sprintf(
@@ -192,13 +225,13 @@ if (!function_exists('wpmcp_devtokens_main')) {
 
             $wpdb->update(
                 wpmcp_table(),
-                array('label' => WPMCP_DEVTOKENS_LABEL),
+                array('label' => wpmcp_devtokens_label_value()),
                 array('id' => (int) $server['row']->id),
                 array('%s'),
                 array('%d')
             );
 
-            echo $name, ': row ', (int) $server['row']->id, ' labelled "', WPMCP_DEVTOKENS_LABEL, '".', "\n";
+            echo $name, ': row ', (int) $server['row']->id, ' labelled "', wpmcp_devtokens_label_value(), '".', "\n";
         }
 
         return 0;
@@ -238,7 +271,7 @@ if (!function_exists('wpmcp_devtokens_main')) {
             // else needs edit_user over them.
             wp_set_current_user($user_id);
 
-            $minted = wpmcp_mint('admin', WPMCP_DEVTOKENS_LABEL, 30 * DAY_IN_SECONDS, 365 * DAY_IN_SECONDS, $user_id);
+            $minted = wpmcp_mint('admin', wpmcp_devtokens_label_value(), 30 * DAY_IN_SECONDS, 365 * DAY_IN_SECONDS, $user_id);
 
             if (is_wp_error($minted)) {
                 echo $name, ': mint failed - ', $minted->get_error_message(), "\n";
