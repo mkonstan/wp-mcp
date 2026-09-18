@@ -257,8 +257,10 @@ does not meet a dormant token every morning. Mint one in Settings > WP MCP with 
 field set to what you want; the form states this site's ceiling.
 
 That window is honoured by the site that serves the request. A local database moved to a
-site that reports anything else keeps its rows, and each of those tokens is dormant twelve
-hours after its last renewal there, needing one ordinary **Renew**.
+site that reports anything else keeps its rows, and each of those tokens is dormant at most
+twelve hours after its last renewal there - at once, where that renewal was clipped by the
+token's lifetime - needing one ordinary **Renew**. That Renew stores the narrower window for
+good: mint a new token on the local site to get the long window back.
 
 **A helper for that chore lives in the plugin's source repository**, not in this zip:
 `bin/dev-tokens.php`, run against one site with wp-cli.

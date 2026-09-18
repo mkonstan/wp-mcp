@@ -75,9 +75,15 @@ MCP client fail to connect every morning. The lifetime still bounds the window.
 **The cap is the serving site's, and it holds on every request.** A row's window is read as
 `min(the window it was granted, this site's maximum)`, counted from the moment that window
 last started. So a database copied from a local site to a public one brings no 30-day
-windows with it: each of those tokens is **dormant** 12 hours after its last renewal there,
-and pressing Renew gives it 12 hours like any other token. The row is never deleted or
-revoked, the token itself never changes, and a local site goes on honouring its own 30 days.
+windows with it: each of those tokens is **dormant** at most 12 hours after its last renewal
+there - at once, if that renewal was clipped by the token's lifetime - and pressing Renew
+gives it 12 hours like any other token. The row is never deleted or revoked, the token
+itself never changes, and a local site goes on honouring its own 30 days.
+
+**A Renew away from the local site narrows the row for good.** Renewing on a site with a
+12-hour ceiling stores that ceiling as the row's window, so the same token renewed back on
+the local site gets 12 hours, not 30 days. There is no screen for widening a stored window:
+mint a new token on the local site to get 30 days again.
 
 The *lifetime* - 30 days by default, 365 at most - is the hard end. Past it the token is
 **dead**: Renew is not offered, the hourly cleanup removes the row, and the only way on is

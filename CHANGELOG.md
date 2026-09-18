@@ -28,11 +28,13 @@ admin can renew them for thirty days from when they were minted - see below.
 - **The cap is enforced where a token is USED, not only where one is written.** A row's
   window is honoured as `min(the window it was granted, this site's maximum)`, counted from
   the moment that window last started, so a database copied from a local site to a public
-  one carries no 30-day windows with it: those rows are **dormant** 12 hours after their
-  last renewal there, and an ordinary **Renew** restores them at 12 hours. Nothing is
-  deleted or revoked. Renew stores a clamp it had to apply, so the row it writes says what
-  the site actually granted; the admin table shows the moment the window really ends and
-  says when it was capped.
+  one carries no 30-day windows with it: those rows are **dormant** at most 12 hours after
+  their last renewal there - at once where that renewal was clipped by the lifetime - and an
+  ordinary **Renew** restores them at 12 hours. Nothing is deleted or revoked. Renew stores
+  a clamp it had to apply, so the row it writes says what the site actually granted; the
+  admin table shows the moment the window really ends and says when it was capped. That
+  store is permanent: a token renewed off the local site gets 12 hours when it is renewed
+  back on it, and a new mint is the only way to widen a stored window.
 - **Unchanged:** the lifetime still bounds the window (Renew is still
   `min(now + window, expires_at)`), the default window is still 6 hours everywhere, and the
   v2 -> v3 migration still caps a backfilled window at `WPMCP_MAX_WINDOW`, so a database
