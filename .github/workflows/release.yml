@@ -130,11 +130,11 @@ jobs:
         # Same check as ci.yml, and it has to be here too: ci.yml does not run on a tag
         # push, so this workflow is the only thing standing between a red gate and a
         # published release. Keep the two lists in step. sprint-9 was added in Sprint 9,
-        # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14 and sprint-14b in Sprint 14b, each on the day its gate
+        # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b and sprint-14c in Sprint 14c, each on the day its gate
         # closed.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
@@ -206,12 +206,22 @@ jobs:
         # in src/. The autoloader maps WpMcp\A\B to src/A/B.php, so the first nested
         # namespace needs this to become `cp -r src dist/wp-mcp/` and the gate's file list
         # to become a find. There is no nested class to justify that yet.
+        #
+        # build.txt IS THE ONE FILE THAT IS NOT COPIED, and it is the one file that must
+        # not be: `cp` would put the literal placeholders in the zip and the published
+        # release would report its build as `source`, which is what a git checkout says.
+        # `git archive` is what performs the export-subst substitution (.gitattributes),
+        # so the stamp is taken from there and the gate below checks it separately -
+        # every other file is compared byte for byte against the source, and this one
+        # cannot be.
         run: |
-          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs
+          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs dist/stamp
           cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php dist/wp-mcp/
           cp LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md BUILD-NOTES.md dist/wp-mcp/
           cp src/*.php dist/wp-mcp/src/
           cp docs/*.md dist/wp-mcp/docs/
+          git archive --format=tar HEAD build.txt | tar -x -C dist/stamp
+          cp dist/stamp/build.txt dist/wp-mcp/build.txt
 
       - name: Build wp-mcp.zip (top-level wp-mcp/ folder)
         run: |
@@ -232,6 +242,22 @@ jobs:
               echo "MISMATCH: $f differs from the zipped copy"; fail=1
             fi
           done
+          # THE BUILD STAMP, WHICH IS CHECKED AND NOT COMPARED. Its whole job is to
+          # differ from the source: the source carries git's placeholders and the zip
+          # carries this commit. What must hold is that the substitution happened - a
+          # zip with a leftover placeholder reports `source` and is indistinguishable
+          # from a checkout, which is the confusion the stamp exists to end.
+          stamp="verify/wp-mcp/build.txt"
+          expected=$(git rev-parse --short HEAD)
+          if [ ! -f "$stamp" ]; then
+            echo "MISSING: build.txt is not in the zip, so the release reports no build"; fail=1
+          elif grep -q 'Format:' "$stamp"; then
+            echo "UNSTAMPED: build.txt still carries a git placeholder"; cat "$stamp"; fail=1
+          elif ! grep -qx "short=$expected" "$stamp"; then
+            echo "WRONG COMMIT: build.txt does not say short=$expected"; cat "$stamp"; fail=1
+          else
+            echo "build stamp: $(grep -x "short=$expected" "$stamp")"
+          fi
           # Every PHP file the plugin loads at runtime is in the zip and parses there.
           for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php $(ls src/*.php); do
             php -l "verify/wp-mcp/$f" || fail=1
