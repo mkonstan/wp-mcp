@@ -380,19 +380,28 @@ someone else's - whose post the file happens to be attached to makes no differen
 way - and it has to be an image. `0` removes the image. It round-trips through
 `get-post`'s `featured_image`.
 
-**"Only the fields you send change" has two exceptions, and both are WordPress rather
-than this plugin.** Measured on a bare site (WP 7.0), each through `update-post` itself:
+**"Only the fields you send change" has two exceptions - `date` and `slug` - and both are
+WordPress rather than this plugin.** Measured on a bare site (WP 7.0), each through
+`update-post` itself:
 
 | Case | What else changed | `changed` |
 |---|---|---|
 | A draft whose `post_date_gmt` is still empty, any update at all (even title-only) | `date` moves to "now" - core's "drafts shouldn't be assigned a date unless the user did so" rule | names `date`, and the result carries the new `date` and `date_gmt` |
 | A post whose slug is still empty, when a status-only update **publishes** it | `slug` is derived from the title - core fills `post_name` when a status leaves the draft/pending set | names `slug` |
 | The same draft moved to `pending` instead | nothing; the slug stays empty | - |
-| A draft you *did* date, or any published post | nothing | - |
+| **Any** post trashed by `status: "trash"` alone - a slug-less draft | `slug` `""` -> `__trashed`; `date` moved and `date_gmt` set | `["status","date","slug"]` |
+| **Any** post trashed by `status: "trash"` alone - a draft with its own slug `wpmcp-test-slugged-probe` | `slug` -> `wpmcp-test-slugged-probe__trashed` | `["status","date","slug"]` |
+| A draft you *did* date, or any published post, edited without trashing | nothing | - |
 
-`update-post` reports both, so you never have to re-read the post to find out. Nothing
-else changes unsent: status, terms, author, excerpt and the featured image are only ever
-what you asked for.
+So `slug` changes unsent in two ways: **trashing re-slugs every post**, whatever its slug
+was, and **publishing slugs a post that has none**. `draft -> private` was not measured; it
+is covered by construction rather than by a rule about statuses, because `update-post`
+compares the slug column before and after the write and names whatever core did
+(*reasoned, not measured*).
+
+`update-post` reports both fields, so you never have to re-read the post to find out.
+Nothing else changes unsent: status, terms, author, excerpt and the featured image are
+only ever what you asked for.
 
 Both tools reply with `changed`: every field this call actually changed. The fields you
 named come first, in the table's order above; then, on `update-post`, `date` and `slug`

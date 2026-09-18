@@ -337,7 +337,10 @@ final class UpdatePostContractTest extends FixtureIntegrationTestCase
         );
 
         self::assertStringContainsString('re-dates', $update, 'update-post no longer names the re-dating case.');
-        self::assertStringContainsString('slugs a slug-less', $update, 'update-post no longer names the slug case.');
+        // Round 3: trashing re-slugs EVERY post (`x` -> `x__trashed`, `''` -> `__trashed`,
+        // measured by the queen through the tools), not only a slug-less one on publish.
+        self::assertStringContainsString('re-slugs a trashed', $update, 'update-post no longer names the trash case.');
+        self::assertStringContainsString('slug-less one it publishes', $update, 'update-post no longer names the publish case.');
         self::assertStringContainsString('NEWEST revision', $update, 'update-post no longer says which revision is which.');
         self::assertStringContainsString('pre-edit', $update, 'update-post no longer names the undo copy.');
         // Round 2: the revision sentence must be conditional on a TEXT change, because a

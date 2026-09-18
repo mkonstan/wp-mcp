@@ -69,7 +69,10 @@ admin can renew them for thirty days from when they were minted - see below.
   whose slug is still empty makes core derive one from the title, so a status-only update
   changes `slug` as well. `changed` names that too. Moving the same draft to `pending`
   does not - core fills `post_name` only when a status leaves the draft/pending set - and
-  a post that already has a slug keeps it.
+  a post that already has a slug keeps it on publishing. **Trashing re-slugs every post**:
+  core appends `__trashed` (`""` -> `__trashed`, `x` -> `x__trashed`), and `changed`
+  names that as well - it compares the column before and after, so it reports whatever
+  core did rather than following a list of statuses.
 - **The revision sentence now needs a text change.** Core saves a revision only when
   title, content or excerpt differ, so after a status-only, terms-only or same-text update
   there is no new revision and "the one below the newest" is some earlier edit's text.
