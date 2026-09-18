@@ -51,21 +51,31 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
     private static function sentinelLabel(): string { return 'dev sentinel ' . Fixtures::name('g6-sentinel'); }
 
     /**
-     * THE EXACT LABEL `bin/dev-tokens.php` writes, on a row this class did not mint
-     * through the script - the operator's own dev token, as it will look the moment the
-     * queen runs `dev-tokens.sh label`. Nothing in a run may delete it.
+     * THE LABEL `bin/dev-tokens.php` writes, on a row this class did not mint through the
+     * script - the operator's own dev token, as it looks the moment somebody runs
+     * `dev-tokens.sh label`. Nothing in a run may delete it.
+     *
+     * IT CARRIES THIS RUN'S PREFIX AFTER THAT LABEL (round 3, review R2-1). It still does
+     * not START with the prefix, so `purge()`'s anchored DELETE leaves it and the digest
+     * snapshot counts it as a non-fixture row - which is the whole point of the decoy -
+     * but `leftoverTokenLabels()` finds it, so a run killed while it exists leaves a row
+     * the debris check names instead of one nobody can see.
      */
-    private static function operatorLabel(): string { return 'claude-code dev (local)'; }
+    private static function operatorLabel(): string { return 'claude-code dev (local) ' . Fixtures::name('g6-operator-row'); }
     private static function scratchLabel(): string { return Fixtures::name('g6-scratch'); }
     private static function decoyLabel(): string { return 'dev decoy ' . Fixtures::name('g6-operator'); }
-    private static function lookalikeSeedLabel(): string { return 'lookalike seed ' . Fixtures::name('g6-lookalike'); }
 
     private static int $sentinelId = 0;
     private static int $operatorId = 0;
-    private static int $lookalikeId = 0;
 
-    /** An operator's own label that merely CONTAINS the prefix, with no run id after it. */
+    /**
+     * An operator's own label that merely CONTAINS the prefix, with no run id after it -
+     * the one shape the debris listing is meant to ignore, and therefore the one shape a
+     * crashed run could leave unseen. It lives for the length of ONE test, inside a
+     * try/finally that deletes it by id, rather than for the whole class.
+     */
     private static function lookalikeLabel(): string { return 'ops notes ' . Fixtures::PREFIX . 'keepme'; }
+    private static function lookalikeSeedLabel(): string { return 'lookalike seed ' . Fixtures::name('g6-lookalike'); }
 
     public static function setUpBeforeClass(): void
     {
@@ -111,14 +121,7 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
             self::$operatorId
         ));
 
-        Fixtures::mintToken('read', self::lookalikeSeedLabel(), 1);
-        self::$lookalikeId = Fixtures::tokenIdLabelled(self::lookalikeSeedLabel());
-
-        WpCli::evaluate(sprintf(
-            'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
-            self::literal(self::lookalikeLabel()),
-            self::$lookalikeId
-        ));
+        
     }
 
     public static function tearDownAfterClass(): void
@@ -130,11 +133,6 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
-        if (self::$lookalikeId > 0) {
-            Fixtures::revokeTokenIds([self::$lookalikeId]);
-            self::$lookalikeId = 0;
-        }
-
         if (self::$operatorId > 0) {
             Fixtures::revokeTokenIds([self::$operatorId]);
             self::$operatorId = 0;
@@ -241,12 +239,39 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
 
         // And an operator's own label that merely contains the prefix is NOT debris
         // (round 2, review S6): nothing follows the prefix that this harness would write,
-        // so nobody should go hunting for the run that left it.
-        self::assertArrayNotHasKey(
-            self::$lookalikeId,
-            $found,
-            'A label that merely contains the fixture prefix is reported as foreign debris.'
-        );
+        // so nobody should go hunting for the run that left it. Built and removed inside
+        // this test, because it is by definition the one row a killed run would hide.
+        Fixtures::mintToken('read', self::lookalikeSeedLabel(), 1);
+        $lookalikeId = Fixtures::tokenIdLabelled(self::lookalikeSeedLabel());
+
+        try {
+            WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
+                self::literal(self::lookalikeLabel()),
+                $lookalikeId
+            ));
+
+            self::assertArrayNotHasKey(
+                $lookalikeId,
+                Fixtures::leftoverTokenLabels(),
+                'A label that merely contains the fixture prefix is reported as foreign debris.'
+            );
+
+            // A bare `wpmcp-test-` label, the pre-run-id shape, IS still reported (R2-5).
+            WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->update(wpmcp_table(), array("label" => %s), array("id" => %d));',
+                self::literal(Fixtures::PREFIX . 'legacy-name'),
+                $lookalikeId
+            ));
+
+            self::assertArrayHasKey(
+                $lookalikeId,
+                Fixtures::leftoverTokenLabels(),
+                'A legacy wpmcp-test- label is no longer reported as debris.'
+            );
+        } finally {
+            Fixtures::revokeTokenIds([$lookalikeId]);
+        }
     }
 
     /**

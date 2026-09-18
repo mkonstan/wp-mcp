@@ -33,7 +33,19 @@ use WpMcp\Tests\Support\WpCli;
 
 final class DevTokensScriptTest extends FixtureIntegrationTestCase
 {
-    private const DEV_LABEL = 'claude-code dev (local)';
+    /** What the script writes when nothing overrides it - asserted, never written here. */
+    private const SHIPPED_LABEL = 'claude-code dev (local)';
+
+    /**
+     * What this class makes the script write instead, through DEVTOKENS_LABEL.
+     *
+     * THE SEAM EXISTS FOR A CREDENTIAL (round 3, review R2-1). `mint` mints a real 30-day
+     * admin token; with the shipped label, a run killed between the mint and teardown left
+     * that token live, unprefixed, invisible to purge() and to the debris check, and
+     * indistinguishable in the admin table from the developer's own dev token. A prefixed
+     * label makes every row this class causes an ordinary fixture.
+     */
+    private static function devLabel(): string { return Fixtures::name('devtok-label'); }
 
     private static function login(): string { return Fixtures::name('devtok-owner'); }
     private static function activeLabel(): string { return Fixtures::name('devtok-active'); }
@@ -87,6 +99,11 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
         if (self::$dir === 'NO-DIR' || self::$host === '') {
             throw new \RuntimeException('Could not prepare the dev-tokens fixture directory or read the home host.');
         }
+
+        // The files written there hold raw fixture tokens, and the site's temp directory
+        // cannot be listed on this host - so the path is remembered in a fixture transient
+        // that the debris check reports and purge() clears (round 3, review R2-1).
+        Fixtures::noteTempPath(self::$dir);
 
         foreach ([
             'here-active'    => self::activeLabel(),
@@ -193,6 +210,69 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
         self::assertStringNotContainsString('elsewhere', $out, 'A server on another host was considered.');
         self::assertStringNotContainsString('docs-server', $out);
         self::assertStringContainsString('5 server(s) in .mcp.json for this host', $out);
+
+        // The seam is in force for this class, and the line says which label a write would
+        // use - so an operator always reads the truth, and the test can tell the two apart.
+        self::assertStringContainsString('label and mint would write "' . self::devLabel() . '"', $out);
+
+        // Without the override the script writes its own label, and the line says so.
+        [$plainCode, $plainOut] = $this->runShippedLabelStatus($this->writeConfig('shipped'));
+
+        self::assertSame(0, $plainCode);
+        self::assertStringContainsString(
+            'label and mint would write "' . self::SHIPPED_LABEL . '"',
+            $plainOut,
+            'With DEVTOKENS_LABEL unset the script no longer writes its documented label.'
+        );
+    }
+
+    /**
+     * R2-4. The minutes on a status line come from the SAME reading as the state beside
+     * them - the effective end, not the raw column.
+     *
+     * A row granted more than this site's ceiling is the only way the two can differ, and
+     * the plugin cannot mint one here, so the fixture row is widened by hand: 60 days of
+     * grant with 40 days left by its column is 10 days left by what this site honours.
+     * With the raw column, the line would promise 57,600 minutes of a window that answers
+     * for 14,400.
+     *
+     * @group sprint-14b
+     */
+    public function testTheMinutesLeftComeFromTheWindowThisSiteHonours(): void
+    {
+        $id = self::$ids['here-active'];
+
+        try {
+            WpCli::evaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->query($wpdb->prepare("UPDATE " . wpmcp_table()'
+                . ' . " SET window_secs = %%d, active_until = %%s WHERE id = %%d", 60 * DAY_IN_SECONDS,'
+                . ' gmdate("Y-m-d H:i:s", time() + 40 * DAY_IN_SECONDS), %d));',
+                $id
+            ));
+
+            [$code, $out, $err] = $this->runScript('status', $this->writeConfig('honoured'), '');
+
+            $this->assertNoSecret($out . $err);
+            self::assertSame(0, $code, 'status failed: ' . $err);
+
+            $line = $this->lineFor($out, 'here-active');
+
+            self::assertSame(
+                1,
+                preg_match('/- (\d+) min left in the active window/', $line, $m),
+                "The status line carries no minutes: {$line}"
+            );
+
+            // 10 days, not 40: 14400 minutes, within a minute of drift.
+            self::assertEqualsWithDelta(10 * 24 * 60, (int) $m[1], 2, "Line: {$line}");
+        } finally {
+            WpCli::tryEvaluate(sprintf(
+                'global $wpdb; echo (int) $wpdb->query($wpdb->prepare("UPDATE " . wpmcp_table()'
+                . ' . " SET window_secs = %%d, active_until = %%s WHERE id = %%d", 3600,'
+                . ' gmdate("Y-m-d H:i:s", time() + 3600), %d));',
+                $id
+            ));
+        }
     }
 
     /**
@@ -218,7 +298,7 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
             self::assertSame(0, $code, 'label failed: ' . $err);
 
             foreach ($restore as $id => $label) {
-                self::assertSame(self::DEV_LABEL, $this->labelOf($id), "Row {$id} was not labelled.");
+                self::assertSame(self::devLabel(), $this->labelOf($id), "Row {$id} was not labelled.");
             }
 
             self::assertSame(self::elsewhereLabel(), $this->labelOf(self::$ids['elsewhere']), 'The other host\'s row was labelled.');
@@ -295,7 +375,7 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
             self::assertTrue(self::$tokens['elsewhere'] === ($new['elsewhere'] ?? ''), "The other host's bearer value was rewritten.");
 
             foreach ($newRows as $server => $row) {
-                self::assertSame(self::DEV_LABEL, $row['label']);
+                self::assertSame(self::devLabel(), $row['label']);
                 self::assertSame('admin', $row['scope']);
                 self::assertSame(30 * 86400, (int) $row['window_secs']);
                 self::assertEqualsWithDelta((int) $row['now'] + 365 * 86400, (int) $row['expires_at'], 120);
@@ -349,6 +429,10 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
 
         self::assertNotSame('NO-WRITE', $path);
 
+        // Remembered, because the site's temp directory cannot be listed and this file
+        // holds raw fixture tokens (round 3, review R2-1).
+        Fixtures::noteTempPath($path);
+
         return $path;
     }
 
@@ -362,11 +446,12 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
     private function runScript(string $cmd, string $path, string $prefix): array
     {
         $result = WpCli::evaluateWithStatus(sprintf(
-            '%s putenv("DEVTOKENS_CMD=" . %s); putenv("DEVTOKENS_MCP_JSON=" . %s);'
+            '%s putenv("DEVTOKENS_CMD=" . %s); putenv("DEVTOKENS_MCP_JSON=" . %s); putenv("DEVTOKENS_LABEL=" . %s);'
             . ' require dirname((new ReflectionFunction("wpmcp_mint"))->getFileName()) . "/bin/dev-tokens.php";',
             $prefix,
             self::literal($cmd),
-            self::literal($path)
+            self::literal($path),
+            self::literal(self::devLabel())
         ));
 
         if (preg_match_all('/minted row (\d+)/', $result[1], $m)) {
@@ -375,7 +460,26 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
             }
         }
 
+        if (preg_match('/^Backup of the previous file: (.+)$/m', $result[1], $b)) {
+            Fixtures::noteTempPath(trim($b[1]));
+        }
+
         return $result;
+    }
+
+    /**
+     * One `status` run with DEVTOKENS_LABEL explicitly EMPTY, which is how the shipped
+     * default is asserted without any row being written.
+     *
+     * @return array{0:int,1:string,2:string}
+     */
+    private function runShippedLabelStatus(string $path): array
+    {
+        return WpCli::evaluateWithStatus(sprintf(
+            'putenv("DEVTOKENS_CMD=status"); putenv("DEVTOKENS_MCP_JSON=" . %s); putenv("DEVTOKENS_LABEL=");'
+            . ' require dirname((new ReflectionFunction("wpmcp_mint"))->getFileName()) . "/bin/dev-tokens.php";',
+            self::literal($path)
+        ));
     }
 
     private function readSiteFile(string $path): string
