@@ -1,7 +1,7 @@
 name: Release
 
 # Build + gate + publish the install zip whenever a version tag is pushed.
-#   git tag v1.0.0 && git push origin v1 --tags
+#   git tag v1.1.0 && git push origin v1.1 --tags
 # produces a GitHub Release with a verified wp-mcp.zip attached. See docs/RELEASE.md.
 #
 # The tests run HERE, in this workflow, rather than being read off ci.yml: ci.yml is
@@ -220,7 +220,10 @@ jobs:
           cp LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md BUILD-NOTES.md dist/wp-mcp/
           cp src/*.php dist/wp-mcp/src/
           cp docs/*.md dist/wp-mcp/docs/
-          git archive --format=tar HEAD build.txt | tar -x -C dist/stamp
+          # `-f -` is explicit on purpose: GNU tar on Debian and Ubuntu defaults its
+          # archive to stdin, and nothing else does. On another runner image, or with
+          # bsdtar, a bare `tar -x` reads a tape device and this step dies saying so.
+          git archive --format=tar HEAD build.txt | tar -xf - -C dist/stamp
           cp dist/stamp/build.txt dist/wp-mcp/build.txt
 
       - name: Build wp-mcp.zip (top-level wp-mcp/ folder)
