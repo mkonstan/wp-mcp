@@ -130,6 +130,13 @@ function wpmcp_build_stamp_parse($text) {
         if (!array_key_exists($key, $out) || $val === '') { continue; }
 
         // AN UNSUBSTITUTED PLACEHOLDER IS NOT A VALUE. This is a checkout.
+        //
+        // DELIBERATELY REDUNDANT with wpmcp_build_id_valid() below, which also refuses
+        // a `$`, so mutating this line alone changes no observable behaviour today. It
+        // stays because it is the only place that states the RULE rather than a shape:
+        // the day somebody loosens the id pattern - for a packager whose build ids are
+        // not hex - this is what still keeps `$Format:%h$` off the admin page, which is
+        // the exact bug the whole stamp exists to prevent.
         if ($val[0] === '$') { continue; }
 
         $out[$key] = $val;
