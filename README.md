@@ -37,6 +37,32 @@ Activation creates the token table and the trace log directory. Deleting the plu
 removes both, along with the plugin's options and its cron hook. Deactivating leaves
 everything in place.
 
+### Which build is this site running?
+
+The version alone cannot tell two builds apart - every build of 1.1.0 says `1.1.0` - so
+every copy also carries the **commit it was built from**, and four places will tell you
+which:
+
+| Where | What you see |
+|---|---|
+| **Plugins** screen, beside the version | `Build: 3b5d129` |
+| **Settings > WP MCP**, under the heading | `Version 1.1.0 · build 3b5d129 (committed …)` |
+| `initialize` → `serverInfo.build` | what your client can report |
+| `site-info` → `wp_mcp.build` | what an agent can read without leaving the tools |
+
+All four print the same string. It is written into the zip by `git archive` when the zip
+is built, so it cannot drift from the code it names.
+
+**`source` means this is not a zip.** A site running the plugin out of a git checkout - a
+clone in `wp-content/plugins`, a symlink, a development junction - has no build to report,
+and the plugin says `source` rather than inventing a number. Nothing is wrong with such a
+site; that is how the plugin is developed. But if a site you *uploaded a zip to* says
+`source`, that zip was not built by the recipe in [`docs/RELEASE.md`](docs/RELEASE.md) and
+there is no way to tell which one it is.
+
+The `Version:` header, `WPMCP_VER` and `serverInfo.version` stay a plain semantic version
+on every build; the build sits beside the version and never inside it.
+
 ## Mint a token
 
 **Settings > WP MCP**. Four fields decide what the token can do.
@@ -347,7 +373,16 @@ someone else's - whose post the file happens to be attached to makes no differen
 way - and it has to be an image. `0` removes the image. It round-trips through
 `get-post`'s `featured_image`.
 
-Both tools reply with `changed`: the fields this call named, in the order above.
+**A draft nobody dated is re-dated by every update, including one that only touches the
+title.** WordPress treats a draft whose `post_date_gmt` is still empty as undated and moves
+it to "now" on any update - core's own "drafts shouldn't be assigned a date unless the user
+did so" rule. So "only the fields you send change" has exactly one exception, and it is
+this one. `update-post` names `date` in `changed` when that happened and returns the new
+`date` and `date_gmt` beside it, so you never have to re-read the post to find out. A draft
+you *did* date, and any published post, are left alone.
+
+Both tools reply with `changed`: the fields this call named, in the order above - plus
+`date` on `update-post` when WordPress moved it without being asked.
 
 Backslashes survive. A Windows path, a regular expression or a JSON document written
 into a title, a body, an excerpt, a term name, a media title or alt text, or a comment
@@ -360,6 +395,18 @@ it writes - WordPress on its own saves one only afterwards, of the new text, so 
 edit of a post that had no revisions (every post `create-post` makes, and every imported
 one) used to leave nothing to go back to. On a post whose latest revision already matches
 it, that save is skipped and costs nothing.
+
+**Which revision is the undo, and it is not the newest one.** After any edit, the newest
+revision holds *the text you just wrote* - that is the one WordPress saves afterwards - and
+the one below it holds the text as it was before the call. Restoring the newest revision
+therefore changes nothing; restoring the one below it is the undo. Measured over three
+successive edits of one post:
+
+| After | newest revision | the one below it |
+|---|---|---|
+| edit 1, `C0` → `C1` | `C1` | `C0` |
+| edit 2, `C1` → `C2` | `C2` | `C1` |
+| edit 3, `C2` → `C3` | `C3` | `C2` |
 
 - `list-revisions {id, limit?, page?}` lists a post's revisions newest first, paged like
   `list-posts` with `has_more`: id, date, author `{id, name}`, title and `autosave`. No

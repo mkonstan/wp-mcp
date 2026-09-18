@@ -22,6 +22,7 @@ who checks that pass on every knock and then does the work as that user.
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
 | `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
 | `uninstall.php` | Deleting the plugin: both tables, the options, the log directory, the cron hook. |
+| `build.txt` | Three git placeholders. The only `export-subst` file: `git archive` writes the commit into it when a zip is cut. |
 
 `src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
 `spl_autoload_register` in `wp-mcp.php`. There is no Composer at runtime: `composer.json`
@@ -248,6 +249,39 @@ The deferred half exists for one reason: `set_post_thumbnail()` needs a post id,
 create does not exist yet - but its capability check does not. So the refusal happens
 before `wp_insert_post()` runs and only the writing waits, which is what stops a refused
 create leaving an orphan behind.
+
+## Which build is running, and why the version cannot say
+
+A version string cannot identify a build. Every build of 1.1.0 says `1.1.0`, so two zips
+cut a month apart are indistinguishable once installed - the filename is the only thing
+that ever differed, and a filename does not survive installation. That cost an hour of
+misdiagnosis on a live site in September 2026.
+
+So identity is a second field, and it is produced by git rather than maintained by anyone.
+`build.txt` carries `$Format:%H$`, `$Format:%h$` and `$Format:%cI$`; `.gitattributes` marks
+that one file `export-subst`; `git archive` substitutes them for the commit being archived.
+Both zip recipes go through `git archive`, so every zip carries its commit and no zip can
+carry the wrong one.
+
+`wpmcp_build_stamp()` reads the file once per request and `wpmcp_build_stamp_parse()` turns
+it into three fields, discarding anything that is still a placeholder or that does not look
+like a build id - the value is printed on an admin page and put on the wire, so its shape
+is checked rather than trusted. `wpmcp_build_label()` is then the one string four surfaces
+print: the Plugins-screen row (`plugin_row_meta`), the settings page
+(`wpmcp_admin_build_line()`), `serverInfo.build` (`wpmcp_server_info()`) and `site-info`'s
+`wp_mcp.build`. Four callers, one function, so "they all agree" is a property of the code.
+
+**A checkout is the normal case and says so.** Running out of a git working tree leaves the
+placeholders literal; the plugin then reports `WPMCP_BUILD_UNKNOWN`, the word `source`, and
+invents nothing. No warning, no notice, no different behaviour - an absent stamp is a fact
+about the copy, not a defect.
+
+**The stamp is beside the version, never inside it.** `Version:` in the header is what
+WordPress displays and what the release tooling and the version-consistency test read, and
+the substitution happens in `git archive` rather than in the tree - so a header carrying
+the stamp would read `Version: 1.1.0-dev+$Format:%h$` in every checkout. Keeping them apart
+costs one thing, and `plugin_row_meta` pays it: the Plugins screen's own `Version` column
+still says `1.1.0`, so the build is appended to that same row.
 
 ## Why it looks plain
 

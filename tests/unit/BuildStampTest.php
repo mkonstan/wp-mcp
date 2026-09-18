@@ -59,9 +59,10 @@ final class BuildStampTest extends TestCase
      */
     public function testAnUnsubstitutedStampIsNotABuild(): void
     {
-        // Built from parts so this file does not itself contain a placeholder - it is
-        // not marked export-subst, but a reader grepping for one should find exactly
-        // one file that carries them.
+        // Built from parts, so this file does not itself contain a literal placeholder.
+        // Nothing here is marked export-subst, so nothing would substitute it - the
+        // point is that a reader grepping for a placeholder finds build.txt (the one
+        // file git rewrites) and ARCHITECTURE.md (which explains it), and not a test.
         $dollar = '$';
         $text   = "# a comment\n"
             . 'commit=' . $dollar . 'Format:%H' . $dollar . "\n"

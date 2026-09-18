@@ -13,6 +13,53 @@ after the plugin files change. Existing tokens keep answering until exactly the 
 they always would have; at that moment they go **dormant** instead of vanishing, and an
 admin can renew them for thirty days from when they were minted - see below.
 
+### Added: every build says which build it is
+
+- **A build stamp, written by git, never by hand.** `build.txt` ships at the root of the
+  plugin carrying three placeholders; `.gitattributes` marks that one file `export-subst`,
+  so `git archive` - which is how every zip of this plugin is cut - replaces them with the
+  commit it is archiving. Nothing has to be bumped, and a build cannot claim a commit it
+  was not built from.
+- **Four places report it**, and all four print the same string because all four call
+  `wpmcp_build_label()`: the **Plugins** screen (in the row meta, beside the version the
+  header supplies), **Settings > WP MCP** (under the heading, with the commit date), the
+  `initialize` handshake (`serverInfo.build`), and `site-info` (`wp_mcp.build`, a new
+  nested object also carrying `wp_mcp.version`).
+- **A copy that is not a build says `source`.** Running the plugin out of a git checkout
+  leaves the placeholders literal, and the plugin reports the word `source` rather than the
+  version, a file's mtime, or the placeholder itself. Nothing fails, warns or behaves
+  differently when the stamp is absent - that is the ordinary case on a development site.
+- **The version is untouched.** `Version:`, `WPMCP_VER` and `serverInfo.version` stay a
+  plain semantic version on every build, release or dev. The stamp sits *beside* the
+  version, never inside it, so there is no `-dev+<sha>` anywhere and nothing for a release
+  to strip. `docs/RELEASE.md` records the decision, what it costs (the Plugins screen's own
+  `Version` column still reads `1.1.0` for every build, which is why the row meta exists)
+  and both zip recipes.
+- **Why:** every dev zip so far reported `Version: 1.1.0`, so an installed zip could not be
+  told from an older installed zip at all. Only the filename distinguished them, and a
+  filename is gone the moment the plugin is installed.
+- New filter **`wpmcp_build_id`**, for a packager that stamps builds some other way. It can
+  only supply a value that already looks like a build id; it cannot put a sentence, a
+  version number or an empty string on the admin page or on the wire.
+
+### Fixed: two sentences in `update-post` that described the opposite of what it does
+
+- **"Only the fields you send change" was false for a draft nobody dated.** WordPress
+  re-dates a draft whose `post_date_gmt` is still empty to "now" on *any* update, so editing
+  the title alone moved `date`. The description now names that case, and `changed` now
+  names `date` when it happened - with `date` and `date_gmt` returned beside it, so a
+  caller does not have to re-read the post to find out. A dated draft and a published post
+  are unaffected, and `changed` does not name `date` for them.
+- **"The current title, content and excerpt are saved as a revision first" read backwards.**
+  The revision an edit *creates* holds the NEW text; the pre-edit text is the one BELOW it.
+  A reader following that sentence literally restored what they had just written and
+  concluded the undo was broken. `update-post` now says which revision is which and names
+  `restore-revision` as what undoes to the lower one; `restore-revision`'s own wording,
+  corrected earlier, already said the same thing and the two now agree. README's *Undoing a
+  content edit* carries the measured table.
+- Both were found by a client reading the tool's own contract on a real site, not by the
+  test suite.
+
 ### Added: a 30-day active window on a local development site
 
 - **The window cap now follows the site's environment type.** `wpmcp_max_window()` answers
