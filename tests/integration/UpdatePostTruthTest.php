@@ -371,11 +371,14 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         $id   = $this->newPost(['post_title' => Fixtures::name('ut-link'), 'post_status' => 'draft']);
         $data = $this->update($id, ['status' => 'publish']);
 
-        self::assertSame(self::permalink($id), $data['link'], 'Publishing a draft answered a link that is not its permalink now.');
+        // The SCHEME is not compared: wp-cli has no HTTPS request, so home_url() answers http
+        // there while the tool, called over https, answers https (KB 0.8) - measured on
+        // jaygroup. What this asserts is the path: pretty, not the draft's `?p=N`.
+        self::assertSame(self::unscheme(self::permalink($id)), self::unscheme($data['link']), 'Publishing a draft answered a link that is not its permalink now.');
         self::assertStringNotContainsString('?p=', $data['link'], 'Publishing a draft answered the draft link.');
 
         $data = $this->update($id, ['slug' => Fixtures::name('ut-link-renamed')]);
-        self::assertSame(self::permalink($id), $data['link'], 'A slug change answered the old link.');
+        self::assertSame(self::unscheme(self::permalink($id)), self::unscheme($data['link']), 'A slug change answered the old link.');
         self::assertStringContainsString(Fixtures::name('ut-link-renamed'), $data['link']);
     }
 
@@ -472,6 +475,11 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         }
 
         return $decoded;
+    }
+
+    private static function unscheme(string $url): string
+    {
+        return (string) preg_replace('#^https?://#', '', $url);
     }
 
     /** The permalink as another process reads it now. */
