@@ -250,6 +250,41 @@ create does not exist yet - but its capability check does not. So the refusal ha
 before `wp_insert_post()` runs and only the writing waits, which is what stops a refused
 create leaving an orphan behind.
 
+## What a tool returns can be written back
+
+A client reads a field and later sends it back - to change something beside it, or because
+it is echoing the object it was given. So every field a tool returns that some tool accepts
+is held to one rule: **written back unchanged, it stores the same bytes.** Two halves make
+that true, and which half a field gets depends on how WordPress stores it:
+
+- **Decode on read, where core escapes on write.** A term name is stored with `&`, `<` and
+  `>` as entities by core's own filter, and menu labels wp-admin saved can carry `&#038;`
+  for `&` (eight do on the stress site). Both come back through
+  `wpmcp_decode_specialchars()` - the exact inverse of that escaping, no wider - so a
+  client sees the text a person typed, and core re-escapes it identically when it is sent.
+- **Leave alone on write, where the stored value is already the read value.** `update-post`
+  compares every sent field with the stored row BEFORE shaping it, and does not write one
+  that is equal: re-shaping is what turned a wp-admin title `x<y z` into `x`, and what
+  turned a draft nobody dated into a dated one. An update that changes nothing writes
+  nothing at all. `update-menu-item` keeps a label's stored bytes when it is sent the
+  decoded form of them.
+
+`changed` follows from the same idea: it is a diff of the row taken before and after the
+write (`wpmcp_post_state()`), not a list of what was sent, so it names core's own moves - a
+re-dated draft, a re-slug on a status change, a default category - as well as the caller's,
+and never names a field that did not move. The table of every field, its read tool, its
+write tool and what was measured on both test sites is in the sprint-14d report.
+
+## One envelope, one date, and an end
+
+Every paged list tool - `list-posts`, `list-revisions`, `list-terms`, `list-media`,
+`list-comments`, `list-users` - answers `{count, page, limit, has_more, items}` through
+`wpmcp_page_envelope()`, fetches `limit + 1` rows to answer `has_more` without a total, and
+stops at page 100 (`WPMCP_PAGE_CAP`): **`has_more` is false at the cap**, and every
+description says so, because a clamp that kept answering `true` made an agent paging to the
+end loop on page 100 for ever. Every date a list tool returns is ISO 8601, site-local, with
+no offset - the form `get-post` gives `date` - whether the column is stored local or UTC.
+
 ## Which build is running, and why the version cannot say
 
 A version string cannot identify a build. Every build of 1.1.0 says `1.1.0`, so two zips

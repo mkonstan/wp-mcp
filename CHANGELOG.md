@@ -5,13 +5,103 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 ## 1.1.0
 
 **Unreleased.** The auth surface, rebuilt around what hosted MCP clients actually do.
-Three breaking changes, all in how a token is presented and how long it lives. The tools,
-the protocol negotiation and the wire format are untouched.
+Three breaking changes, all in how a token is presented and how long it lives. The protocol
+negotiation and the wire format are untouched. The tools grew, and some of their results
+changed shape so that what they return is true and can be written back: every such change
+is marked **(shape)** under the first heading below.
 
 Upgrading is one database migration (schema revision 3) that runs on the first request
 after the plugin files change. Existing tokens keep answering until exactly the moment
 they always would have; at that moment they go **dormant** instead of vanishing, and an
 admin can renew them for thirty days from when they were minted - see below.
+
+### Changed: every sentence a tool tells a client is true, and every value it returns can be written back
+
+Found by three cold clients and two live runs reading the tools on real sites, and measured
+on both test sites before anything was changed. **Shape changes a client can notice are
+marked (shape).**
+
+**Writing back what was read**
+
+- **`update-post` does not write a field sent with the value it already has**, and an update
+  that changes nothing writes nothing - no revision, no new modified date, no re-dated draft.
+  Measured before: a title wp-admin stored as `x<y z` was stripped to `x` when written back;
+  a draft nobody dated became a dated one when its `date` was written back; an identical
+  title created a revision.
+- **`changed` is now what differs, not what was sent (shape).** It compares the row before
+  and after the write, so an identical title is no longer reported, and whatever core moved
+  on its own - a re-dated draft, a re-slug, a default category - is. On `create-post`
+  `changed` still lists the fields the call set.
+- **`update-post`'s `terms` takes `get-post`'s own `{id, name, slug}` entries.** Sending them
+  back used to create a category named `Array` and assign it. Any other non-scalar is refused
+  by name in `terms_refused`.
+- **An unchanged `author` or `featured_image` needs no capability.** An Author writing back
+  their own post's author id was refused.
+- **Term names come back as typed (shape):** `list-terms`, `get-post`'s `terms`, `create-term`,
+  and the menu `name` in `list-menus` and `get-menu` decode `&amp;`, `&lt;`, `&gt;` and their
+  numeric forms, which core adds on save. `Arts &amp; Crafts` is now `Arts & Crafts`; sending
+  it back names the same term and stores the same bytes.
+- **Menu labels come back as typed (shape):** `get-menu` decodes the same set in an item's own
+  label, so a label wp-admin stored as `FDA &#038; GMP` reads `FDA & GMP`, and
+  `update-menu-item` keeps the stored bytes when that is sent back. A url sent back as read is
+  also kept rather than re-validated.
+- **`create-term` refuses a name the taxonomy already has, naming the existing term's id.**
+  Core's own refusal used to reach the client as an opaque `-32603`, and a name holding a
+  backslash was not refused at all - core's duplicate check strips the backslash - so it was
+  created twice.
+- **`moderate-comment` accepts `approved` and `unapproved`**, the words `list-comments`
+  returns, and `list-comments`' `status` filter accepts them too. Moderating a comment into the
+  state it is already in answers with that state instead of "Action failed."
+- **`set-post-meta` refuses a list sent to a key holding ONE serialised array**, which
+  `get-post-meta` returns as a list; writing it back used to split one array into one row per
+  element.
+
+**One envelope, one date format, and paging that ends**
+
+- **`has_more` is false at page 100 on every paged tool (shape).** `page` was clamped to 100
+  and a page past it answered page 100's rows with `has_more: true`, so an agent paging to
+  the end looped for ever (found on `list-users`). Every description names the cap.
+- **`list-terms` pages (shape):** `limit` (default 20, max 100) and `page`, and the result is
+  `count, page, limit, has_more, items`. It was every term of the taxonomy under `terms`.
+- **`list-media` and `list-comments` answer in the same envelope (shape):** `page`, `limit`
+  and `has_more` are new; `limit` replaces `per_page`, which is still accepted.
+- **Dates (shape):** `list-media.date` is `post_date` in ISO 8601 site-local (it was the raw
+  `post_date_gmt`, `2026-08-27 02:17:03`) and `modified` is new; `list-comments.date` is
+  `comment_date` in the same form (it was the raw GMT column); `list-users.registered` and
+  `get-user.registered` are ISO 8601 site-local with no offset (they were UTC with
+  `+00:00`); `code-history.saved_at` is ISO 8601 site-local (it was the raw UTC column).
+
+**Descriptions and results that said something untrue**
+
+- **`update-post`**: "no text change, no revision" was false - the first write to a post with
+  no revisions always leaves one, whatever it changes (WordPress's own `post_updated` handler
+  saves it). The description now says so, and states the re-slug rule rather than two cases:
+  scheduling and going private derive a slug too, and a taken slug gets a `-N` suffix. README
+  carries both measured tables.
+- **`delete-post`**: "force=false trashes" was false for a custom post type and for a post
+  already in the trash - both were deleted permanently while the result said `trashed: true`.
+  force=false now trashes a post of any type and leaves a trashed one where it is, and
+  `deleted` / `trashed` are read back after the call.
+- **`delete-media`** now says that WordPress deletes an attachment permanently whatever `force`
+  says unless the site defines `MEDIA_TRASH`, and returns `trashed` beside `deleted`, both
+  read back (shape: `trashed` is new).
+- **`delete-term`** on the taxonomy's default term answered "Term not found."; it now says it
+  is the default term.
+- **`site-info.active_theme` is the theme's name alone, as `list-themes` gives it (shape)**,
+  and `active_theme_version` is new. It was "Name Version" glued together, `"JDA "` for a theme
+  with no Version header.
+- **`sql-select` always returns `truncated_by` (shape)**, `null` when nothing was cut, and says
+  that every value is a string as MySQL sends it.
+- **`list-revisions`**, which a read-scope token sees without ever seeing `update-post` or
+  `restore-revision`, now says that the newest revision normally holds the post's current text,
+  and offers restoring only to an admin-scope token.
+- **Every tool's description says what it returns**, field names and formats: `list-media`,
+  `list-terms`, `list-comments`, `upload-media` (a URL is the only way in; types and size
+  limit), the code tools, `create-term`, `delete-term`, `moderate-comment` and `reply-comment`
+  had not. A test now fails for a description without one.
+- **Read scope is not privacy.** Settings > WP MCP says, where a token is minted, that a
+  read-scope token reads everything its user can - every user's email, for an administrator -
+  and that scope gates writing only. The handshake instructions carry the same line.
 
 ### Added: every build says which build it is
 

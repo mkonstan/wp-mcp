@@ -88,6 +88,12 @@ token is served those and fifteen more - the thirteen that write, `list-plugins`
 reads are on, and six more when code editing is on.
 Scope only subtracts. It cannot hand a token a capability its user does not have.
 
+**Read scope is not privacy.** A `read` token can read everything its user can - every
+post that user may see, every comment, and, when the user is an administrator, every
+user's email address through `list-users`. Scope gates *writing* only. To give an
+assistant less to read, mint the token for a user who can see less. The mint form and the
+server's handshake instructions both say this.
+
 **Active window** and **Lifetime** are two separate timers, and the split is what lets a
 token be both short-lived and long-lived at once.
 
@@ -260,10 +266,63 @@ plugin-header, theme or per-option filter - the ones other plugins fetch update 
 has declared post meta keys (see *Post meta*), and it reports `readOnlyHint: true` like
 every other `read`-scope tool.
 
-`create-post` defaults to `draft`. `delete-post` and `delete-media` trash unless you pass
-`force: true`. Every argument is validated against the tool's schema before the tool runs:
-a wrong type or an unknown key comes back as an error naming the field, and the tool never
-executes.
+`create-post` defaults to `draft`. `delete-post` moves a post of any type to the trash
+unless you pass `force: true`; a post already in the trash stays there, and only a site
+with the trash switched off (`EMPTY_TRASH_DAYS` 0) deletes it outright. `delete-media` is
+different because WordPress is: unless the site defines `MEDIA_TRASH`, an attachment is
+deleted permanently, file and all, whatever `force` says. Both answer `deleted` and
+`trashed` as read back after the call, never as assumed. Every argument is validated
+against the tool's schema before the tool runs: a wrong type or an unknown key comes back
+as an error naming the field, and the tool never executes.
+
+Every description says what the tool returns - field names and their formats - so a
+client does not have to call a tool to learn its shape.
+
+### Lists: one envelope, one date format, and an end
+
+Six tools page: `list-posts`, `list-revisions`, `list-terms`, `list-media`, `list-comments`
+and `list-users`. All six take `limit` (1-100, default 20) and `page`, and answer
+`{count, page, limit, has_more, items}` with no total. `list-media` and `list-comments`
+still accept `per_page`, `limit`'s old name.
+
+**Paging ends at page 100, and says so.** `page` is clamped to 100, and at page 100
+`has_more` is `false` whatever lies beyond - so "page until `has_more` is false" always
+terminates. Before 1.1.0 a page past 100 answered page 100's rows with `has_more: true`
+for ever. To reach further, narrow the filter.
+
+**Every date a list tool returns is ISO 8601, site-local, with no offset** -
+`2026-03-04T09:30:00`, the form `get-post` gives `date` - including `list-media` and
+`list-comments`, which returned the raw UTC column before 1.1.0, and
+`list-users.registered` and `code-history.saved_at`, which are stored in UTC and converted.
+
+### Reading it back: every value can be written back
+
+A field a tool returns and another tool accepts is returned in the form you would type,
+and **writing it back unchanged stores the same bytes**. That is measured for every such
+field on two sites and held by the tests: post title, content, excerpt, slug, status,
+date, author, featured image and terms through `update-post`; term names through
+`create-term` and `update-post`'s `terms`; a menu item's label and url through
+`update-menu-item`; a comment's status through `moderate-comment`; a media title and alt
+text through `upload-media`; a theme file through `code-write`; a meta value through
+`set-post-meta`.
+
+Two things make that true:
+
+- **Names WordPress escapes come back decoded.** Core stores a term name `Arts & Crafts`
+  as `Arts &amp; Crafts`; `list-terms`, `get-post`'s `terms`, `create-term` and the menu
+  names in `list-menus` and `get-menu` return `Arts & Crafts`, and sending that back finds
+  the same term. A menu label wp-admin saved as `FDA &#038; GMP` reads as `FDA & GMP`. Only
+  `&amp;`, `&lt;`, `&gt;` and their numeric forms are decoded - the escaping core applies -
+  so a curly quote stored as `&#8217;` stays as stored.
+- **A value sent back unchanged is not re-written.** `update-post` leaves out every field
+  equal to what is stored, so re-shaping cannot change it: a title wp-admin stored as
+  `x<y z` is no longer stripped to `x`, and a draft nobody dated stays undated. An update
+  that changes nothing writes nothing - no revision, no new modified date.
+  `update-menu-item` keeps a label's stored bytes when it is sent back as `get-menu` read
+  it.
+
+`get-post`'s `terms` entries can be sent to `update-post` as they are: `terms` takes an id,
+a name, or the `{id, name, slug}` object itself.
 
 ### Finding content
 
@@ -281,14 +340,14 @@ executes.
 | `orderby` | `date`, `modified` or `title` | `date` |
 | `order` | `asc` or `desc` | `desc` |
 | `limit` | 1-100 | 20 |
-| `page` | 1-100 | 1 |
+| `page` | 1-100; `has_more` is false at 100 | 1 |
 
 It answers with `count`, `page`, `limit`, `has_more` and `items`. Each item is `id`,
 `title`, `type`, `status`, `slug`, `link`, `date` and `modified` - the dates in ISO 8601,
 null where the column holds no date, exactly as `get-post` reports them. There is no total, on
 purpose: a total is a count of posts the caller has not been shown, and on the
 own-unpublished side it would be a count of somebody's drafts. Page until `has_more` is
-`false`.
+`false`; at page 100 it is, and a narrower filter reaches the rest.
 
 Two things it deliberately does not do. **Sticky posts are ignored**: WordPress pins them to
 the front of a home query regardless of what was asked for, which would mean a date window or
@@ -316,11 +375,10 @@ decided from their capabilities first; filters only narrow inside that.
 `terms` keyed by taxonomy with `{id, name, slug}` entries, and `revisions`.
 
 The title, like `content` and `excerpt`, is the stored column, not WordPress's display
-rendering, so quotes, apostrophes, ampersands and backslashes read back as stored. That is
-a promise about reading, not about a round trip: `update-post` strips HTML tags from a
-title, and for a caller without `unfiltered_html` WordPress's kses filter encodes some
-characters on the way in. A title holding tags or entities is not guaranteed to survive
-being read and written back unchanged.
+rendering, so quotes, apostrophes, ampersands and backslashes read back as stored, and a
+title written back as read is left as it is (see *Reading it back*). A title you CHANGE is
+still shaped on the way in: `update-post` strips HTML tags from it, and for a caller
+without `unfiltered_html` WordPress's kses filter encodes some characters.
 
 Three details in that list are decisions rather than data:
 
@@ -347,7 +405,7 @@ the two cannot disagree. `update-post` needs `id`; everything else is optional o
 | `title`, `content`, `excerpt` | text | to edit the post |
 | `slug` | text, turned into a URL slug | to edit the post |
 | `status` | `draft`, `pending`, `publish`, `private`, `future`, `trash` | publishing and trashing each need their own |
-| `terms` | `{taxonomy: [id or name]}` | to assign in that taxonomy; naming a term that does not exist yet also needs to create one |
+| `terms` | `{taxonomy: [id, name, or get-post's {id, name, slug}]}` | to assign in that taxonomy; naming a term that does not exist yet also needs to create one |
 | `date` | ISO 8601 date or datetime | none of its own - see below |
 | `author` | a user id or a user login | to edit other people's posts of that type |
 | `featured_image` | an image attachment id, or `0` | to edit **that attachment** |
@@ -370,7 +428,8 @@ Read `status` and `date` in the reply for what actually happened. A date on a **
 kept, which is not WordPress's default - core re-dates a draft to "now" on every update
 unless it is told the date was deliberate.
 
-**`author` needs the capability wp-admin gates its Author box on**, and the user you name
+**`author` needs the capability wp-admin gates its Author box on** to change it - sending
+the post's current author back needs nothing - and the user you name
 has to be one who could write that post type - naming a Subscriber is an error. The reply
 gives `{id, name}`, with the display name; never a login, never an email.
 
@@ -380,34 +439,28 @@ someone else's - whose post the file happens to be attached to makes no differen
 way - and it has to be an image. `0` removes the image. It round-trips through
 `get-post`'s `featured_image`.
 
-**"Only the fields you send change" has two exceptions - `date` and `slug` - and both are
-WordPress rather than this plugin.** Measured on a bare site (WP 7.0), each through
-`update-post` itself:
+**A field you send equal to its stored value is not written, and `changed` is a diff.**
+`update-post` reads the row before and after the write and answers with `changed`: every
+field whose stored value differs, in the order title, content, status, excerpt, slug, date,
+author, featured_image, terms - whoever changed it. So an update that sends back what it
+read answers `changed: []` and writes nothing, and a field WordPress moved on its own is
+named although you never sent it. Measured on both test sites (WP 7.0 and 7.1), those are:
 
-| Case | What else changed | `changed` |
-|---|---|---|
-| A draft whose `post_date_gmt` is still empty, any update at all (even title-only) | `date` moves to "now" - core's "drafts shouldn't be assigned a date unless the user did so" rule | names `date`, and the result carries the new `date` and `date_gmt` |
-| A post whose slug is still empty, when a status-only update **publishes** it | `slug` is derived from the title - core fills `post_name` when a status leaves the draft/pending set | names `slug` |
-| The same draft moved to `pending` instead | nothing; the slug stays empty | - |
-| **Any** post trashed by `status: "trash"` alone - a slug-less draft | `slug` `""` -> `__trashed`; `date` moved and `date_gmt` set | `["status","date","slug"]` |
-| **Any** post trashed by `status: "trash"` alone - a draft with its own slug `wpmcp-test-slugged-probe` | `slug` -> `wpmcp-test-slugged-probe__trashed` | `["status","date","slug"]` |
-| A draft you *did* date, or any published post, edited without trashing | nothing | - |
+| What core does unasked | When |
+|---|---|
+| `date` moves to "now" | any write to a draft whose `post_date_gmt` is still empty - core's "drafts shouldn't be assigned a date unless the user did so" rule. A date you send, even the unchanged one, is kept. |
+| `slug` is derived from the title | a post with no slug whose status LEAVES draft or pending - to `publish`, `future`, `private` or `trash` |
+| `slug` gets a `-2`, `-3` ... suffix | a slug another post already holds, on a move from draft or pending to `publish`, `future` or `private` |
+| `slug` gets `__trashed` appended | every trashed post, slugged or not (`""` -> `__trashed`) |
+| nothing | draft <-> pending, and moves among `publish`, `future` and `private` |
+| `status` is not what you sent | `publish` with a future date is stored `future`; `future` with a past date is stored `publish` |
 
-So `slug` changes unsent in two ways: **trashing re-slugs every post**, whatever its slug
-was, and **publishing slugs a post that has none**. `draft -> private` was not measured; it
-is covered by construction rather than by a rule about statuses, because `update-post`
-compares the slug column before and after the write and names whatever core did
-(*reasoned, not measured*).
+The full table - five starting statuses by six targets, for a slug-less post, a post with
+its own slug and a post whose slug is taken - is in the sprint-14d report. When `date` moved
+or was sent, the reply also carries the stored `date` and `date_gmt`.
 
-`update-post` reports both fields, so you never have to re-read the post to find out.
-Nothing else changes unsent: status, terms, author, excerpt and the featured image are
-only ever what you asked for.
-
-Both tools reply with `changed`: every field this call actually changed. The fields you
-named come first, in the table's order above; then, on `update-post`, `date` and `slug`
-if WordPress moved them unasked; then `terms` last on both. So a title-and-terms update
-of an undated draft answers `["title","date","terms"]` - `terms` after the date, not in
-the order you sent them.
+`create-post` answers `changed` with the fields the call set, since everything on a new
+post is new.
 
 Backslashes survive. A Windows path, a regular expression or a JSON document written
 into a title, a body, an excerpt, a term name, a media title or alt text, or a comment
@@ -419,7 +472,21 @@ comes back byte for byte - which was not true before 1.1.0.
 it writes - WordPress on its own saves one only afterwards, of the new text, so the first
 edit of a post that had no revisions (every post `create-post` makes, and every imported
 one) used to leave nothing to go back to. On a post whose latest revision already matches
-it, that save is skipped and costs nothing.
+it, that save is skipped and costs nothing, and an update that changes nothing writes
+nothing - no revision either.
+
+**What that means for the revision count**, measured on both test sites:
+
+| Update | Revisions added |
+|---|---|
+| the first write to a post with no revisions, whatever it changes - even status only | 1, holding the text as it stands (WordPress's own `post_updated` handler saves it too) |
+| the first write to a post with no revisions, changing its text | 2: the pre-edit text, then the new text above it |
+| a later update that changes title, content or excerpt | 1, holding the new text |
+| a later update that changes anything else | 0 |
+| an update that sends back only what is stored | 0 - nothing is written |
+
+So "no text change, no revision" holds from the second write on; the first write to a
+never-revised post always leaves one.
 
 **Which revision is the undo, and it is not the newest one.** After any edit, the newest
 revision holds *the text you just wrote* - that is the one WordPress saves afterwards - and
@@ -489,7 +556,9 @@ classic menu you change may not be what visitors see.
   `block_theme`.
 - `get-menu {id}` returns one menu's items as a tree: id, title, type, object, object_id,
   url, target, classes, parent, position among its siblings, menu_order in the whole menu,
-  status, and children.
+  status, and children. `title` is the item's own label as typed - a label wp-admin stored
+  as `FDA &#038; GMP` reads `FDA & GMP` - or, when it has none, the linked page's stored
+  title.
 - `add-menu-item {menu_id, type, object_id?, url?, title?, parent_id?, position?, target?,
   classes?}` adds one. `type` is `custom` for a plain link, a post type such as `page`, or a
   taxonomy such as `category`. A linked post must exist and be readable by you. A custom url
@@ -497,7 +566,8 @@ classic menu you change may not be what visitors see.
   link to another host. `javascript:`, every other scheme and any url with a backslash are
   refused, where WordPress itself would quietly store an empty link or a different one.
 - `update-menu-item {id, title?, url?, target?, classes?, parent_id?, position?}` changes
-  what you send and leaves everything else as stored - even a parent that points at a deleted
+  what you send and leaves everything else as stored. A title or url sent back exactly as
+  `get-menu` gave it keeps its stored bytes - even a parent that points at a deleted
   item, which a theme shows at the end of the menu. A parent you send must be an item of the
   same menu, and not the
   item itself or one inside it.
@@ -527,7 +597,8 @@ Five tools that only read, each drawing its line where WordPress's own REST API 
 None of them returns a password hash, an activation key, a session or any user meta.
 
 - `list-users {role?, search?, limit?, page?}` - with `list_users` (Administrators), every
-  user with id, name, login, email, roles and registered date, filterable by role and by a
+  user with id, name, login, email, roles and registered date (ISO 8601, site-local, like
+  every list tool's dates), filterable by role and by a
   search: a term with `@` searches emails only, a number searches logins and ids, a term
   starting with `http://` or `https://` searches URLs only, and anything else searches login,
   URL, email, nicename and display name - WordPress's own rule. Without it - an Editor, Author or
@@ -800,10 +871,12 @@ needs a different alias, and `SHOW` / `DESCRIBE` are not query expressions, so u
 
 ```json
 { "columns": ["ID", "post_title"], "rows": [["12", "Hello"]], "row_count": 1,
-  "truncated": false }
+  "truncated": false, "truncated_by": null }
 ```
 
-`truncated_by` is `"rows"` or `"bytes"` and is present only when `truncated` is true.
+`truncated_by` is `"rows"` or `"bytes"` when `truncated` is true and `null` when it is
+not - always present, so a client can read it unconditionally. **Every value is a string,
+as MySQL sends it**: `COUNT(*)` comes back as `"3"`, not `3`.
 
 | Cap | Value | What happens |
 |---|---|---|
