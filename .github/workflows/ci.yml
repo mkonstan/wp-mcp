@@ -163,7 +163,7 @@ jobs:
           # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
           # for the same reason: both gates had closed and neither was asserted anywhere
           # but on the machine that ran them. sprint-9 was added in Sprint 9,
-          # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b and sprint-14c in Sprint 14c, each on the day its gate
+          # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b, sprint-14c in Sprint 14c and sprint-14d in Sprint 14d, each on the day its gate
           # closed. A new sprint adds its group here on the day its gate closes, and the
           # commit that adds it watches this job.
           #
@@ -192,7 +192,7 @@ jobs:
           # sql-select spells its session statement timeout one way on MySQL and another
           # on MariaDB, and this container is the only MariaDB anyone on this project can
           # reach. A red sprint-9 here on a green local run is very likely that.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c sprint-14d; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"

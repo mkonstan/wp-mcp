@@ -130,11 +130,11 @@ jobs:
         # Same check as ci.yml, and it has to be here too: ci.yml does not run on a tag
         # push, so this workflow is the only thing standing between a red gate and a
         # published release. Keep the two lists in step. sprint-9 was added in Sprint 9,
-        # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b and sprint-14c in Sprint 14c, each on the day its gate
+        # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b, sprint-14c in Sprint 14c and sprint-14d in Sprint 14d, each on the day its gate
         # closed.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c sprint-14d; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
