@@ -73,6 +73,40 @@ final class DescriptionContractTest extends TestCase
     }
 
     /**
+     * G4. And the first 50 characters, which is all a client shows the model before the
+     * tool is loaded, are a whole sentence naming what the tool does - verb first, no
+     * preamble. Sprint 6 holds the same rule in ToolContractTest; it is repeated here
+     * because this sprint lengthened almost every description, and the sprint-14d gate
+     * must not depend on another group being run beside it.
+     *
+     * @group sprint-14d
+     */
+    public function testTheFirstFiftyCharactersSayWhatTheToolDoes(): void
+    {
+        foreach (WireSerializationTest::catalog() as $name => $tool) {
+            $description = (string) $tool['description'];
+
+            self::assertSame(1, preg_match('/\.(\s|$)/', $description, $m, PREG_OFFSET_CAPTURE), "{$name} has no sentence end.");
+            self::assertLessThan(
+                50,
+                $m[0][1],
+                "{$name}'s first sentence runs past the 50 characters a client shows before loading"
+                . " the tool: '" . substr($description, 0, 50) . "'"
+            );
+            self::assertMatchesRegularExpression(
+                '/^[A-Z][a-z]+ /',
+                $description,
+                "{$name} does not open with a verb."
+            );
+            self::assertDoesNotMatchRegularExpression(
+                '/^(This|Allows|Use |A tool|The tool)/',
+                $description,
+                "{$name} opens with a preamble instead of what it does."
+            );
+        }
+    }
+
+    /**
      * G3's prose half: every tool that takes `page` says that has_more is false at page 100.
      *
      * @group sprint-14d

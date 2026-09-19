@@ -242,7 +242,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
 
         self::assertFalse($result->isError, $result->text);
         self::assertSame(
-            ['columns' => ['one'], 'rows' => [['1']], 'row_count' => 1, 'truncated' => false],
+            // truncated_by is present and null on an untruncated result since sprint 14d.
+            ['columns' => ['one'], 'rows' => [['1']], 'row_count' => 1, 'truncated' => false, 'truncated_by' => null],
             $result->data()
         );
     }
