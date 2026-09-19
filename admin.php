@@ -310,7 +310,10 @@ function wpmcp_render_admin() {
                 <option value="read" selected>read (safe default)</option>
                 <option value="admin">admin (full)</option>
               </select>
-              <p class="description">Read tokens are refused any write tool.</p>
+              <p class="description">Read tokens are refused any write tool.
+                 Read scope is not privacy: a read-scope token can read everything its user
+                 can, including every user's email address when that user is an
+                 administrator. Scope gates writing only.</p>
             </td>
           </tr>
           <tr>

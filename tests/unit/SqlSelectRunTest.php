@@ -512,11 +512,11 @@ final class SqlSelectRunTest extends TestCase
 
         self::assertSame(200, $result['row_count']);
         self::assertFalse($result['truncated']);
-        self::assertArrayNotHasKey(
-            'truncated_by',
-            $result,
-            'truncated_by is present on a result that was not truncated.'
-        );
+        // PRESENT AND NULL since sprint 14d: the description promised the key, and a
+        // result that carried it only when something was cut left a client reading it
+        // unconditionally with a missing key on every ordinary query.
+        self::assertArrayHasKey('truncated_by', $result, 'truncated_by is missing from an untruncated result.');
+        self::assertNull($result['truncated_by'], 'truncated_by names a cause on a result that was not truncated.');
 
         // Two rows of 200 KB: the first takes the total past the 256 KiB budget, and the
         // second is the last one there is - so nothing was dropped and nothing is claimed.

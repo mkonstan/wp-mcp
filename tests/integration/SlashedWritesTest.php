@@ -266,7 +266,7 @@ final class SlashedWritesTest extends FixtureIntegrationTestCase
 
         $matching = [];
 
-        foreach ($listed->data()['terms'] as $term) {
+        foreach ($listed->data()['items'] as $term) {
             self::$terms[] = (int) $term['id'];
 
             if (str_starts_with($term['name'], Fixtures::name('dup-term'))) {
@@ -458,7 +458,7 @@ final class SlashedWritesTest extends FixtureIntegrationTestCase
 
         self::assertFalse($listed->isError, $listed->text);
 
-        $names = array_column($listed->data()['terms'], 'name', 'id');
+        $names = array_column($listed->data()['items'], 'name', 'id');
 
         self::assertContains(
             $name,
@@ -592,11 +592,17 @@ final class SlashedWritesTest extends FixtureIntegrationTestCase
     /** One term as list-terms reports it, by id. */
     private function termFrom(string $token, int $id): array
     {
-        $listed = $this->mcp($token)->callTool('list-terms', ['taxonomy' => 'category']);
+        // PAGED since sprint 14d, so the search narrows to this run's terms rather than
+        // relying on every category of the site fitting on one page.
+        $listed = $this->mcp($token)->callTool('list-terms', [
+            'taxonomy' => 'category',
+            'search'   => Fixtures::runPrefix(),
+            'limit'    => 100,
+        ]);
 
         self::assertFalse($listed->isError, $listed->text);
 
-        foreach ($listed->data()['terms'] as $item) {
+        foreach ($listed->data()['items'] as $item) {
             if ((int) $item['id'] === $id) { return $item; }
         }
 

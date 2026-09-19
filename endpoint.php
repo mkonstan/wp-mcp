@@ -927,6 +927,10 @@ function wpmcp_server_info() {
  * list: an agent that knows its reach is one WordPress user's stops treating a refusal as
  * a bug to retry, and an agent that knows write tools need a different token stops
  * looking for the write tool it cannot see. Everything else it can learn from tools/list.
+ *
+ * The last clause is the one corollary of the third fact a caller gets wrong (sprint 14d):
+ * a read-scope token is not a privacy boundary. It reads everything its user can, which for
+ * an administrator includes every user's email. The mint form says the same to the operator.
  */
 function wpmcp_server_instructions() {
     return 'This is a WordPress site exposed as MCP tools: posts, pages, taxonomies,'
@@ -937,7 +941,8 @@ function wpmcp_server_instructions() {
         . " refusal is usually that ceiling, not a malformed call.\n"
         . 'Tools that write - create, update, delete, upload - need an admin-scope token.'
         . ' With a read-scope token they are not listed at all, so the tool list you get'
-        . ' is already what this token may do.';
+        . " is already what this token may do. Scope gates writing only: a read-scope token"
+        . " reads everything its user can.";
 }
 
 /**

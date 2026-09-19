@@ -870,9 +870,12 @@ function wpmcp_post_terms($post) {
         if (is_wp_error($terms) || !$terms) { continue; }
 
         foreach ($terms as $term) {
+            // The name as typed, not as core escaped it - see wpmcp_decode_specialchars().
+            // Writing this entry back through update-post's `terms` finds the same term:
+            // it takes the {id, name, slug} object itself, or the name.
             $found[$taxonomy][] = array(
                 'id'   => (int) $term->term_id,
-                'name' => $term->name,
+                'name' => wpmcp_decode_specialchars($term->name),
                 'slug' => $term->slug,
             );
         }
@@ -899,6 +902,118 @@ function wpmcp_post_terms($post) {
  */
 function wpmcp_raw_title($post) {
     return isset($post->post_title) ? (string) $post->post_title : '';
+}
+
+/**
+ * A stored name with the HTML escaping WordPress put on it taken off again - the text a
+ * person typed, and the text a client should send to name the same thing.
+ *
+ * THE ROUND-TRIP RULE, SECOND HALF (sprint 14d; the first half is wpmcp_raw_title). A field
+ * a caller may write back must come back as the caller would type it. For a post title that
+ * is the raw column, because core stores a title as typed. For a TERM NAME it is not: core's
+ * `pre_term_name` filter runs `_wp_specialchars()` (default-filters.php, the pre_term_name
+ * loop), so `Arts & Crafts` is stored as `Arts &amp; Crafts` and `x < y` as `x &lt; y` -
+ * measured on both sites, every taxonomy. A client that read `&amp;` and showed it, compared
+ * it, or built a new name from it was working with text nobody typed. The same is true of a
+ * MENU LABEL wp-admin saved: jaygroup holds eight labels with `&#038;` for `&` - the form
+ * `convert_chars` gives it, believed to come from the label field being filled from the
+ * displayed title (the cause is inferred; the stored bytes are measured).
+ *
+ * ENT_NOQUOTES, and nothing wider, because it is the exact inverse of what core applies:
+ * `_wp_specialchars()` as a filter runs with ENT_NOQUOTES, so it encodes `&`, `<` and `>`
+ * and never a quote. This decodes `&amp;`, `&lt;`, `&gt;` and their numeric forms
+ * (`&#038;`, `&#060;`, `&#062;`) and leaves `&quot;`, `&#8217;` and `&nbsp;` as stored: a
+ * wider decode would turn stored bytes into text core would NOT turn back into them.
+ *
+ * WRITING THE DECODED TEXT BACK STORES THE SAME BYTES. For a term, core's own pre_term_name
+ * encodes it again, and does not double-encode an `&amp;` that is already there (measured:
+ * `A & B` and `A &amp; B` both store `A &amp; B`, and both find the existing term by name).
+ * For a menu label, update-menu-item keeps the stored bytes when the label it is sent equals
+ * this function's reading of them (see there).
+ */
+function wpmcp_decode_specialchars($text) {
+    return wp_specialchars_decode((string) $text, ENT_NOQUOTES);
+}
+
+/**
+ * Where every paged list tool stops, and what it says when it gets there.
+ *
+ * THE PAGING-END RULE (sprint 14d). Every paged tool clamped `page` to 100 and then computed
+ * has_more from the rows beyond it - so page 101, 102, ... all answered with page 100's rows
+ * and `has_more: true`, and an agent paging "until has_more is false" looped for ever on a
+ * site with more than 100 pages of anything. Found on list-users, true of all of them.
+ *
+ * `has_more` is FALSE at the cap, whatever lies beyond it, and every description says where
+ * the cap is and that the way past it is a narrower filter. That is a deliberate
+ * under-statement at exactly one page, and the description carries the rest of it: a
+ * `has_more` a loop can trust is worth more than one that is literally complete and never
+ * ends. Deeper paging would also cost more: list-posts fetches page x limit + 1 rows per
+ * query to merge its two queries, so the cap bounds that at 10,001.
+ */
+define('WPMCP_PAGE_CAP', 100);
+
+/**
+ * limit and page for a paged list tool: limit 1-100 (default 20), page 1-WPMCP_PAGE_CAP.
+ *
+ * `per_page` IS ACCEPTED AS limit's OLD NAME. list-media and list-comments took `per_page`
+ * before every list tool shared one envelope; `limit` wins when both are sent.
+ *
+ * @return array{0: int, 1: int} limit, page
+ */
+function wpmcp_page_args($a) {
+    $raw   = isset($a['limit']) ? $a['limit'] : (isset($a['per_page']) ? $a['per_page'] : null);
+    $limit = $raw === null ? 20 : min(100, max(1, (int) $raw));
+    $page  = isset($a['page']) ? min(WPMCP_PAGE_CAP, max(1, (int) $a['page'])) : 1;
+
+    return array($limit, $page);
+}
+
+/**
+ * The one paging envelope every paged list tool returns: count, page, limit, has_more,
+ * items. $more is "the query found a row past this page"; at the cap it is not reported.
+ */
+function wpmcp_page_envelope($items, $page, $limit, $more) {
+    return array(
+        'count'    => count($items),
+        'page'     => (int) $page,
+        'limit'    => (int) $limit,
+        'has_more' => (bool) $more && $page < WPMCP_PAGE_CAP,
+        'items'    => array_values($items),
+    );
+}
+
+/**
+ * A UTC datetime column as the list tools' one date format: ISO 8601, site-local, no offset
+ * - the form wpmcp_iso_date() gives post_date, so a date means the same thing in every tool.
+ * user_registered and the file-version saved_at are stored in UTC; post and comment dates
+ * have a local column of their own and do not come through here.
+ */
+function wpmcp_iso_date_from_gmt($gmt) {
+    $gmt = trim((string) $gmt);
+    if ($gmt === '' || str_starts_with($gmt, '0000-00-00')) { return null; }
+
+    return wpmcp_iso_date(get_date_from_gmt($gmt));
+}
+
+/**
+ * The active theme's name and version from its style.css header, shaped exactly as
+ * list-themes shapes every theme's - the header read without a filter, tags stripped,
+ * trimmed. site-info used to build "Name Version" from WP_Theme and a theme with no Version
+ * header came back as `"JDA "` beside list-themes' `"JDA"` (seosemia.net, 2026-09-18): one
+ * value, two answers. Both tools now take it from here.
+ *
+ * @return array{name: string, version: string}
+ */
+function wpmcp_theme_header($styleFile) {
+    $headers = is_readable($styleFile)
+        ? get_file_data($styleFile, array('Name' => 'Theme Name', 'Version' => 'Version', 'Template' => 'Template'))
+        : array('Name' => '', 'Version' => '', 'Template' => '');
+
+    return array(
+        'name'     => trim(strip_tags((string) $headers['Name'])),
+        'version'  => trim(strip_tags((string) $headers['Version'])),
+        'template' => (string) $headers['Template'],
+    );
 }
 
 /**
@@ -976,6 +1091,26 @@ function wpmcp_apply_terms($post_id, $terms) {
 
         $ids = array();
         foreach ((array) $vals as $v) {
+            // GET-POST'S OWN SHAPE IS ACCEPTED, because a caller that reads a post's terms
+            // and writes them back sends what it read: `{id, name, slug}` objects, not ids.
+            // Before sprint 14d an object here fell through to the name branch as the string
+            // "Array" - measured on both sites, update-post then created a category named
+            // `Array`, assigned it, and reported `changed: ["terms"]`. The id wins when both
+            // are present; an object with neither, or any other non-scalar, is refused by
+            // name rather than guessed at.
+            if (is_array($v)) {
+                if (isset($v['id']) && is_scalar($v['id'])) {
+                    $v = $v['id'];
+                } elseif (isset($v['name']) && is_scalar($v['name'])) {
+                    $v = (string) $v['name'];
+                } else {
+                    $refused[$tax][] = (string) wp_json_encode($v);
+                    continue;
+                }
+            } elseif (!is_scalar($v)) {
+                $refused[$tax][] = (string) wp_json_encode($v);
+                continue;
+            }
             if (is_numeric($v)) {
                 // term_exists IN THIS TAXONOMY, because wp_set_object_terms does not
                 // complain about an id that is not: core's loop does `if ( ! $term_info
@@ -1149,22 +1284,39 @@ function wpmcp_parse_post_date($value) {
  * deferred. A create that would have been refused for its featured image therefore does
  * not leave a post behind.
  *
+ * THE CURRENT ROW, ON UPDATE (sprint 14d). update-post passes the post as it stands, and a
+ * field whose sent value EQUALS what is stored is left out of the write - not re-shaped, not
+ * re-gated. That is the round-trip rule: a caller that reads a post and writes a field back
+ * unchanged must store the same bytes, and re-shaping is exactly what broke that. Measured
+ * on both sites: a title stored by wp-admin as `x<y z` read back as `x<y z`, and writing it
+ * back ran wp_strip_all_tags() and stored `x`; a floating draft's `date` written back fixed
+ * its GMT column, so a draft nobody dated became a dated one. An unchanged `author` or
+ * `featured_image` is not a change of author or image, so it does not need the capability a
+ * change needs - an Author writing back their own post's author id was refused. A `date`
+ * equal to the stored one goes into `keep`: it is not a change, but if anything else is
+ * written, sending it back holds it in place (edit_date) so core does not re-date the draft under a
+ * caller who said which date it has.
+ *
  * @param array        $a        the tool's arguments
  * @param string       $postType the type the row will have
- * @return array{insert: array, after: array, changed: list<string>}|WP_Error
+ * @param WP_Post|null $current  the row as stored, on update; null on create
+ * @return array{insert: array, keep: array, after: array, changed: list<string>}|WP_Error
  */
-function wpmcp_post_fields($a, $postType) {
+function wpmcp_post_fields($a, $postType, $current = null) {
     $pto     = get_post_type_object($postType);
     $insert  = array();
+    $keep    = array();
     $after   = array();
     $changed = array();
 
-    if (isset($a['excerpt'])) {
+    if (isset($a['excerpt'])
+        && !($current && (string) $a['excerpt'] === (string) $current->post_excerpt)) {
         $insert['post_excerpt'] = (string) $a['excerpt'];
         $changed[] = 'excerpt';
     }
 
-    if (isset($a['slug'])) {
+    if (isset($a['slug'])
+        && !($current && (string) $a['slug'] === (string) $current->post_name)) {
         $insert['post_name'] = sanitize_title((string) $a['slug']);
         $changed[] = 'slug';
     }
@@ -1181,27 +1333,38 @@ function wpmcp_post_fields($a, $postType) {
             );
         }
 
-        $insert['post_date']     = $date['local'];
-        $insert['post_date_gmt'] = $date['gmt'];
-        // MEASURED ON WP 7.1: wp_update_post() REPLACES the post_date of a draft,
-        // pending or auto-draft with the current time unless `edit_date` is set - the
-        // "drafts shouldn't be assigned a date unless the user did so" branch. Passing a
-        // date and not passing this is therefore a silent no-op, which is the worst
-        // possible shape for a scheduling argument. wp_insert_post ignores the key.
-        $insert['edit_date']     = true;
-        $changed[] = 'date';
+        // UNCHANGED: the same local time, and either the same GMT or none stored yet (a
+        // draft nobody dated reads back its local date with date_gmt null).
+        $same = $current
+            && $date['local'] === (string) $current->post_date
+            && (str_starts_with((string) $current->post_date_gmt, '0000-00-00')
+                || $date['gmt'] === (string) $current->post_date_gmt);
+
+        if ($same) {
+            // Only the local column, and edit_date: wp_update_post() merges the stored GMT
+            // back in, so a floating draft stays floating and keeps this exact date.
+            $keep['post_date'] = (string) $current->post_date;
+            $keep['edit_date'] = true;
+        } else {
+            $insert['post_date']     = $date['local'];
+            $insert['post_date_gmt'] = $date['gmt'];
+            // MEASURED ON WP 7.1: wp_update_post() REPLACES the post_date of a draft,
+            // pending or auto-draft with the current time unless `edit_date` is set - the
+            // "drafts shouldn't be assigned a date unless the user did so" branch. Passing a
+            // date and not passing this is therefore a silent no-op, which is the worst
+            // possible shape for a scheduling argument. wp_insert_post ignores the key.
+            $insert['edit_date']     = true;
+            $changed[] = 'date';
+        }
     }
 
     if (isset($a['author'])) {
-        if (!$pto || !current_user_can($pto->cap->edit_others_posts)) {
-            return wpmcp_cannot('set the author of ' . $postType . ' content');
-        }
-
         // THE SHAPE, CHECKED HERE BECAUSE THE SCHEMA CANNOT SAY IT. This argument
         // declares no `type` - the dialect SchemaValidator enforces has no way to say
         // "integer or string" - so the validator lets a boolean or a float through, and
         // `wpmcp_list_author_id(true)` resolved `(string) true === '1'` to user 1. A
         // silent cast to whoever installed the site is not an answer to `author: true`.
+        // Before the capability since sprint 14d, because an unchanged author needs none.
         if (!is_int($a['author']) && !(is_string($a['author']) && trim($a['author']) !== '')) {
             return new WP_Error(
                 'wpmcp_bad_arg',
@@ -1210,6 +1373,13 @@ function wpmcp_post_fields($a, $postType) {
         }
 
         $authorId = wpmcp_list_author_id($a['author']);
+    }
+
+    if (isset($a['author']) && !($current && $authorId === (int) $current->post_author)) {
+        if (!$pto || !current_user_can($pto->cap->edit_others_posts)) {
+            return wpmcp_cannot('set the author of ' . $postType . ' content');
+        }
+
         $target   = $authorId ? get_userdata($authorId) : null;
 
         // ONE MESSAGE FOR BOTH MISSES. "no such user" and "that user cannot write here"
@@ -1227,7 +1397,8 @@ function wpmcp_post_fields($a, $postType) {
         $changed[]             = 'author';
     }
 
-    if (isset($a['featured_image'])) {
+    if (isset($a['featured_image'])
+        && !($current && (int) $a['featured_image'] === (int) get_post_thumbnail_id($current))) {
         $thumb = (int) $a['featured_image'];
 
         // The same sentence for "no such id", "not an attachment" and "not an image", so
@@ -1253,7 +1424,64 @@ function wpmcp_post_fields($a, $postType) {
         $changed[]               = 'featured_image';
     }
 
-    return array('insert' => $insert, 'after' => $after, 'changed' => $changed);
+    return array('insert' => $insert, 'keep' => $keep, 'after' => $after, 'changed' => $changed);
+}
+
+/**
+ * The fields of a post update-post reports on, as the row holds them now - for `changed`.
+ *
+ * `changed` IS A DIFF OF THIS, TAKEN BEFORE AND AFTER THE WRITE (sprint 14d). It used to be
+ * the list of fields the call SENT, plus the two core moves (date, slug) found by comparing
+ * those columns - so sending back an identical title reported `changed: ["title"]` (cold
+ * client #4), and a status change that core turned into a re-slug was reported only because
+ * somebody had thought of slug. Diffing every reported field means a field is named exactly
+ * when its stored value differs, whoever changed it: the caller, core's re-dating, core's
+ * re-slugging, core's default category, a `future` that core stored as `publish`.
+ *
+ * `date` is the pair post_date / post_date_gmt: a draft nobody dated getting its first GMT
+ * value is a change of date even when the local time is the same. `terms` is every
+ * taxonomy of the post type, because core can assign a default category on an update that
+ * sent no terms. post_modified is not reported: every write moves it, so it would say
+ * nothing.
+ *
+ * @return array<string, string>
+ */
+function wpmcp_post_state($postId) {
+    $p = get_post($postId);
+    if (!$p) { return array(); }
+
+    $terms = array();
+    foreach (get_object_taxonomies($p->post_type) as $taxonomy) {
+        $ids = wp_get_object_terms($p->ID, $taxonomy, array('fields' => 'ids'));
+        if (is_wp_error($ids)) { continue; }
+        $ids = array_map('intval', (array) $ids);
+        sort($ids);
+        $terms[$taxonomy] = $ids;
+    }
+    ksort($terms);
+
+    return array(
+        'title'          => (string) $p->post_title,
+        'content'        => (string) $p->post_content,
+        'status'         => (string) $p->post_status,
+        'excerpt'        => (string) $p->post_excerpt,
+        'slug'           => (string) $p->post_name,
+        'date'           => $p->post_date . '|' . $p->post_date_gmt,
+        'author'         => (string) (int) $p->post_author,
+        'featured_image' => (string) (int) get_post_thumbnail_id($p),
+        'terms'          => (string) wp_json_encode($terms),
+    );
+}
+
+/** The names of the fields that differ between two wpmcp_post_state() snapshots, in order. */
+function wpmcp_post_state_diff($before, $after) {
+    $changed = array();
+
+    foreach ($before as $field => $value) {
+        if (!array_key_exists($field, $after) || $after[$field] !== $value) { $changed[] = $field; }
+    }
+
+    return $changed;
 }
 
 /**
@@ -1490,21 +1718,28 @@ function wpmcp_core_tools() {
             // until a tool is loaded. The second says what wp_mcp is for, because "which
             // build is this site running" is a question an agent has to be able to
             // answer without leaving the tool surface - see wpmcp_build_label().
-            'description' => 'Get name, URL, WP version, theme, plugin count. Also wp_mcp:'
-                . ' this plugin\'s own version, and the build - the commit a zip was built'
-                . ' from, or "source" when the site runs it from a checkout.',
+            'description' => 'Get name, URL, WP version, theme, plugin count. Returns name, url,'
+                . ' wp_version, active_theme (the theme\'s name, as list-themes gives it),'
+                . ' active_theme_version (\'\' when its header has none), active_plugins (a'
+                . ' count) and wp_mcp: this plugin\'s own version, and the build - the commit a'
+                . ' zip was built from, or "source" when the site runs it from a checkout.',
             // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
             // makes an empty `properties` serialize as `{}` wherever it appears, at any
             // depth, so the inline cast this used to carry is no longer the thing
             // keeping the listing valid - and a second way of saying it would drift.
             'inputSchema' => array('type' => 'object', 'properties' => array()),
             'run' => function ($args) {
-                $theme = wp_get_theme();
+                $theme  = wp_get_theme();
+                // THE NAME ALONE, read and shaped by list-themes' own function: "Name
+                // Version" glued together was `"JDA "` for a theme with no Version header,
+                // while list-themes said `"JDA"` (sprint 14d). The version is its own key.
+                $header = $theme ? wpmcp_theme_header($theme->get_stylesheet_directory() . '/style.css') : null;
                 return array(
                     'name'           => get_bloginfo('name'),
                     'url'            => home_url(),
                     'wp_version'     => get_bloginfo('version'),
-                    'active_theme'   => $theme ? ($theme->get('Name') . ' ' . $theme->get('Version')) : null,
+                    'active_theme'   => $header ? $header['name'] : null,
+                    'active_theme_version' => $header ? $header['version'] : null,
                     'active_plugins' => count((array) get_option('active_plugins', array())),
                     // NESTED, and not `wpmcp_version` beside `wp_version`. Two keys one
                     // character apart, one meaning WordPress and the other meaning this
@@ -1546,12 +1781,13 @@ function wpmcp_core_tools() {
                 . ' author (id or login), after and before (ISO 8601 date or datetime,'
                 . ' inclusive), orderby ("date", "modified" or "title"; default "date"),'
                 . ' order ("asc" or "desc"; default "desc"), limit (default 20, max 100)'
-                . ' and page (default 1, max 100). A filter naming something that does'
+                . ' and page (default 1, max 100; has_more is false at page 100 - narrow the'
+                . ' filter to reach further). A filter naming something that does'
                 . ' not exist, or something the caller may not see, returns an empty'
                 . ' list rather than an error. Returns count, page, limit, has_more and items;'
                 . ' each item is id, title (the stored column, as get-post returns it), type,'
-                . ' status, slug, link, date and modified - ISO 8601, or null where the column'
-                . ' holds no date. There is no total.',
+                . ' status, slug, link, date and modified - ISO 8601 site-local, or null where'
+                . ' the column holds no date. There is no total.',
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string', 'description' => 'Post type to list. Default "post".'),
                 'status'    => array('type' => 'string', 'description' => 'One post status. Default: every status the caller may see.'),
@@ -1565,7 +1801,7 @@ function wpmcp_core_tools() {
                 'orderby'   => array('type' => 'string', 'enum' => array('date', 'modified', 'title'), 'description' => 'Sort column. Default "date".'),
                 'order'     => array('type' => 'string', 'enum' => array('asc', 'desc'), 'description' => 'Sort direction. Default "desc".'),
                 'limit'     => array('type' => 'integer', 'description' => 'Items per page. Clamped to 1-100. Default 20.'),
-                'page'      => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100. Default 1.'),
+                'page'      => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100; has_more is false at 100. Default 1.'),
             )),
             'run' => function ($args) {
                 $type = isset($args['post_type']) ? sanitize_key($args['post_type']) : 'post';
@@ -1574,8 +1810,10 @@ function wpmcp_core_tools() {
                 if (!wpmcp_post_type_ok($type)) {
                     return new WP_Error('wpmcp_bad_type', 'Not a listable post type: ' . $type);
                 }
-                $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
-                $page  = isset($args['page']) ? min(100, max(1, (int) $args['page'])) : 1;
+                // `limit` ONLY, not the per_page alias the media and comment tools accept:
+                // this tool never took per_page, and an alias nobody used is a second name
+                // for an agent to wonder about.
+                list($limit, $page) = wpmcp_page_args(array_intersect_key($args, array('limit' => 1, 'page' => 1)));
 
                 // 'any' is never handed to WP_Query: it takes a branch where `perm` is
                 // not consulted at all, so it lists every author's private and draft
@@ -1673,13 +1911,8 @@ function wpmcp_core_tools() {
                         'modified' => wpmcp_iso_date($p->post_modified),
                     );
                 }
-                return array(
-                    'count'    => count($items),
-                    'page'     => $page,
-                    'limit'    => $limit,
-                    'has_more' => $hasMore,
-                    'items'    => $items,
-                );
+                // The shared envelope, which is where has_more stops at the page cap.
+                return wpmcp_page_envelope($items, $page, $limit, $hasMore);
             },
         ),
         'get-post' => array(
@@ -1696,7 +1929,8 @@ function wpmcp_core_tools() {
                 . ' modified_gmt as ISO 8601, or null where the column holds no date -'
                 . ' a draft nobody dated. featured_image {id, url} or null, terms'
                 . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
-                . ' entry {id, name, slug}, and revisions - the number of stored'
+                . ' entry {id, name, slug} with the name as typed (see list-terms), and revisions -'
+                . ' the number of stored'
                 . ' revisions, or null when the caller may read the post but not edit'
                 . ' it. title, content and excerpt are the stored columns, not the display'
                 . ' rendering: quotes, apostrophes, ampersands and backslashes read back as'
@@ -1798,12 +2032,14 @@ function wpmcp_content_tools() {
             . ' so read `status` and `date` in the result for what actually happened.'
             . ' `author` is a user id or login and needs the capability to edit others\''
             . ' posts. `featured_image` is an image attachment id you may edit, or 0 for'
-            . ' none. Returns id, link, status and changed.',
+            . ' none. Tags are stripped from the title. Returns id, link, status, changed (the'
+            . ' fields this call set), date and date_gmt when date was sent, and terms_refused'
+            . ' or terms_failed when a term could not be assigned.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'title' => array('type' => 'string'), 'content' => array('type' => 'string'),
             'post_type' => array('type' => 'string'), 'status' => array('type' => 'string'),
             'excerpt' => array('type' => 'string'), 'slug' => array('type' => 'string'),
-            'terms' => array('type' => 'object'),
+            'terms' => array('type' => 'object', 'description' => '{taxonomy: [term id, term name, or get-post\'s {id, name, slug} entry]}. An unknown name creates the term when you may create terms, and is listed in terms_refused when you may not.'),
             'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Pair a future date with status "future" to schedule.'),
             // NO `type`, because there is no way to say "integer or string" in the
             // dialect SchemaValidator enforces and a declared type it cannot express is
@@ -1895,31 +2131,33 @@ function wpmcp_content_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
+        // Every sentence here is a measurement (sprint 14d, both sites): the re-slug rule
+        // is the status-transition table in that sprint's report, and the revision
+        // sentence is what a revision-less post and a revisioned one each do.
         'description' => 'Update a post or page. Args: id (required) plus any of title,'
-            . ' content, status, excerpt, slug, terms, date, author and featured_image.'
-            . ' Only the fields you send change, and each REPLACES what was there - except'
-            . ' two core does: it re-dates an undated draft, and re-slugs a trashed'
-            . ' post and a slug-less one it publishes. `changed` names both. Set'
-            . ' status "publish" to publish. `date` is ISO 8601; with no UTC offset it is'
-            . ' this site\'s local time; kept on a draft. To SCHEDULE, send a future'
-            . ' date with status "future"; core stores "future" for a future date and'
-            . ' publishes a past one whatever you sent, so read `status` and `date` in'
-            . ' the result. `author` is a user id or login and needs the capability to edit'
-            . ' others\' posts. `featured_image` is an image attachment id you may edit, or'
-            . ' 0 to clear. Refused, naming who, while another user edits it.'
-            . ' After a TEXT change the'
-            . ' NEWEST revision holds what you sent and the one below is the pre-edit text'
-            . ' restore-revision undoes to; no text change, no revision.',
+            . ' content, status ("publish" publishes), excerpt, slug, terms, date, author and'
+            . ' featured_image. A field you send REPLACES what was there;'
+            . ' one equal to its stored value is not written, and an update that changes'
+            . ' nothing writes nothing. Returns id, link, status and changed: every field whose'
+            . ' stored value now differs, core\'s own moves included - it re-dates an undated'
+            . ' draft, and on a status change re-slugs: leaving draft or pending, a slug-less'
+            . ' post gets one from its title and a taken slug a -N suffix; trashing appends'
+            . ' __trashed. date and date_gmt come back when date changed or was sent. Refused,'
+            . ' naming who, while another user edits it. After a TEXT change'
+            . ' the NEWEST revision holds what you sent and the one below is the pre-edit text'
+            . ' restore-revision undoes to; otherwise no revision is added, except that the'
+            . ' first write to a post with none saves one.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
-            'content' => array('type' => 'string'), 'status' => array('type' => 'string'),
+            'content' => array('type' => 'string'),
+            'status' => array('type' => 'string', 'description' => 'A post status: draft, pending, private, future, publish or trash. Core stores "future" for a future date and publishes a past one, whatever status you send, so read status and date in the result.'),
             'excerpt' => array('type' => 'string'), 'slug' => array('type' => 'string'),
-            'terms' => array('type' => 'object'),
-            'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Kept on a draft, which WordPress would otherwise re-date.'),
+            'terms' => array('type' => 'object', 'description' => '{taxonomy: [term id, term name, or get-post\'s {id, name, slug} entry]}. Replaces the post\'s terms in each taxonomy named. An unknown name creates the term when you may create terms, and is listed in terms_refused when you may not.'),
+            'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Kept on a draft, which WordPress would otherwise re-date. To SCHEDULE, send a future date with status "future".'),
             // See create-post: no `type` because the dialect cannot say "integer or
             // string", and this argument is honestly both.
-            'author' => array('description' => 'User id (integer) or user login (string). Needs the capability to edit other people\'s posts of this type, and the target must be able to write them.'),
-            'featured_image' => array('type' => 'integer', 'description' => 'Attachment id of an image you are allowed to edit, or 0 to remove the featured image.'),
+            'author' => array('description' => 'User id (integer) or user login (string). Changing it needs the capability to edit other people\'s posts of this type, and the target must be able to write them; sending the current author needs nothing.'),
+            'featured_image' => array('type' => 'integer', 'description' => 'Attachment id of an image you are allowed to edit, or 0 to remove the featured image. Sending the current one changes nothing.'),
         ), 'required' => array('id')),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
@@ -1936,16 +2174,27 @@ function wpmcp_content_tools() {
             // revision included, so a refused call leaves nothing behind.
             $locked = wpmcp_post_lock_refusal($id);
             if ($locked) { return $locked; }
-            $upd = array('ID' => $id); $changed = array();
-            if (isset($a['title']))   { $upd['post_title'] = wp_strip_all_tags((string) $a['title']); $changed[] = 'title'; }
-            if (isset($a['content'])) { $upd['post_content'] = (string) $a['content']; $changed[] = 'content'; }
+            // A FIELD SENT WITH THE VALUE IT ALREADY HAS IS NOT WRITTEN (sprint 14d) - the
+            // round-trip rule; see wpmcp_post_fields(). The comparison is with what the
+            // caller SENT, before any shaping: wp_strip_all_tags() on a title wp-admin stored
+            // as `x<y z` gives `x`, so shaping first would turn "unchanged" into a loss.
+            $upd = array('ID' => $id);
+            if (isset($a['title']) && (string) $a['title'] !== (string) $p0->post_title) {
+                $upd['post_title'] = wp_strip_all_tags((string) $a['title']);
+            }
+            if (isset($a['content']) && (string) $a['content'] !== (string) $p0->post_content) {
+                $upd['post_content'] = (string) $a['content'];
+            }
             if (isset($a['status'])) {
-                $upd['post_status'] = sanitize_key($a['status']);
-                $changed[] = 'status';
+                $status = sanitize_key($a['status']);
+                // THE GATES RUN ON WHAT WAS SENT, unchanged or not: a Contributor sending
+                // `publish` is refused whether or not the post is already published, which
+                // it cannot edit anyway. Only the write is skipped for an unchanged value.
+                //
                 // Publishing somebody else's draft is a capability of its own, and
                 // edit_post does not imply it (a Contributor may edit, never publish).
                 // `private` is in that set too - see wpmcp_publishing_statuses().
-                if (in_array($upd['post_status'], wpmcp_publishing_statuses(), true)) {
+                if (in_array($status, wpmcp_publishing_statuses(), true)) {
                     $pto = get_post_type_object($p0->post_type);
                     if (!current_user_can($pto->cap->publish_posts)) {
                         return wpmcp_cannot('publish ' . $p0->post_type . ' content');
@@ -1954,19 +2203,36 @@ function wpmcp_content_tools() {
                 // Trashing through update-post is a delete by another name, so it
                 // answers to delete_post, not edit_post - otherwise delete-post's
                 // gate is one argument away from being bypassed.
-                if ($upd['post_status'] === 'trash' && !current_user_can('delete_post', $id)) {
+                if ($status === 'trash' && !current_user_can('delete_post', $id)) {
                     return wpmcp_cannot('trash post ' . $id);
                 }
+                if ($status !== (string) $p0->post_status) { $upd['post_status'] = $status; }
             }
             // THE SHARED STEP - the same one create-post calls, which is what keeps the
             // two tools' idea of excerpt, slug, date, author and featured_image identical.
             // It runs AFTER the edit_post gate above, so a caller who may not touch this
-            // post at all is never handed a verdict about an attachment or a user.
-            $fields = wpmcp_post_fields($a, $p0->post_type);
+            // post at all is never handed a verdict about an attachment or a user. Handed
+            // the stored row, so an unchanged value is left alone rather than re-written.
+            $fields = wpmcp_post_fields($a, $p0->post_type, $p0);
             if (is_wp_error($fields)) { return $fields; }
 
-            $upd     = array_merge($upd, $fields['insert']);
-            $changed = array_merge($changed, $fields['changed']);
+            $upd = array_merge($upd, $fields['insert']);
+
+            // NOTHING TO WRITE, NOTHING WRITTEN. Every sent post column equals the stored
+            // one, so wp_update_post() is not called at all: no baseline revision, no
+            // re-dating of a floating draft, no modified date moved. Measured before this
+            // (both sites): an update sending back an identical title created a revision on
+            // a post that had none, and moved a floating draft's date to now.
+            $writes = count($upd) > 1;
+            if ($writes) {
+                // A date sent back unchanged is held rather than dropped - see `keep` in
+                // wpmcp_post_fields(): without edit_date core would re-date a floating draft
+                // as part of this very write.
+                $upd = array_merge($fields['keep'], $upd);
+            }
+
+            // THE BEFORE HALF OF `changed`. See wpmcp_post_state().
+            $before = wpmcp_post_state($id);
 
             // SLASHED, and here it is not only wp_insert_post's unslash at the far end:
             // wp_update_post() reads the existing row and calls `wp_slash($post)` on it
@@ -1983,46 +2249,44 @@ function wpmcp_content_tools() {
             // back. Saving the CURRENT state here closes that. It costs nothing on a post
             // that is already revisioned: core compares with the latest revision and saves
             // only when a revisioned field differs (revision.php:159-212) - MEASURED on both
-            // sites, a post with an up-to-date revision keeps its count. Unconditional, and
-            // after every refusal above, so a refused call writes no revision either.
+            // sites, a post with an up-to-date revision keeps its count. After every refusal
+            // above, so a refused call writes no revision either, and only when there is a
+            // write: an update that changes nothing leaves the revisions as they were.
             // No slashing question: it is handed an id and reads the row itself.
-            wp_save_post_revision($id);
-
-            $r = wp_update_post(wp_slash($upd), true);
-            if (is_wp_error($r)) { return $r; }
-
-            // `changed` NAMES WHAT CHANGED, NOT ONLY WHAT WAS ASKED FOR - and `date` is
-            // the one field where those differ. MEASURED on WP 7.1: a draft whose
-            // post_date_gmt is still the zero date is one nobody dated, and
-            // wp_update_post re-dates it to now on ANY update ("drafts shouldn't be
-            // assigned a date unless the user did so"). So editing a title alone moves
-            // the post's date, and a caller that read `changed` and saw only `title`
-            // learned the opposite of what happened. A dated draft and a published post
-            // are untouched, so this fires exactly when something really moved.
             //
-            // AND `slug` FOR THE SAME REASON, which round 1 missed and a review caught.
-            // MEASURED on the bare site, WP 7.0: a post whose post_name is still empty -
-            // which is every draft nobody gave a slug, because core derives one only when
-            // the status LEAVES the draft/pending set - is slugged from its title the
-            // moment a status-only update publishes it. `draft -> pending` does not do
-            // it; `draft -> publish` does. So there are exactly two fields core changes
-            // without being asked, and `changed` names both or it names neither honestly.
-            $moved = get_post($id);
-            if ($moved && $moved->post_date !== $p0->post_date && !in_array('date', $changed, true)) {
-                $changed[] = 'date';
-            }
-            if ($moved && $moved->post_name !== $p0->post_name && !in_array('slug', $changed, true)) {
-                $changed[] = 'slug';
+            // WHAT A CLIENT SEES, measured on both sites (sprint 14d): the FIRST write to a
+            // post with no revisions adds one revision whatever it changes - this baseline,
+            // holding the text as it was - and core saves nothing more unless the text
+            // changed. So "no text change, no revision" holds only once a post has one;
+            // core's own post_updated handler does the same without this call (measured:
+            // a status-only wp_update_post on a revision-less post leaves one revision).
+            if ($writes) {
+                wp_save_post_revision($id);
+
+                $r = wp_update_post(wp_slash($upd), true);
+                if (is_wp_error($r)) { return $r; }
             }
 
             $out = array('id' => $id, 'link' => get_permalink($id));
             if (!empty($a['terms']) && is_array($a['terms'])) {
                 $t = wpmcp_apply_terms($id, $a['terms']);
-                $changed[] = 'terms';
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
                 if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
-            $out = array_merge($out, wpmcp_apply_post_fields($id, $fields['after'], $changed));
+
+            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state(). The
+            // featured image is applied first because it is one of the fields compared.
+            $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
+            $changed = wpmcp_post_state_diff($before, wpmcp_post_state($id));
+
+            // The new date beside `changed`, whenever the date moved or was sent: a caller
+            // that set one, or whose draft core re-dated, gets the stored value without a
+            // second call. Same fragment create-post returns.
+            if (in_array('date', $changed, true) || array_key_exists('date', $a)) {
+                $applied = array_merge($applied, wpmcp_apply_post_fields($id, array(), array('date')));
+            }
+
+            $out = array_merge($out, $applied);
             $p = get_post($id);
             $out['status']  = $p->post_status;
             $out['changed'] = $changed;
@@ -2038,7 +2302,13 @@ function wpmcp_content_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a post/page. Args: id (required), force (default false). force=false trashes; force=true permanently deletes.',
+        'description' => 'Delete a post or page. Args: id (required), force (default false).'
+            . ' force=false moves it to the trash - a post already there stays there, and on a'
+            . ' site with the trash switched off (EMPTY_TRASH_DAYS 0) WordPress deletes it'
+            . ' permanently instead. force=true deletes it permanently, with its revisions.'
+            . ' Trashing appends __trashed to the slug. Returns id, deleted (gone for good) and'
+            . ' trashed (in the trash now), read back after the call. Needs permission to'
+            . ' delete the post.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'force' => array('type' => 'boolean'),
         ), 'required' => array('id')),
@@ -2052,9 +2322,28 @@ function wpmcp_content_tools() {
                 return wpmcp_cannot('delete post ' . $id);
             }
             $force = !empty($a['force']);
-            $r = wp_delete_post($id, $force);
+            // force=false IS THE TRASH, FOR EVERY TYPE, and a post already in it stays
+            // there (sprint 14d). wp_delete_post($id, false) trashes only a `post` or a
+            // `page` that is not already trashed (post.php, the EMPTY_TRASH_DAYS branch) -
+            // measured on the bare site: a custom post type, and a second force=false on a
+            // trashed post, were both deleted PERMANENTLY while this tool answered
+            // `trashed: true`. wp_trash_post() is what wp-admin's Trash link calls for any
+            // type; it deletes permanently only where the site has no trash at all.
+            if ($force) {
+                $r = wp_delete_post($id, true);
+            } elseif ($p0->post_status === 'trash') {
+                $r = $p0;
+            } else {
+                $r = wp_trash_post($id);
+            }
             if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
-            return array('id' => $id, 'deleted' => $force, 'trashed' => !$force);
+            // READ BACK, NOT ASSERTED: what the row says now is the only true answer.
+            $left = get_post($id);
+            return array(
+                'id'      => $id,
+                'deleted' => !$left,
+                'trashed' => $left instanceof WP_Post && $left->post_status === 'trash',
+            );
         },
     ),
 
@@ -2219,17 +2508,23 @@ function wpmcp_revision_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
+        // A READ TOOL, so a read-scope token sees this description and never sees
+        // update-post's or restore-revision's (sprint 14d, seosemia read-only cold client):
+        // which revision is which has to be said HERE, and restoring must not be offered as
+        // something this token can do.
         'description' => 'List a post\'s revisions, newest first. Args: id (integer,'
-            . ' required), limit (1-100, default 20) and page (1-100, default 1). Each'
-            . ' item is id, date (ISO 8601, site-local), author {id, name}, title (the'
-            . ' stored column) and'
-            . ' autosave - true for an autosave, which is listed with the rest. No'
-            . ' content: read one with get-revision, restore one with restore-revision.'
-            . ' Returns count, page, limit, has_more and items. Needs permission to edit'
-            . ' the post; a post you may not edit, a post that is not there and an id of'
-            . ' the wrong kind all answer identically. Where revisions are turned off for'
-            . ' the post - its type does not keep them, or the site disabled them - the'
-            . ' list is empty.',
+            . ' required), limit (1-100, default 20) and page (1-100, default 1; has_more is'
+            . ' false at page 100). Returns count, page, limit, has_more and items; each'
+            . ' item is id, date (ISO 8601, site-local: when the text it holds was saved to the'
+            . ' post, not when the revision was made - trust the order, not the date),'
+            . ' author {id, name}, title (the stored column) and autosave - true for an'
+            . ' autosave, which is listed with the rest. WordPress saves a revision after each'
+            . ' text change, so the newest non-autosave revision normally holds the post\'s'
+            . ' CURRENT text and the one below it the text before the last change. No'
+            . ' content here: get-revision reads one; an admin-scope token can restore one'
+            . ' with restore-revision. Needs permission to edit the post; a post you may not'
+            . ' edit, a post that is not there and an id of the wrong kind all answer'
+            . ' identically. Where revisions are off for the post, the list is empty.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id'    => array('type' => 'integer', 'description' => 'Post ID.'),
             'limit' => array('type' => 'integer', 'description' => 'Items per page, 1-100. Default 20.'),
@@ -2241,8 +2536,7 @@ function wpmcp_revision_tools() {
             // with that id that this caller may see - here, may edit.
             if (!$post) { return new WP_Error('wpmcp_not_found', 'No post with that ID.'); }
 
-            $limit = isset($args['limit']) ? min(100, max(1, (int) $args['limit'])) : 20;
-            $page  = isset($args['page']) ? min(100, max(1, (int) $args['page'])) : 1;
+            list($limit, $page) = wpmcp_page_args(array_intersect_key($args, array('limit' => 1, 'page' => 1)));
 
             // CORE'S LISTING, NOT A QUERY OF OUR OWN. wp_get_post_revisions() is what
             // wp-admin lists from: newest first on `date ID` (so two revisions saved in
@@ -2258,13 +2552,7 @@ function wpmcp_revision_tools() {
             $hasMore = count($revisions) > $limit;
             $items   = array_map('wpmcp_revision_summary', array_slice($revisions, 0, $limit));
 
-            return array(
-                'count'    => count($items),
-                'page'     => $page,
-                'limit'    => $limit,
-                'has_more' => $hasMore,
-                'items'    => $items,
-            );
+            return wpmcp_page_envelope($items, $page, $limit, $hasMore);
         },
     ),
 
@@ -2461,10 +2749,12 @@ function wpmcp_meta_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Read a post\'s custom fields. Args: id (required), key'
-            . ' (optional). Returns `meta` as an object of key to value for every meta key'
+            . ' (optional). Returns id and `meta`, an object of key to value for every meta key'
             . ' this site allows MCP to touch that has a value on the post - one value when'
-            . ' the key holds ONE row, a list of N values when it holds N rows - or just'
-            . ' the one key you name. An administrator sets which keys those are in Settings > WP MCP;'
+            . ' the key holds ONE row, a list of N values when it holds N rows (one row holding'
+            . ' a serialised array also comes back as a list or object) - or just'
+            . ' the one key you name. Values are strings as stored; a nested value is null.'
+            . ' An administrator sets which keys those are in Settings > WP MCP;'
             . ' a key outside that list is refused by name and nothing else about the'
             . ' site\'s other keys is said. A post the caller may not read, a post that is'
             . ' not there, and an id of the wrong kind of thing all answer identically.',
@@ -2538,7 +2828,8 @@ function wpmcp_meta_tools() {
             . ' scalar for ONE row, a flat list of N scalars for N SEPARATE rows, or null'
             . ' to delete the key. A field that expects one serialised array rather than'
             . ' several rows - an ACF repeater or gallery, or any key registered'
-            . ' single=true - is not writable this way. An object, a list holding one, and'
+            . ' single=true - is not writable this way: a list sent to a key holding one such'
+            . ' array is refused. An object, a list holding one, and'
             . ' an empty list or object are all refused; only null deletes. The key must be'
             . ' one an administrator allowed in Settings > WP MCP, and you need to be able'
             . ' to edit the post. WordPress stores meta as text, so a number or a boolean'
@@ -2596,6 +2887,22 @@ function wpmcp_meta_tools() {
             } elseif (is_scalar($value)) {
                 update_post_meta($id, $slashedKey, wp_slash($value));
             } elseif (is_array($value) && array_is_list($value) && $value !== array()) {
+                // A LIST WRITTEN BACK ONTO ONE SERIALISED ARRAY IS REFUSED (sprint 14d).
+                // get-post-meta returns a key holding ONE row that is a serialised array (an
+                // ACF repeater, a `single` key) as that array - the same JSON a key of N rows
+                // gives - and writing it back here would store N rows where there was one
+                // array: the round trip changes the shape of the data. The description has
+                // always said such a field is not writable this way; now the tool refuses
+                // rather than corrupting it. A scalar or null still replaces it, deliberately.
+                $existing = get_post_meta($id, $key, false);
+                if (is_array($existing) && count($existing) === 1 && is_array($existing[0])) {
+                    return new WP_Error(
+                        'wpmcp_meta_shape',
+                        'The key ' . $key . ' holds one serialised array, and a list here would'
+                        . ' replace it with one row per element. This tool cannot write that'
+                        . ' shape; send a scalar, or null to delete the key.'
+                    );
+                }
                 foreach ($value as $element) {
                     if (!is_scalar($element)) {
                         return new WP_Error(
@@ -2653,6 +2960,20 @@ function wpmcp_meta_tools() {
 /* ============================================================
  * Taxonomy tools (list-terms / create-term / delete-term)
  * ========================================================== */
+
+/**
+ * create-term's refusal for a name the taxonomy already has, naming the term that has it -
+ * the id is what a caller that meant "make sure this term exists" needs next, and it is a
+ * term the caller could list anyway.
+ */
+function wpmcp_term_exists_error($taxonomy, $termId) {
+    return new WP_Error(
+        'wpmcp_term_exists',
+        'A term with that name already exists in ' . $taxonomy
+        . ($termId > 0 ? ': term ' . (int) $termId : '') . '. Use it, or choose another name.'
+    );
+}
+
 function wpmcp_taxonomy_tools() {
     return array(
 
@@ -2664,25 +2985,47 @@ function wpmcp_taxonomy_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List taxonomy terms. Args: taxonomy (default category), search, hide_empty (default false).',
+        'description' => 'List taxonomy terms, by name. Args: taxonomy (default "category"),'
+            . ' search (in name and slug), hide_empty (default false), limit (default 20, max'
+            . ' 100) and page (default 1, max 100; has_more is false at page 100 - narrow the'
+            . ' search to reach further). Returns count, page, limit, has_more and items; each'
+            . ' item is id, name, slug, taxonomy, count (posts in the term) and parent (0 at the'
+            . ' top). name is as typed: WordPress stores & < > as &amp; &lt; &gt;, and they come'
+            . ' back decoded, so a name read here can be sent to create-term or in update-post\'s'
+            . ' terms and names the same term.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'search' => array('type' => 'string'),
             'hide_empty' => array('type' => 'boolean'),
+            'limit' => array('type' => 'integer', 'description' => 'Terms per page. Clamped to 1-100. Default 20.'),
+            'page'  => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100; has_more is false at 100. Default 1.'),
         )),
         'run' => function ($a) {
             $tax = isset($a['taxonomy']) ? sanitize_key($a['taxonomy']) : 'category';
             if (!taxonomy_exists($tax)) { return new WP_Error('wpmcp_bad_taxonomy', 'Unknown taxonomy.'); }
+            // PAGED SINCE SPRINT 14d, in the envelope every other list tool returns. It used
+            // to return every term of the taxonomy in one answer, which on a site with
+            // thousands of tags is an answer no client should be handed unasked, and it was
+            // the one list tool whose result had a different shape (`terms`, no page).
+            list($limit, $page) = wpmcp_page_args(array_intersect_key($a, array('limit' => 1, 'page' => 1)));
             $terms = get_terms(array(
-                'taxonomy' => $tax, 'hide_empty' => !empty($a['hide_empty']),
-                'search' => isset($a['search']) ? (string) $a['search'] : '',
+                'taxonomy'   => $tax,
+                'hide_empty' => !empty($a['hide_empty']),
+                'search'     => isset($a['search']) ? (string) $a['search'] : '',
+                // One past the page: the has_more probe, as in every other list tool.
+                'number'     => $limit + 1,
+                'offset'     => ($page - 1) * $limit,
+                'orderby'    => 'name',
+                'order'      => 'ASC',
             ));
             if (is_wp_error($terms)) { return $terms; }
-            $out = array();
-            foreach ($terms as $t) {
-                $out[] = array('id' => $t->term_id, 'name' => $t->name, 'slug' => $t->slug,
-                    'taxonomy' => $t->taxonomy, 'count' => $t->count, 'parent' => $t->parent);
+            $more = count($terms) > $limit;
+            $out  = array();
+            foreach (array_slice($terms, 0, $limit) as $t) {
+                $out[] = array('id' => (int) $t->term_id, 'name' => wpmcp_decode_specialchars($t->name),
+                    'slug' => $t->slug, 'taxonomy' => $t->taxonomy, 'count' => (int) $t->count,
+                    'parent' => (int) $t->parent);
             }
-            return array('count' => count($out), 'terms' => $out);
+            return wpmcp_page_envelope($out, $page, $limit, $more);
         },
     ),
 
@@ -2694,7 +3037,11 @@ function wpmcp_taxonomy_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Create a taxonomy term. Args: taxonomy (required), name (required), slug, parent, description.',
+        'description' => 'Create a taxonomy term. Args: taxonomy (required), name (required), slug,'
+            . ' parent (a term id, hierarchical taxonomies only) and description. Returns id,'
+            . ' name (as typed - see list-terms) and slug; a slug already taken gets a -N suffix.'
+            . ' A name the taxonomy already has (under the same parent) is refused, naming the'
+            . ' existing term\'s id. Needs permission to edit terms in the taxonomy.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'name' => array('type' => 'string'),
             'slug' => array('type' => 'string'), 'parent' => array('type' => 'integer'),
@@ -2720,10 +3067,30 @@ function wpmcp_taxonomy_tools() {
             // sanitize_title, which strips a backslash, and `parent` is an int, so
             // slashing the whole array is a no-op on those two and the rule stays one
             // rule rather than a list of exceptions.
-            $r = wp_insert_term(wp_slash((string) $a['name']), $tax, wp_slash($args));
+            //
+            // A NAME THE TAXONOMY ALREADY HAS IS REFUSED BY NAME, twice over (sprint 14d).
+            // Core refuses it with its own `term_exists` code, which is not a wpmcp_ code, so
+            // the error boundary turned "that category already exists" into an opaque -32603
+            // with a trace id - a client re-creating a term it had just read was left to
+            // guess. And core does not refuse it at all when the name holds a BACKSLASH: its
+            // duplicate check looks the name up through WP_Term_Query, which stripslashes()
+            // the name first (measured on both sites: `A\B` created twice, the second as
+            // slug `ab-2`). So the lookup is made here too, slashed, the way
+            // wpmcp_apply_terms() makes it - the same term by the same rule in both tools -
+            // and core's own answer is translated rather than passed through.
+            $name     = (string) $a['name'];
+            $existing = get_term_by('name', wp_slash($name), $tax);
+            if ($existing && !isset($args['slug'])
+                && (!is_taxonomy_hierarchical($tax) || (int) $existing->parent === (int) ($args['parent'] ?? 0))) {
+                return wpmcp_term_exists_error($tax, (int) $existing->term_id);
+            }
+            $r = wp_insert_term(wp_slash($name), $tax, wp_slash($args));
+            if (is_wp_error($r) && $r->get_error_code() === 'term_exists') {
+                return wpmcp_term_exists_error($tax, (int) $r->get_error_data());
+            }
             if (is_wp_error($r)) { return $r; }
             $t = get_term($r['term_id'], $tax);
-            return array('id' => (int) $r['term_id'], 'name' => $t->name, 'slug' => $t->slug);
+            return array('id' => (int) $r['term_id'], 'name' => wpmcp_decode_specialchars($t->name), 'slug' => $t->slug);
         },
     ),
 
@@ -2735,7 +3102,11 @@ function wpmcp_taxonomy_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a taxonomy term. Args: taxonomy (required), id (required).',
+        'description' => 'Delete a taxonomy term. It goes permanently - terms have no trash. Args: taxonomy'
+            . ' (required), id (required). Posts keep their other terms; a post left with no'
+            . ' category gets the default one, and the taxonomy\'s default term cannot be'
+            . ' deleted (refused, saying so). Returns id and deleted (true). Needs permission to'
+            . ' delete terms in the taxonomy.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'taxonomy' => array('type' => 'string'), 'id' => array('type' => 'integer'),
         ), 'required' => array('taxonomy', 'id')),
@@ -2749,6 +3120,17 @@ function wpmcp_taxonomy_tools() {
             }
             $r = wp_delete_term((int) $a['id'], $tax);
             if (is_wp_error($r)) { return $r; }
+            // 0 IS NOT "NOT FOUND". wp_delete_term() answers 0 for the taxonomy's DEFAULT
+            // term (default_category, or a registered default_term) and false for a term
+            // that is not there; both used to come back as "Term not found." - measured
+            // (sprint 14d) on the default category, which plainly exists.
+            if ($r === 0) {
+                return new WP_Error(
+                    'wpmcp_default_term',
+                    'Term ' . (int) $a['id'] . ' is the default term of ' . $tax
+                    . ', which WordPress does not delete. Make another term the default first.'
+                );
+            }
             if (!$r) { return new WP_Error('wpmcp_not_found', 'Term not found.'); }
             return array('id' => (int) $a['id'], 'deleted' => true);
         },
@@ -2771,24 +3153,41 @@ function wpmcp_media_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List media attachments. Args: search, mime_type, page (default 1), per_page'
-            . ' (default 20, max 100). Each item is id, title (the stored column), mime, url and date.',
+        'description' => 'List media attachments, newest first. Args: search (title, caption'
+            . ' and description), mime_type ("image" or "image/png"), limit (default 20, max'
+            . ' 100; per_page is accepted as its old name) and page (default 1, max 100; has_more'
+            . ' is false at page 100 - narrow the search to reach further). Returns count, page,'
+            . ' limit, has_more and items; each item is id, title (the stored column), mime, url'
+            . ' (the rendered file link), and date and modified - ISO 8601 site-local, as'
+            . ' list-posts gives them. Media attached to a post you may not read is left out,'
+            . ' so count can be below limit while has_more is true.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'search' => array('type' => 'string'), 'mime_type' => array('type' => 'string'),
-            'page' => array('type' => 'integer'), 'per_page' => array('type' => 'integer'),
+            'limit' => array('type' => 'integer', 'description' => 'Items per page. Clamped to 1-100. Default 20.'),
+            'page' => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100; has_more is false at 100. Default 1.'),
+            'per_page' => array('type' => 'integer', 'description' => 'The old name of limit; limit wins when both are sent.'),
         )),
         'run' => function ($a) {
+            // THE SHARED ENVELOPE (sprint 14d): limit + 1 rows from an offset, rather than
+            // core's `paged`, so has_more can be answered without a total, and an ID
+            // tie-break so two uploads in one second cannot swap between pages.
+            list($limit, $page) = wpmcp_page_args($a);
             $q = new WP_Query(array(
                 'post_type' => 'attachment', 'post_status' => 'inherit',
                 // Slashed for the same reason as list-posts' search: parse_search()
                 // stripslashes `s` (class-wp-query.php:1439).
                 's' => isset($a['search']) ? wp_slash((string) $a['search']) : '',
                 'post_mime_type' => isset($a['mime_type']) ? (string) $a['mime_type'] : '',
-                'paged' => isset($a['page']) ? max(1, (int) $a['page']) : 1,
-                'posts_per_page' => isset($a['per_page']) ? min(100, max(1, (int) $a['per_page'])) : 20,
+                'posts_per_page' => $limit + 1,
+                'offset' => ($page - 1) * $limit,
+                'orderby' => array('date' => 'DESC', 'ID' => 'DESC'),
+                'no_found_rows' => true,
+                'ignore_sticky_posts' => true,
+                'update_post_meta_cache' => false,
             ));
+            $more = count($q->posts) > $limit;
             $out = array();
-            foreach ($q->posts as $p) {
+            foreach (array_slice($q->posts, 0, $limit) as $p) {
                 // An attachment's read_post resolves through its parent post's status,
                 // so this is what keeps the media of a private or draft post - titles
                 // and, worse, direct file URLs - out of a token that cannot read the
@@ -2796,10 +3195,16 @@ function wpmcp_media_tools() {
                 // post_status=inherit, so the filter has to be here.
                 if (!current_user_can('read_post', (int) $p->ID)) { continue; }
 
+                // date and modified are the LOCAL columns through wpmcp_iso_date(), as every
+                // other list tool gives them. Before sprint 14d `date` was post_date_gmt as
+                // MySQL stores it, `2026-08-27 02:17:03` - another format and another zone
+                // from the tool beside it.
                 $out[] = array('id' => $p->ID, 'title' => wpmcp_raw_title($p), 'mime' => $p->post_mime_type,
-                    'url' => wp_get_attachment_url($p->ID), 'date' => $p->post_date_gmt);
+                    'url' => wp_get_attachment_url($p->ID),
+                    'date' => wpmcp_iso_date($p->post_date),
+                    'modified' => wpmcp_iso_date($p->post_modified));
             }
-            return array('count' => count($out), 'items' => $out);
+            return wpmcp_page_envelope($out, $page, $limit, $more);
         },
     ),
 
@@ -2812,8 +3217,10 @@ function wpmcp_media_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Get one media item. Args: id (required). Returns id, title, mime,'
-            . ' url, alt, caption, filesize, width and height. title, alt and caption are stored'
-            . ' columns or meta, as written; url is the rendered link.',
+            . ' url, alt, caption, filesize (bytes, or null when the file is missing), width and'
+            . ' height (pixels, or null for a non-image). title, alt and caption are stored'
+            . ' columns or meta, as written; url is the rendered link. Media attached to a post'
+            . ' you may not read answers like a missing id.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('id' => array('type' => 'integer')), 'required' => array('id')),
         'run' => function ($a) {
@@ -2847,7 +3254,14 @@ function wpmcp_media_tools() {
             'idempotentHint' => false,
             'openWorldHint' => true,
         ),
-        'description' => 'Upload media by sideloading a URL. Args: source_url (required, http/https), filename, title, alt, post (attach to post id).',
+        'description' => 'Upload media by sideloading a URL. This site downloads the file - the only'
+            . ' way in; there is no way to send the file\'s bytes. Args: source_url (required, http or'
+            . ' https, fetched within 20 seconds), filename (default: the URL\'s own), title'
+            . ' (default: from the file name), alt, and post (an id to attach it to, which you'
+            . ' must be able to edit). The file must be a type WordPress lets you upload (for most'
+            . ' roles: images, audio, video, PDF and office documents) and within the site\'s'
+            . ' upload size limit. alt is stored as plain text: tags stripped, < as &lt;.'
+            . ' Returns id, url and mime. Needs permission to upload files.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'source_url' => array('type' => 'string'), 'filename' => array('type' => 'string'),
             'title' => array('type' => 'string'), 'alt' => array('type' => 'string'),
@@ -2922,7 +3336,12 @@ function wpmcp_media_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a media attachment. Args: id (required), force (default false).',
+        'description' => 'Delete a media attachment. Args: id (required), force (default false).'
+            . ' Unless the site turns media trash on (MEDIA_TRASH, off by default), WordPress'
+            . ' deletes an attachment permanently whatever force says - the row, its files and'
+            . ' every generated size; with MEDIA_TRASH on, force=false moves it to the trash.'
+            . ' Returns id, deleted (gone for good) and trashed (in the trash now), read back'
+            . ' after the call. Needs permission to delete the attachment.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'force' => array('type' => 'boolean'),
         ), 'required' => array('id')),
@@ -2935,9 +3354,18 @@ function wpmcp_media_tools() {
             if (!current_user_can('delete_post', $id)) {
                 return wpmcp_cannot('delete attachment ' . $id);
             }
+            // force=false IS HONOURED ONLY WHERE CORE HAS A MEDIA TRASH (sprint 14d):
+            // wp_delete_attachment() trashes only when MEDIA_TRASH is true, and it is false
+            // unless wp-config sets it - measured on both sites, force=false deleted the
+            // attachment outright. The description says so, and the answer is read back.
             $r = wp_delete_attachment($id, !empty($a['force']));
             if (!$r) { return new WP_Error('wpmcp_delete_failed', 'Could not delete.'); }
-            return array('id' => $id, 'deleted' => true);
+            $left = get_post($id);
+            return array(
+                'id'      => $id,
+                'deleted' => !$left,
+                'trashed' => $left instanceof WP_Post && $left->post_status === 'trash',
+            );
         },
     ),
 
@@ -2958,11 +3386,22 @@ function wpmcp_comment_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List comments the caller may read. Emails and IPs are never returned. Args: post (id), status (default "approve"; hold|spam|trash|all need moderate_comments and are otherwise treated as "approve"), search (matches comment text and author name), page, per_page.',
+        'description' => 'List comments the caller may read, newest first. Emails and IPs are'
+            . ' never returned. Args: post (id), status (default "approve"; hold, spam, trash and'
+            . ' all need moderate_comments and are otherwise treated as "approve"; the returned'
+            . ' words approved and unapproved are accepted too), search (comment text and author'
+            . ' name), limit (default 20, max 100; per_page is its old name) and page (default 1,'
+            . ' max 100; has_more is false at page 100 - narrow the filter to reach further).'
+            . ' Returns count, page, limit, has_more and items; each item is id, post, author_name,'
+            . ' content (stored text), status (approved, unapproved, spam or trash) and date (ISO'
+            . ' 8601 site-local). Comments on posts you may not read are left out, so count can be'
+            . ' below limit while has_more is true.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'post' => array('type' => 'integer'), 'status' => array('type' => 'string'),
-            'search' => array('type' => 'string'), 'page' => array('type' => 'integer'),
-            'per_page' => array('type' => 'integer'),
+            'search' => array('type' => 'string'),
+            'limit' => array('type' => 'integer', 'description' => 'Comments per page. Clamped to 1-100. Default 20.'),
+            'page' => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100; has_more is false at 100. Default 1.'),
+            'per_page' => array('type' => 'integer', 'description' => 'The old name of limit; limit wins when both are sent.'),
         )),
         'run' => function ($a) {
             // WP_Comment_Query performs no capability checks of any kind (zero
@@ -2970,6 +3409,10 @@ function wpmcp_comment_tools() {
             // tool's own. wp-admin gates unapproved comments on moderate_comments and
             // core's REST controller checks read_post per comment; match both.
             $status = isset($a['status']) ? sanitize_key($a['status']) : 'approve';
+            // The words this tool RETURNS are accepted as filters too (sprint 14d), so a
+            // status read off one comment can be used to list its siblings.
+            $aliases = array('approved' => 'approve', 'unapproved' => 'hold');
+            if (isset($aliases[$status])) { $status = $aliases[$status]; }
             if ($status !== 'approve' && !current_user_can('moderate_comments')) {
                 // Fall back rather than refuse: an error would confirm that held or
                 // spam comments exist and are being withheld. Same stance as
@@ -2977,13 +3420,18 @@ function wpmcp_comment_tools() {
                 $status = 'approve';
             }
 
+            // THE SHARED ENVELOPE (sprint 14d): limit + 1 from an offset, for has_more.
+            // WP_Comment_Query appends comment_ID to a date ordering itself, so pages do
+            // not overlap on comments posted in the same second.
+            list($limit, $page) = wpmcp_page_args($a);
             $args = array(
                 // Approved only unless asked otherwise. The old default of 'all' handed
                 // spam and held-for-moderation text - unreviewed, attacker-supplied
                 // content - to every read token without anyone asking for it.
                 'status' => $status,
-                'number' => isset($a['per_page']) ? min(100, max(1, (int) $a['per_page'])) : 20,
-                'paged'  => isset($a['page']) ? max(1, (int) $a['page']) : 1,
+                'number' => $limit + 1,
+                'offset' => ($page - 1) * $limit,
+                'no_found_rows' => true,
             );
             if (isset($a['post'])) { $args['post_id'] = (int) $a['post']; }
 
@@ -3025,20 +3473,24 @@ function wpmcp_comment_tools() {
                 if ($filter) { remove_filter('comments_clauses', $filter); }
             }
 
+            $more = count($cs) > $limit;
             $out = array();
-            foreach ($cs as $c) {
+            foreach (array_slice($cs, 0, $limit) as $c) {
                 // A comment on a post the caller cannot read is a read of that post:
                 // it leaks the post's existence plus author names, text and dates.
                 // This is the same leak get-post closes, one indirection away.
                 if (!current_user_can('read_post', (int) $c->comment_post_ID)) { continue; }
 
+                // date is the LOCAL column in the list tools' one format (sprint 14d); it
+                // was comment_date_gmt as MySQL stores it.
                 $out[] = array('id' => (int) $c->comment_ID, 'post' => (int) $c->comment_post_ID,
                     'author_name' => $c->comment_author, 'content' => $c->comment_content,
-                    'status' => wp_get_comment_status((int) $c->comment_ID), 'date' => $c->comment_date_gmt);
+                    'status' => wp_get_comment_status((int) $c->comment_ID),
+                    'date' => wpmcp_iso_date($c->comment_date));
             }
-            // count is what the caller may see, so it is smaller than per_page when
-            // the page held comments on unreadable posts. Paging is still by per_page.
-            return array('count' => count($out), 'items' => $out);
+            // count is what the caller may see, so it is smaller than limit when the page
+            // held comments on unreadable posts. Paging is still by limit.
+            return wpmcp_page_envelope($out, $page, $limit, $more);
         },
     ),
 
@@ -3050,7 +3502,10 @@ function wpmcp_comment_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Moderate a comment. Args: id (required), action (approve|unapprove|spam|trash|untrash).',
+        'description' => 'Moderate a comment. Args: id (required), action (required): approve,'
+            . ' unapprove, spam, trash or untrash - list-comments\' status words approved and'
+            . ' unapproved are accepted too. Returns id and status (approved, unapproved, spam or'
+            . ' trash). Needs permission to moderate comments, or to edit the comment.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'action' => array('type' => 'string'),
         ), 'required' => array('id', 'action')),
@@ -3064,8 +3519,23 @@ function wpmcp_comment_tools() {
                 return wpmcp_cannot('moderate comment ' . $id);
             }
             $action = isset($a['action']) ? sanitize_key($a['action']) : '';
+            // THE STATUS A COMMENT WAS READ WITH IS AN ACTION TOO (sprint 14d). list-comments
+            // reports `approved` / `unapproved`, and sending that word back was "Unknown
+            // action." - measured on the bare site.
+            $aliases = array('approved' => 'approve', 'unapproved' => 'unapprove', 'hold' => 'unapprove');
+            if (isset($aliases[$action])) { $action = $aliases[$action]; }
             $valid = array('approve', 'unapprove', 'spam', 'trash', 'untrash');
             if (!in_array($action, $valid, true)) { return new WP_Error('wpmcp_bad_action', 'Unknown action.'); }
+            // ALREADY THERE IS NOT A FAILURE (sprint 14d). wp_set_comment_status() answers
+            // false when its UPDATE touches no row, so approving an approved comment - which
+            // is what sending back the status list-comments read does - came back "Action
+            // failed." (measured on the bare site). The tool is declared idempotent; now it is.
+            $already = array('approve' => 'approved', 'unapprove' => 'unapproved', 'spam' => 'spam', 'trash' => 'trash');
+            $current = wp_get_comment_status($id);
+            if ((isset($already[$action]) && $current === $already[$action])
+                || ($action === 'untrash' && $current !== 'trash')) {
+                return array('id' => $id, 'status' => $current);
+            }
             if ($action === 'trash')        { $ok = wp_trash_comment($id); }
             elseif ($action === 'untrash')  { $ok = wp_untrash_comment($id); }
             elseif ($action === 'spam')     { $ok = wp_spam_comment($id); }
@@ -3084,7 +3554,12 @@ function wpmcp_comment_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Reply to a comment. Args: id (required, parent comment), content (required).',
+        'description' => 'Reply to a comment, as the token\'s user. Args: id (required, the comment'
+            . ' replied to) and content (required). The reply goes through WordPress\'s own'
+            . ' comment checks - moderation, blocklist, duplicate and flood - and a comment'
+            . ' plugin such as Akismet, so it may be held rather than approved. Returns id and'
+            . ' status (approved, unapproved or spam). Needs permission to edit the post; on a'
+            . ' post with comments closed, only a moderator may reply.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'content' => array('type' => 'string'),
         ), 'required' => array('id', 'content')),
@@ -3203,7 +3678,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List files/dirs in the active theme. Args: path (relative, default ""). Denylisted entries show blocked=true.',
+        'description' => 'List files and folders in the active theme. Args: path (a folder relative to the theme root, default "" for the root). Returns path (canonical) and entries: name, type (file or dir), size (bytes, 0 for a folder) and blocked (true when the denylist refuses it to every code tool).',
         'inputSchema' => array('type' => 'object', 'properties' => array('path' => array('type' => 'string'))),
         'run' => function ($a) {
             $denied = wpmcp_code_forbidden();
@@ -3248,7 +3723,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Read a text file in the active theme. Args: path (required). Denylisted/binary/oversized files are refused.',
+        'description' => 'Read a text file in the active theme. Args: path (required, relative to the theme root). Returns path (canonical) and content, the file\'s bytes exactly - code-write stores them back unchanged. Only php, css, js, html, json, txt, md and svg files up to 512KB; denylisted files are refused.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
@@ -3271,7 +3746,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Create or overwrite a text file in the theme. Active theme only. Args: path (required), content (required). The previous contents are stored as a version first (see code-history); PHP is parse-checked and auto-reverted on a syntax error.',
+        'description' => 'Create or overwrite a text file in the theme. Active theme only. Args: path (required), content (required, up to 512KB, stored byte for byte). The previous contents are stored as a version first (see code-history); PHP is parse-checked and auto-reverted on a syntax error. Returns path, bytes (written; 0 when reverted), created, reverted, version_id (the stored previous version, null for a new file) and, after a revert, error naming the line.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'path' => array('type' => 'string'), 'content' => array('type' => 'string'),
         ), 'required' => array('path', 'content')),
@@ -3330,7 +3805,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Delete a file in the theme. Active theme only; its contents are stored as a version first, so code-history and code-restore can bring it back. Args: path (required).',
+        'description' => 'Delete a file in the theme. Active theme only; its contents are stored as a version first, so code-history and code-restore can bring it back. Args: path (required). Returns path, deleted (true) and version_id (the stored copy).',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
@@ -3366,7 +3841,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List stored versions of a theme file. Args: path (required). Newest first, with id, saved_at, size, sha256, reason (write, delete, restore or sweep) and saved_by. A path with no stored versions returns an empty list, which is not an error. Pass an id to code-restore to put that version back.',
+        'description' => 'List stored versions of a theme file. Args: path (required). Returns path and versions, newest first, each with id, saved_at (ISO 8601 site-local, as every list tool gives dates), size (bytes), sha256, reason (write, delete, restore or sweep) and saved_by (a login, or system). The site keeps a bounded number per file (20 by default), so there is no paging. A path with no stored versions returns an empty list, which is not an error. Pass an id to code-restore to put that version back.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
@@ -3381,7 +3856,9 @@ function wpmcp_code_tools() {
             foreach (wpmcp_file_versions_for($r['rel']) as $row) {
                 $versions[] = array(
                     'id'       => (int) $row->id,
-                    'saved_at' => $row->saved_at,
+                    // STORED IN UTC, RETURNED SITE-LOCAL ISO 8601 (sprint 14d): the one date
+                    // format of every list tool. It was the raw `Y-m-d H:i:s` UTC column.
+                    'saved_at' => wpmcp_iso_date_from_gmt($row->saved_at),
                     'size'     => (int) $row->size,
                     'sha256'   => $row->sha256,
                     'reason'   => $row->reason,
@@ -3409,7 +3886,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => false,
             'openWorldHint' => false,
         ),
-        'description' => 'Restore a stored version of a theme file. Args: version_id (required), from code-history. Writes the stored bytes back to the path the version was taken from; the current contents are stored as a version first. PHP is parse-checked and auto-reverted on a syntax error. Returns path, bytes, sha256 and whether the bytes written match the stored hash.',
+        'description' => 'Restore a stored version of a theme file. Args: version_id (required), from code-history. Writes the stored bytes back to the path the version was taken from; the current contents are stored as a version first. PHP is parse-checked and auto-reverted on a syntax error. Returns path, bytes, sha256, matched (the bytes on disk match the stored hash), created, reverted, version_id (the copy of what it replaced) and, after a revert, error.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('version_id' => array('type' => 'integer')), 'required' => array('version_id')),
         'run' => function ($a) {
@@ -4003,14 +4480,17 @@ function wpmcp_sql_select_run($sql) {
         }
     }
 
+    // truncated_by IS ALWAYS PRESENT, null when nothing was cut (sprint 14d). The
+    // description promised the key and the result carried it only on a truncated answer,
+    // so a client that read it unconditionally met a missing key on every ordinary query
+    // (seosemia.net, 2026-09-18). One shape, every time.
     $result = array(
-        'columns'   => $columns,
-        'rows'      => $out,
-        'row_count' => count($out),
-        'truncated' => $truncated,
+        'columns'      => $columns,
+        'rows'         => $out,
+        'row_count'    => count($out),
+        'truncated'    => $truncated,
+        'truncated_by' => $truncated ? $truncatedBy : null,
     );
-
-    if ($truncated) { $result['truncated_by'] = $truncatedBy; }
 
     $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
 
@@ -4070,7 +4550,7 @@ function wpmcp_sql_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Run one read-only SQL SELECT. Args: sql (required). The statement is wrapped as a derived table inside a READ ONLY transaction, so anything but a single SELECT is a server syntax error. CTEs, joins, UNION and ORDER BY work; SHOW, stacked statements, INTO OUTFILE and FOR UPDATE do not, and a derived table needs unique column names. Returns JSON: columns, rows, row_count, truncated, truncated_by. At most 200 rows, 256KB of rows and 8KB per cell (cut with an ellipsis). The plugin\'s own tables and LOAD_FILE are refused, even when named only in a comment. NULL is null; a non-UTF-8 value comes back as 0x-prefixed hex.',
+        'description' => 'Run one read-only SQL SELECT. Args: sql (required). The statement is wrapped as a derived table inside a READ ONLY transaction, so anything but a single SELECT is a server syntax error. CTEs, joins, UNION and ORDER BY work; SHOW, stacked statements, INTO OUTFILE and FOR UPDATE do not, and a derived table needs unique column names. Returns columns (names), rows (each a list in column order), row_count, truncated, and truncated_by - "rows" or "bytes" when truncated, null when not. At most 200 rows, 256KB of rows and 8KB per cell (cut with an ellipsis). Every value is a string as MySQL sends it - COUNT(*) comes back as "3", not 3 - NULL is null, and a non-UTF-8 value comes back as 0x-prefixed hex. The plugin\'s own tables and LOAD_FILE are refused, even when named only in a comment.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('sql' => array('type' => 'string')), 'required' => array('sql')),
         'run' => function ($a) {
@@ -4429,9 +4909,14 @@ function wpmcp_menu_item_out($row, $parent, $position) {
 
     return array(
         'id'         => (int) $row->ID,
-        // The item's own label is its post_title column; only the fallback needs core.
+        // The item's own label is its post_title column; only the fallback needs core. The
+        // OWN label comes back decoded (sprint 14d): labels wp-admin saved can carry
+        // `&#038;` for `&` - jaygroup has eight - and wp-admin's own field, an HTML
+        // attribute, shows that as `&`. update-menu-item keeps the
+        // stored bytes when it is sent this decoded text back. The fallback is a post
+        // title, the raw column, as get-post returns it.
         'title'      => $visible
-            ? ((string) $row->post_title !== '' ? (string) $row->post_title : wpmcp_menu_linked_title($setup))
+            ? ((string) $row->post_title !== '' ? wpmcp_decode_specialchars($row->post_title) : wpmcp_menu_linked_title($setup))
             : null,
         'type'       => (string) $setup->type,
         'object'     => (string) $setup->object,
@@ -4497,7 +4982,8 @@ function wpmcp_menu_summary($menu, $count, $registered, $assigned) {
 
     return array(
         'id'        => (int) $menu->term_id,
-        'name'      => (string) $menu->name,
+        // A menu is a term, and its name is stored escaped like any term's.
+        'name'      => wpmcp_decode_specialchars($menu->name),
         'slug'      => (string) $menu->slug,
         'count'     => (int) $count,
         'locations' => $locations,
@@ -4576,7 +5062,8 @@ function wpmcp_menu_bad_parent($parentId, $menu) {
 }
 
 function wpmcp_menu_tools() {
-    $itemFields = 'id, title (the label shown, as stored - an item with no label of its own'
+    $itemFields = 'id, title (the label as typed: &amp;, &#038;, &lt; and &gt; decoded, as'
+        . ' wp-admin\'s label field shows them; an item with no label of its own'
         . ' shows the linked page\'s stored title), type (post_type, taxonomy, post_type_archive or'
         . ' custom), object (such as page, category or custom), object_id, url, target, classes,'
         . ' parent (0 at the top level), position (among its siblings, from 1), menu_order (its'
@@ -4687,6 +5174,7 @@ function wpmcp_menu_tools() {
             . ' parent_id: an item of the same menu (default 0, the top level). position: among'
             . ' those siblings, from 1 (default last). target: "" or "_blank". classes: a list'
             . ' of CSS classes. The other items are renumbered so the order stays contiguous.'
+            . ' Visitors see the change at once.'
             . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
             . ' theme options (Administrators, not Editors).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -4801,7 +5289,9 @@ function wpmcp_menu_tools() {
             . ' same menu that is not the item itself or inside it) and position (among its'
             . ' siblings, from 1). An empty title on a linked item shows the linked title again.'
             . ' Moving to a new parent without a position puts the item last there. Fields not'
-            . ' sent stay as they are, and the menu is renumbered so its order stays contiguous.'
+            . ' sent stay as they are, a title or url sent back exactly as get-menu gave it keeps'
+            . ' the stored bytes, and the menu is renumbered so its order stays contiguous.'
+            . ' Visitors see the change at once.'
             . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
             . ' theme options; an id that is not a menu item answers like a missing one.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -4856,9 +5346,21 @@ function wpmcp_menu_tools() {
                 'menu-item-status'      => $item->post_status,
             );
 
+            // THE ROUND-TRIP RULE (sprint 14d): a title or url sent back exactly as get-menu
+            // returned it is not a change, and the STORED bytes stay. get-menu decodes an own
+            // label (`&#038;` -> `&`), so without this, writing a read label back would
+            // replace wp-admin's `FDA &#038; GMP` with `FDA & GMP` - the same text on screen,
+            // different bytes in the row. And a stored url that this tool would now refuse
+            // (a backslash wp-admin let in) must not make the whole update fail when the
+            // caller only sent it back.
             if (array_key_exists('title', $a)) {
-                $title = (string) $a['title'];
-                if ($type === 'custom' && trim($title) === '') {
+                $title  = (string) $a['title'];
+                $stored = (string) $item->post_title;
+                $asRead = $stored !== '' ? wpmcp_decode_specialchars($stored) : null;
+
+                if ($asRead !== null && ($title === $asRead || $title === $stored)) {
+                    $title = $stored;
+                } elseif ($type === 'custom' && trim($title) === '') {
                     return new WP_Error('wpmcp_title_required', 'A custom item needs a title.');
                 }
                 $data['menu-item-title'] = $title;
@@ -4868,9 +5370,11 @@ function wpmcp_menu_tools() {
                 if ($type !== 'custom') {
                     return new WP_Error('wpmcp_bad_argument', 'url is only for a custom item; a linked item takes its link from what it links to.');
                 }
-                $url = wpmcp_menu_url($a['url']);
-                if (is_wp_error($url)) { return $url; }
-                $data['menu-item-url'] = $url;
+                if ((string) $a['url'] !== $data['menu-item-url']) {
+                    $url = wpmcp_menu_url($a['url']);
+                    if (is_wp_error($url)) { return $url; }
+                    $data['menu-item-url'] = $url;
+                }
             }
 
             if (array_key_exists('target', $a))  { $data['menu-item-target'] = ((string) $a['target'] === '_blank') ? '_blank' : ''; }
@@ -5073,8 +5577,10 @@ function wpmcp_user_out($user, $full) {
         $out['login']      = (string) $user->user_login;
         $out['email']      = (string) $user->user_email;
         $out['roles']      = array_values(array_map('strval', (array) $user->roles));
-        // user_registered is stored in UTC; core's REST field is the same expression (:1102).
-        $out['registered'] = gmdate('c', strtotime($user->user_registered));
+        // user_registered is stored in UTC. Core's REST field is `c`, UTC with +00:00
+        // (:1102); this is the list tools' ONE format instead (sprint 14d) - ISO 8601,
+        // site-local, no offset, as every post, revision, media and comment date here.
+        $out['registered'] = wpmcp_iso_date_from_gmt($user->user_registered);
     }
 
     return $out;
@@ -5247,10 +5753,11 @@ function wpmcp_scan_themes() {
         $styleFile  = $root . '/' . $stylesheet . '/style.css';
         if (!file_exists($styleFile) || !is_readable($styleFile)) { continue; }
 
-        $headers = get_file_data($styleFile, array('Name' => 'Theme Name', 'Version' => 'Version', 'Template' => 'Template'));
-        if ($headers['Template'] === $stylesheet) { continue; }
+        // wpmcp_theme_header(), which site-info reads the active theme's name through too.
+        $headers = wpmcp_theme_header($styleFile);
+        if ($headers['template'] === $stylesheet) { continue; }
 
-        $template     = $headers['Template'] !== '' ? $headers['Template'] : $stylesheet;
+        $template     = $headers['template'] !== '' ? $headers['template'] : $stylesheet;
         $templateRoot = $root;
 
         if ($template === $stylesheet) {
@@ -5277,8 +5784,8 @@ function wpmcp_scan_themes() {
         }
 
         $themes[$stylesheet] = array(
-            'name'    => trim(strip_tags($headers['Name'])),
-            'version' => trim(strip_tags($headers['Version'])),
+            'name'    => $headers['name'],
+            'version' => $headers['version'],
             'parent'  => $template !== $stylesheet ? $template : null,
             'block'   => wpmcp_theme_is_block($root . '/' . $stylesheet, $templateRoot . '/' . $template),
         );
@@ -5311,21 +5818,20 @@ function wpmcp_inventory_tools() {
         'annotations' => $readHints,
         'description' => 'List the site\'s users you are allowed to see. With the list_users'
             . ' capability (Administrators): every user, each with id, name, login, email, roles'
-            . ' and registered (ISO 8601, UTC), and the role and search filters. search looks in'
-            . ' email alone when the term contains @, in login and ID when it is a number, in URL'
-            . ' alone when it starts with http:// or https://, and otherwise in login, URL, email,'
-            . ' nicename and display name. Without list_users - an Editor, Author or Contributor -'
+            . ' and registered (ISO 8601 site-local, as every list tool gives dates), and the'
+            . ' role and search filters (the search argument says where it looks). Without list_users - an Editor, Author or Contributor -'
             . ' only users who have published posts, as id and name, as in the WordPress REST API;'
             . ' role and search are refused. name is the display name the user chose, often their'
             . ' login or an email address. Args: role, search, limit (default 20, max 100), page'
-            . ' (default 1, max 100). Returns count, page, limit, has_more and items; no total.'
+            . ' (default 1, max 100; has_more is false at page 100 - narrow role or search to'
+            . ' reach further). Returns count, page, limit, has_more and items; no total.'
             . ' Never returns passwords, keys, sessions or user meta. Needs list_users or'
             . ' permission to edit posts: Subscribers are refused.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'role'   => array('type' => 'string', 'description' => 'A role such as "editor". Needs list_users.'),
             'search' => array('type' => 'string', 'description' => 'Needs list_users. With @: email. A number: login and ID. http:// or https://: URL. Otherwise login, URL, email, nicename and display name.'),
             'limit'  => array('type' => 'integer', 'description' => 'Users per page. Clamped to 1-100. Default 20.'),
-            'page'   => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100. Default 1.'),
+            'page'   => array('type' => 'integer', 'description' => 'Page number. Clamped to 1-100; has_more is false at 100. Default 1.'),
         )),
         'run' => function ($a) {
             if (!wpmcp_users_can_read()) { return wpmcp_cannot('list users'); }
@@ -5347,8 +5853,9 @@ function wpmcp_inventory_tools() {
                     . ' Without it list-users shows only users with published posts, unfiltered.');
             }
 
-            $limit = isset($a['limit']) ? min(100, max(1, (int) $a['limit'])) : 20;
-            $page  = isset($a['page']) ? min(100, max(1, (int) $a['page'])) : 1;
+            // The page cap is where list-users looped: page 101 answered page 100's rows
+            // with has_more true, for ever (sprint 14d). See WPMCP_PAGE_CAP.
+            list($limit, $page) = wpmcp_page_args(array_intersect_key($a, array('limit' => 1, 'page' => 1)));
 
             // limit + 1 rows: the extra one only answers has_more (KB 5.6). ID order, so a
             // page does not shift under two users with one display name.
@@ -5378,13 +5885,7 @@ function wpmcp_inventory_tools() {
                 $items[] = wpmcp_user_out($user, $full);
             }
 
-            return array(
-                'count'    => count($items),
-                'page'     => $page,
-                'limit'    => $limit,
-                'has_more' => $hasMore,
-                'items'    => $items,
-            );
+            return wpmcp_page_envelope($items, $page, $limit, $hasMore);
         },
     ),
 
@@ -5393,7 +5894,8 @@ function wpmcp_inventory_tools() {
         'annotations' => $readHints,
         'description' => 'Read one user you are allowed to see. Args: id (integer, required).'
             . ' Returns id and name (the display name the user chose, often their login or an'
-            . ' email address), plus login, email, roles and registered when you have the'
+            . ' email address), plus login, email, roles and registered (ISO 8601 site-local)'
+            . ' when you have the'
             . ' list_users capability, may edit that user, or it is you. When you can neither list'
             . ' nor edit users, you see a user only if they have posts you may read in a post type'
             . ' the REST API shows: published posts, and private posts when you can read those -'
