@@ -323,6 +323,14 @@ final class RoundTripTest extends FixtureIntegrationTestCase
 
         $rowsBefore = self::labelsAndUrls($menuId);
         self::assertSame('', $rowsBefore[$catItem]['title'], 'The premise moved: the category item has a label of its own.');
+
+        // Round 3, should-fix 2: add-menu-item given the term's name as read makes an item
+        // that FOLLOWS the term (no own label), as update-menu-item already does.
+        $added = (int) $this->call('add-menu-item', [
+            'menu_id' => $menuId, 'type' => 'category', 'object_id' => $catId, 'title' => $catName,
+        ])->data()['id'];
+        self::assertSame('', self::labelsAndUrls($menuId)[$added]['title'], 'add-menu-item stored the term name as an own label.');
+        $rowsBefore = self::labelsAndUrls($menuId);
         self::assertStringContainsString('&#038;', $rowsBefore[$admin]['title'], 'The premise moved: the wp-admin label is not stored with &#038;.');
 
         $menu = $this->call('get-menu', ['id' => $menuId])->data();

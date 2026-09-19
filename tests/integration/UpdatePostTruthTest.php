@@ -43,6 +43,9 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
     /** The meta key the counter writes. Protected (leading underscore), so no tool reads it. */
     private const SAVES_KEY = '_wpmcp_test_saves';
 
+    /** Sent to make the fixture refuse this one save (wp_insert_post_empty_content). */
+    private const FAIL_HEADER = 'X-Wpmcp-Test-Refuse-Save';
+
     private static function label(): string { return Fixtures::name('uptruth'); }
     private static function readLabel(): string { return Fixtures::name('uptruth-read'); }
     private static function login(): string { return Fixtures::name('uptruth-admin'); }
@@ -355,6 +358,59 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         WpCli::tryRun(['term', 'delete', 'category', (string) $cat]);
     }
 
+    /**
+     * Round 3, the blocker. Every field of update-post's result is read after the write
+     * it reports on: publishing a draft answers the published permalink, not the draft's
+     * `?p=N`, and a slug change answers the new link. Compared with get_permalink() read in
+     * another process.
+     *
+     * @group sprint-14d
+     */
+    public function testTheResultIsReadAfterTheWrite(): void
+    {
+        $id   = $this->newPost(['post_title' => Fixtures::name('ut-link'), 'post_status' => 'draft']);
+        $data = $this->update($id, ['status' => 'publish']);
+
+        self::assertSame(self::permalink($id), $data['link'], 'Publishing a draft answered a link that is not its permalink now.');
+        self::assertStringNotContainsString('?p=', $data['link'], 'Publishing a draft answered the draft link.');
+
+        $data = $this->update($id, ['slug' => Fixtures::name('ut-link-renamed')]);
+        self::assertSame(self::permalink($id), $data['link'], 'A slug change answered the old link.');
+        self::assertStringContainsString(Fixtures::name('ut-link-renamed'), $data['link']);
+    }
+
+    /**
+     * Round 3, should-fix 1. A save WordPress refuses leaves nothing half-written: the terms
+     * and the featured image sent with it are not applied. The refusal is forced by a
+     * fixture filter (wp_insert_post_empty_content) armed by one header, this run only.
+     *
+     * @group sprint-14d
+     */
+    public function testARefusedSaveLeavesTheTermsAndImageAlone(): void
+    {
+        $keep  = Fixtures::createTerm('post_tag', Fixtures::name('ut-fail-keep'));
+        $other = Fixtures::createTerm('post_tag', Fixtures::name('ut-fail-other'));
+        $image = Fixtures::createAttachment(Fixtures::name('ut-fail-image'), self::$userId, Fixtures::name('ut-fail-image.png'));
+        self::$posts[] = $image;
+
+        $id = $this->newPost(['post_title' => Fixtures::name('ut-fail'), 'post_status' => 'draft', 'post_content' => 'body']);
+        Fixtures::setPostTerms($id, 'post_tag', [$keep]);
+        $before = self::row($id);
+
+        $result = $this->mcp(self::$token)->callTool('update-post', [
+            'id'             => $id,
+            'title'          => Fixtures::name('ut-fail-renamed'),
+            'terms'          => ['post_tag' => [$other]],
+            'featured_image' => $image,
+        ], [self::FAIL_HEADER => 'on']);
+
+        self::assertTrue($result->isError, 'The forced refusal did not happen, so this test measured nothing: ' . $result->text);
+        self::assertSame($before, self::row($id), 'A refused save left part of the update written.');
+
+        WpCli::tryRun(['term', 'delete', 'post_tag', (string) $keep]);
+        WpCli::tryRun(['term', 'delete', 'post_tag', (string) $other]);
+    }
+
     /* ------------------------------------------------------------------
      * helpers
      * ---------------------------------------------------------------- */
@@ -418,6 +474,14 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         return $decoded;
     }
 
+    /** The permalink as another process reads it now. */
+    private static function permalink(int $id): string
+    {
+        $lines = preg_split('/\r?\n/', trim(WpCli::evaluate(sprintf('clean_post_cache(%1$d); echo "\n", get_permalink(%1$d);', $id))));
+
+        return (string) end($lines);
+    }
+
     /** How many times save_post fired for $id in this run's requests ('' for never). */
     private static function saves(int $id): string
     {
@@ -430,6 +494,7 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         $run    = Fixtures::runId();
         $header = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
         $key    = self::SAVES_KEY;
+        $fail   = 'HTTP_' . strtoupper(str_replace('-', '_', self::FAIL_HEADER));
 
         return <<<PHP
 /**
@@ -441,6 +506,10 @@ add_action('save_post', static function (\$postId) {
     if (wp_is_post_revision(\$postId)) { return; }
     update_post_meta(\$postId, '{$key}', (int) get_post_meta(\$postId, '{$key}', true) + 1);
 }, 10, 1);
+add_filter('wp_insert_post_empty_content', static function (\$empty) {
+    if (isset(\$_SERVER['{$header}'], \$_SERVER['{$fail}']) && \$_SERVER['{$header}'] === '{$run}' && \$_SERVER['{$fail}'] === 'on') { return true; }
+    return \$empty;
+});
 PHP;
     }
 

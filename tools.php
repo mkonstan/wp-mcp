@@ -2109,7 +2109,9 @@ function wpmcp_content_tools() {
             // controller does exactly this (class-wp-rest-posts-controller.php:776).
             $id = wp_insert_post(wp_slash($postarr), true);
             if (is_wp_error($id)) { return $id; }
-            $out = array('id' => (int) $id, 'link' => get_permalink($id));
+            // `link` is read at the END, after terms and the featured image (sprint 14d round
+            // 3): under a %category% permalink structure the terms are part of the link.
+            $out = array('id' => (int) $id);
             if (!empty($a['terms']) && is_array($a['terms'])) {
                 $t = wpmcp_apply_terms($id, $a['terms']);
                 $changed[] = 'terms';
@@ -2120,6 +2122,7 @@ function wpmcp_content_tools() {
             }
             $out = array_merge($out, wpmcp_apply_post_fields($id, $fields['after'], $changed));
             $p = get_post($id);
+            $out['link']    = get_permalink($id);
             $out['status']  = $p ? $p->post_status : null;
             $out['changed'] = $changed;
             return $out;
@@ -2272,33 +2275,23 @@ function wpmcp_content_tools() {
             // core's own post_updated handler does the same without this call (measured:
             // a status-only wp_update_post on a revision-less post leaves one revision).
             //
-            // TERMS AND THE FEATURED IMAGE FIRST, THEN THE SAVE (sprint 14d round 2). Neither
-            // touches a posts column, so a terms-only or image-only update that skipped
-            // wp_update_post() left `modified` where it was and fired no save_post - and a
-            // cache or search plugin listening for saves never heard of the change (review
-            // of 14d, should-fix 1; eb75223 always saved). So they are applied before the
-            // write, and the write happens whenever ANYTHING changed: the columns sent, or
-            // the terms or image just applied. A terms-only save carries the stored date with
-            // edit_date - the `keep` shape - so it does not re-date a floating draft. Applying
-            // terms before the save also makes core's default-category rule consistent: a
-            // `post` whose categories were cleared is given the default one by that save
-            // (wp_insert_post, "'post' requires at least one category"), every time.
-            $out = array('id' => $id, 'link' => get_permalink($id));
-            if (!empty($a['terms']) && is_array($a['terms'])) {
-                $t = wpmcp_apply_terms($id, $a['terms']);
-                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
-                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
-            }
-            // Applied here for its EFFECT (the thumbnail); its result is read again after the
-            // save below, because it reports the author as the row holds it, and the row's
-            // author is written by that save.
-            wpmcp_apply_post_fields($id, $fields['after'], array());
-
-            if (!$writes && wpmcp_post_state_diff($before, wpmcp_post_state($id)) !== array()) {
-                $writes = true;
-                $upd    = array('ID' => $id, 'post_date' => (string) $p0->post_date, 'edit_date' => true);
-            }
-
+            // THE COLUMNS FIRST, THEN TERMS AND THE IMAGE, THEN - ONLY IF THOSE CHANGED
+            // SOMETHING - ONE MORE SAVE (sprint 14d round 3). Two constraints, each measured
+            // or read against core, and each broken by one of the earlier orders:
+            //
+            //   A failed save must leave nothing half-written. Terms and the thumbnail touch
+            //   no posts column, so if they went first and wp_update_post() then refused
+            //   (empty content, a wp_insert_post_data filter, a database error), the caller
+            //   got an error with its terms already changed (review round 2, should-fix 1).
+            //   So a column write goes first, and a refusal returns before anything else.
+            //
+            //   Any change must be a real save. A terms-only or image-only update that never
+            //   called wp_update_post() left `modified` alone and fired no save_post, so cache
+            //   and search plugins never heard of it (round 1, should-fix 1). So when terms or
+            //   the image changed the row, a second save follows, carrying the date as it now
+            //   stands with edit_date - the `keep` shape - so a floating draft is not re-dated.
+            //   That save also applies core's default-category rule to cleared categories
+            //   ("'post' requires at least one category"), every time, whichever path ran.
             if ($writes) {
                 wp_save_post_revision($id);
 
@@ -2306,9 +2299,32 @@ function wpmcp_content_tools() {
                 if (is_wp_error($r)) { return $r; }
             }
 
-            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state(). The
-            // second apply sets nothing new (the same thumbnail id is a no-op) and reads the
-            // author and image back from the saved row.
+            $out = array('id' => $id);
+            $mid = wpmcp_post_state($id);
+            if (!empty($a['terms']) && is_array($a['terms'])) {
+                $t = wpmcp_apply_terms($id, $a['terms']);
+                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
+            }
+
+            wpmcp_apply_post_fields($id, $fields['after'], array());
+
+            if (wpmcp_post_state($id) !== $mid) {
+                $now = get_post($id);
+                if (!$writes) { wp_save_post_revision($id); }
+
+                $r = wp_update_post(wp_slash(array(
+                    'ID'        => $id,
+                    'post_date' => (string) $now->post_date,
+                    'edit_date' => true,
+                )), true);
+                if (is_wp_error($r)) { return $r; }
+            }
+
+            // EVERY FIELD OF THE RESULT IS READ AFTER THE LAST WRITE (round 3, the blocker):
+            // `link` was read before the save in round 2, so publishing a draft answered its
+            // `?p=N` link. `changed`, `link`, `status`, `author`, `featured_image` and the
+            // date all come from the row as it now stands.
             $changed = wpmcp_post_state_diff($before, wpmcp_post_state($id));
             $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
 
@@ -2321,6 +2337,7 @@ function wpmcp_content_tools() {
 
             $out = array_merge($out, $applied);
             $p = get_post($id);
+            $out['link']    = get_permalink($id);
             $out['status']  = $p->post_status;
             $out['changed'] = $changed;
             return $out;
@@ -5266,7 +5283,9 @@ function wpmcp_menu_tools() {
                     'menu-item-type'      => 'post_type',
                     'menu-item-object'    => $type,
                     'menu-item-object-id' => (int) $post->ID,
-                    'menu-item-title'     => isset($a['title']) ? (string) $a['title'] : '',
+                    // The linked post's stored title means "follow the post", as core decides
+                    // for itself; spelled out so add and update agree (sprint 14d round 3).
+                    'menu-item-title'     => (isset($a['title']) && (string) $a['title'] !== wpmcp_raw_title($post)) ? (string) $a['title'] : '',
                 );
             } elseif ($type !== '' && taxonomy_exists($type) && is_taxonomy_viewable($type)) {
                 $term = !empty($a['object_id']) ? get_term((int) $a['object_id'], $type) : null;
@@ -5278,7 +5297,9 @@ function wpmcp_menu_tools() {
                     'menu-item-type'      => 'taxonomy',
                     'menu-item-object'    => $type,
                     'menu-item-object-id' => (int) $term->term_id,
-                    'menu-item-title'     => isset($a['title']) ? (string) $a['title'] : '',
+                    // The term's name as the term tools and get-menu give it, decoded, means
+                    // "follow the term" - the same comparison update-menu-item makes (round 3).
+                    'menu-item-title'     => (isset($a['title']) && (string) $a['title'] !== wpmcp_decode_specialchars($term->name)) ? (string) $a['title'] : '',
                 );
             } else {
                 return new WP_Error(

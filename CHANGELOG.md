@@ -29,6 +29,9 @@ marked (shape).**
   a draft nobody dated became a dated one when its `date` was written back; an identical
   title created a revision. An update that changes anything - terms or the featured image
   alone included - still goes through a real save, so `modified` moves and `save_post` fires.
+  A save WordPress refuses leaves nothing half-written: the columns are saved first, and
+  terms and the featured image are applied only after that save succeeds. Every field of
+  the result, `link` included, is read after the last write.
 - **`update-post`'s `terms`: an empty list clears that taxonomy** (it was silently a no-op).
   A `post` left with no category is given the default category by WordPress's own save.
 - **`changed` is now what differs, not what was sent (shape).** It compares the row before

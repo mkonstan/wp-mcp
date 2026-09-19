@@ -485,6 +485,7 @@ nothing - no revision either.
 | the first write to a post with no revisions, whatever it changes - even status only | 1, holding the text as it stands (WordPress's own `post_updated` handler saves it too) |
 | the first write to a post with no revisions, changing its text | 2: the pre-edit text, then the new text above it |
 | a later update that changes title, content or excerpt | 1, holding the new text |
+| a later update that changes only terms or the featured image | 0 - it is still a save: `modified` moves and `save_post` fires |
 | a later update that changes anything else | 0 |
 | an update that sends back only what is stored | 0 - nothing is written |
 
