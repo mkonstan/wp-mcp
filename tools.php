@@ -2289,7 +2289,10 @@ function wpmcp_content_tools() {
                 if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
                 if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
             }
-            $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
+            // Applied here for its EFFECT (the thumbnail); its result is read again after the
+            // save below, because it reports the author as the row holds it, and the row's
+            // author is written by that save.
+            wpmcp_apply_post_fields($id, $fields['after'], array());
 
             if (!$writes && wpmcp_post_state_diff($before, wpmcp_post_state($id)) !== array()) {
                 $writes = true;
@@ -2303,8 +2306,11 @@ function wpmcp_content_tools() {
                 if (is_wp_error($r)) { return $r; }
             }
 
-            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state().
+            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state(). The
+            // second apply sets nothing new (the same thumbnail id is a no-op) and reads the
+            // author and image back from the saved row.
             $changed = wpmcp_post_state_diff($before, wpmcp_post_state($id));
+            $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
 
             // The new date beside `changed`, whenever the date moved or was sent: a caller
             // that set one, or whose draft core re-dated, gets the stored value without a
