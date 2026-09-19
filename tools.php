@@ -1089,6 +1089,16 @@ function wpmcp_apply_terms($post_id, $terms) {
         }
         $may_create = current_user_can($tax_obj->cap->edit_terms);
 
+        // AN EMPTY LIST CLEARS THE TAXONOMY (sprint 14d round 2): `terms` REPLACES, and
+        // `{post_tag: []}` used to reach no wp_set_object_terms() call at all, so the tags
+        // stayed and the caller had no way to remove the last one. Only a list SENT empty
+        // clears - a list whose every entry was refused is not a request to clear.
+        if (is_array($vals) && $vals === array()) {
+            $set = wp_set_object_terms($post_id, array(), $tax, false);
+            if (is_wp_error($set)) { $failed[$tax] = $set->get_error_message(); } else { $assigned[$tax] = array(); }
+            continue;
+        }
+
         $ids = array();
         foreach ((array) $vals as $v) {
             // GET-POST'S OWN SHAPE IS ACCEPTED, because a caller that reads a post's terms
@@ -2138,7 +2148,8 @@ function wpmcp_content_tools() {
             . ' content, status ("publish" publishes), excerpt, slug, terms, date, author and'
             . ' featured_image. A field you send REPLACES what was there;'
             . ' one equal to its stored value is not written, and an update that changes'
-            . ' nothing writes nothing. Returns id, link, status and changed: every field whose'
+            . ' nothing writes nothing. Tags are stripped from a changed title. Returns id,'
+            . ' link, status and changed: every field whose'
             . ' stored value now differs, core\'s own moves included - it re-dates an undated'
             . ' draft, and on a status change re-slugs: leaving draft or pending, a slug-less'
             . ' post gets one from its title and a taken slug a -N suffix; trashing appends'
@@ -2152,7 +2163,7 @@ function wpmcp_content_tools() {
             'content' => array('type' => 'string'),
             'status' => array('type' => 'string', 'description' => 'A post status: draft, pending, private, future, publish or trash. Core stores "future" for a future date and publishes a past one, whatever status you send, so read status and date in the result.'),
             'excerpt' => array('type' => 'string'), 'slug' => array('type' => 'string'),
-            'terms' => array('type' => 'object', 'description' => '{taxonomy: [term id, term name, or get-post\'s {id, name, slug} entry]}. Replaces the post\'s terms in each taxonomy named. An unknown name creates the term when you may create terms, and is listed in terms_refused when you may not.'),
+            'terms' => array('type' => 'object', 'description' => '{taxonomy: [term id, term name, or get-post\'s {id, name, slug} entry]}. Replaces the post\'s terms in each taxonomy named; an empty list clears that taxonomy, except that WordPress gives a post left with no category its default category. An unknown name creates the term when you may create terms, and is listed in terms_refused when you may not.'),
             'date' => array('type' => 'string', 'description' => 'ISO 8601 date or datetime: 2026-03-04, 2026-03-04T09:30:00, or 2026-03-04T09:30:00+02:00. Without an offset it is this site\'s local time. Kept on a draft, which WordPress would otherwise re-date. To SCHEDULE, send a future date with status "future".'),
             // See create-post: no `type` because the dialect cannot say "integer or
             // string", and this argument is honestly both.
@@ -2260,6 +2271,31 @@ function wpmcp_content_tools() {
             // changed. So "no text change, no revision" holds only once a post has one;
             // core's own post_updated handler does the same without this call (measured:
             // a status-only wp_update_post on a revision-less post leaves one revision).
+            //
+            // TERMS AND THE FEATURED IMAGE FIRST, THEN THE SAVE (sprint 14d round 2). Neither
+            // touches a posts column, so a terms-only or image-only update that skipped
+            // wp_update_post() left `modified` where it was and fired no save_post - and a
+            // cache or search plugin listening for saves never heard of the change (review
+            // of 14d, should-fix 1; eb75223 always saved). So they are applied before the
+            // write, and the write happens whenever ANYTHING changed: the columns sent, or
+            // the terms or image just applied. A terms-only save carries the stored date with
+            // edit_date - the `keep` shape - so it does not re-date a floating draft. Applying
+            // terms before the save also makes core's default-category rule consistent: a
+            // `post` whose categories were cleared is given the default one by that save
+            // (wp_insert_post, "'post' requires at least one category"), every time.
+            $out = array('id' => $id, 'link' => get_permalink($id));
+            if (!empty($a['terms']) && is_array($a['terms'])) {
+                $t = wpmcp_apply_terms($id, $a['terms']);
+                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
+                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
+            }
+            $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
+
+            if (!$writes && wpmcp_post_state_diff($before, wpmcp_post_state($id)) !== array()) {
+                $writes = true;
+                $upd    = array('ID' => $id, 'post_date' => (string) $p0->post_date, 'edit_date' => true);
+            }
+
             if ($writes) {
                 wp_save_post_revision($id);
 
@@ -2267,16 +2303,7 @@ function wpmcp_content_tools() {
                 if (is_wp_error($r)) { return $r; }
             }
 
-            $out = array('id' => $id, 'link' => get_permalink($id));
-            if (!empty($a['terms']) && is_array($a['terms'])) {
-                $t = wpmcp_apply_terms($id, $a['terms']);
-                if ($t['refused']) { $out['terms_refused'] = $t['refused']; }
-                if ($t['failed'])  { $out['terms_failed']  = $t['failed']; }
-            }
-
-            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state(). The
-            // featured image is applied first because it is one of the fields compared.
-            $applied = wpmcp_apply_post_fields($id, $fields['after'], array());
+            // `changed` IS WHAT DIFFERS, NOT WHAT WAS SENT - see wpmcp_post_state().
             $changed = wpmcp_post_state_diff($before, wpmcp_post_state($id));
 
             // The new date beside `changed`, whenever the date moved or was sent: a caller
@@ -4894,6 +4921,15 @@ function wpmcp_menu_linked_title($setup) {
         return $linked ? wpmcp_raw_title($linked) : (string) $setup->title;
     }
 
+    // A TERM'S NAME, DECODED (sprint 14d round 2). Core takes it with get_term_field(...,
+    // 'raw'), which is the stored `A &amp; B`, while every term tool now returns `A & B` and
+    // the description promised labels "as typed". update-menu-item compares a sent title
+    // with THIS value and keeps the item label-less on a match, because core's own check
+    // (nav-menu.php:513-516) compares with the raw name and would otherwise store an own label.
+    if ((string) $setup->type === 'taxonomy') {
+        return wpmcp_decode_specialchars((string) $setup->title);
+    }
+
     return (string) $setup->title;
 }
 
@@ -5062,9 +5098,9 @@ function wpmcp_menu_bad_parent($parentId, $menu) {
 }
 
 function wpmcp_menu_tools() {
-    $itemFields = 'id, title (the label as typed: &amp;, &#038;, &lt; and &gt; decoded, as'
-        . ' wp-admin\'s label field shows them; an item with no label of its own'
-        . ' shows the linked page\'s stored title), type (post_type, taxonomy, post_type_archive or'
+    $itemFields = 'id, title (the label as typed - &amp;, &#038;, &lt; and &gt; decoded; with'
+        . ' no label of its own, the linked page\'s stored title or the term\'s decoded name),'
+        . ' type (post_type, taxonomy, post_type_archive or'
         . ' custom), object (such as page, category or custom), object_id, url, target, classes,'
         . ' parent (0 at the top level), position (among its siblings, from 1), menu_order (its'
         . ' place in the whole menu) and status';
@@ -5174,7 +5210,7 @@ function wpmcp_menu_tools() {
             . ' parent_id: an item of the same menu (default 0, the top level). position: among'
             . ' those siblings, from 1 (default last). target: "" or "_blank". classes: a list'
             . ' of CSS classes. The other items are renumbered so the order stays contiguous.'
-            . ' Visitors see the change at once.'
+            . ' There is no draft step: the change is live.'
             . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
             . ' theme options (Administrators, not Editors).',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -5291,7 +5327,7 @@ function wpmcp_menu_tools() {
             . ' Moving to a new parent without a position puts the item last there. Fields not'
             . ' sent stay as they are, a title or url sent back exactly as get-menu gave it keeps'
             . ' the stored bytes, and the menu is renumbered so its order stays contiguous.'
-            . ' Visitors see the change at once.'
+            . ' There is no draft step: the change is live.'
             . ' Returns the item as get-menu shows it, plus menu_id. Needs permission to edit'
             . ' theme options; an id that is not a menu item answers like a missing one.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -5360,6 +5396,10 @@ function wpmcp_menu_tools() {
 
                 if ($asRead !== null && ($title === $asRead || $title === $stored)) {
                     $title = $stored;
+                } elseif ($stored === '' && $title === wpmcp_menu_linked_title(wp_setup_nav_menu_item(clone $item))) {
+                    // The fallback label sent back as get-menu gave it: the item stays
+                    // label-less, whatever form core's own comparison expects.
+                    $title = '';
                 } elseif ($type === 'custom' && trim($title) === '') {
                     return new WP_Error('wpmcp_title_required', 'A custom item needs a title.');
                 }

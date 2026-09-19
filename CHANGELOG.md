@@ -27,7 +27,10 @@ marked (shape).**
   that changes nothing writes nothing - no revision, no new modified date, no re-dated draft.
   Measured before: a title wp-admin stored as `x<y z` was stripped to `x` when written back;
   a draft nobody dated became a dated one when its `date` was written back; an identical
-  title created a revision.
+  title created a revision. An update that changes anything - terms or the featured image
+  alone included - still goes through a real save, so `modified` moves and `save_post` fires.
+- **`update-post`'s `terms`: an empty list clears that taxonomy** (it was silently a no-op).
+  A `post` left with no category is given the default category by WordPress's own save.
 - **`changed` is now what differs, not what was sent (shape).** It compares the row before
   and after the write, so an identical title is no longer reported, and whatever core moved
   on its own - a re-dated draft, a re-slug, a default category - is. On `create-post`
@@ -43,7 +46,8 @@ marked (shape).**
   it back names the same term and stores the same bytes.
 - **Menu labels come back as typed (shape):** `get-menu` decodes the same set in an item's own
   label, so a label wp-admin stored as `FDA &#038; GMP` reads `FDA & GMP`, and
-  `update-menu-item` keeps the stored bytes when that is sent back. A url sent back as read is
+  `update-menu-item` keeps the stored bytes when that is sent back. A category item with no label of its own shows
+  the term's name decoded too, and sending that back leaves the item label-less. A url sent back as read is
   also kept rather than re-validated.
 - **`create-term` refuses a name the taxonomy already has, naming the existing term's id.**
   Core's own refusal used to reach the client as an opaque `-32603`, and a name holding a

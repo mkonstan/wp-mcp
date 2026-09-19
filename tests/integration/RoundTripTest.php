@@ -301,7 +301,7 @@ final class RoundTripTest extends FixtureIntegrationTestCase
             'title'   => Fixtures::name('rt-label ') . self::HARD,
         ])->data()['id'];
 
-        // What wp-admin stores: its label field is filled from the texturized title.
+        // The form wp-admin stored on the stress site: `&#038;` for `&` in an own label.
         $admin = Fixtures::createMenuItem($menuId, [
             'menu-item-type'      => 'post_type',
             'menu-item-object'    => 'page',
@@ -309,7 +309,20 @@ final class RoundTripTest extends FixtureIntegrationTestCase
             'menu-item-title'     => Fixtures::name('rt-admin-label FDA &#038; GMP'),
         ]);
 
+        // A category item with NO label of its own: its label is the term's name, which core
+        // hands back escaped (`&amp;`) - round 2, should-fix 4.
+        $catName = Fixtures::name('rt-menu-cat') . ' Arts & Crafts';
+        $catId   = (int) $this->call('create-term', ['taxonomy' => 'category', 'name' => $catName])->data()['id'];
+        self::$terms[] = ['category', $catId];
+        $catItem = Fixtures::createMenuItem($menuId, [
+            'menu-item-type'      => 'taxonomy',
+            'menu-item-object'    => 'category',
+            'menu-item-object-id' => $catId,
+            'menu-item-title'     => '',
+        ]);
+
         $rowsBefore = self::labelsAndUrls($menuId);
+        self::assertSame('', $rowsBefore[$catItem]['title'], 'The premise moved: the category item has a label of its own.');
         self::assertStringContainsString('&#038;', $rowsBefore[$admin]['title'], 'The premise moved: the wp-admin label is not stored with &#038;.');
 
         $menu = $this->call('get-menu', ['id' => $menuId])->data();
@@ -323,6 +336,8 @@ final class RoundTripTest extends FixtureIntegrationTestCase
 
         $this->call('update-menu-item', ['id' => $custom, 'title' => $items[$custom]['title'], 'url' => $items[$custom]['url']]);
         $this->call('update-menu-item', ['id' => $admin, 'title' => $items[$admin]['title']]);
+        self::assertSame($catName, $items[$catItem]['title'], 'A category item fallback label came back escaped.');
+        $this->call('update-menu-item', ['id' => $catItem, 'title' => $items[$catItem]['title']]);
 
         self::assertSame($rowsBefore, self::labelsAndUrls($menuId), 'Writing a label or url back as read changed its stored bytes.');
 
@@ -331,6 +346,7 @@ final class RoundTripTest extends FixtureIntegrationTestCase
         self::assertSame($items[$custom]['title'], $again[$custom]['title']);
         self::assertSame($items[$admin]['title'], $again[$admin]['title']);
         self::assertSame($items[$custom]['url'], $again[$custom]['url']);
+        self::assertSame($items[$catItem]['title'], $again[$catItem]['title']);
 
         $listed = array_column($this->call('list-menus', [])->data()['menus'], 'name', 'id');
         self::assertSame($menuName, $listed[$menuId] ?? null, 'list-menus returned a menu name nobody typed.');

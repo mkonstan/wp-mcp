@@ -29,11 +29,19 @@ namespace WpMcp\Tests\Integration;
 use RuntimeException;
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\IntegrationTestCase;
+use WpMcp\Tests\Support\MuPlugin;
 use WpMcp\Tests\Support\WpCli;
 
 final class UpdatePostTruthTest extends FixtureIntegrationTestCase
 {
     private const ZERO_DATE = '0000-00-00 00:00:00';
+
+    /** The mu-plugin that counts save_post on this run's requests, per post, in post meta. */
+    private const SAVES = 'uptruth-saves';
+
+    /** The meta key the counter writes. Protected (leading underscore), so no tool reads it. */
+    private const SAVES_KEY = '_wpmcp_test_saves';
 
     private static function label(): string { return Fixtures::name('uptruth'); }
     private static function readLabel(): string { return Fixtures::name('uptruth-read'); }
@@ -61,6 +69,8 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         self::$userId    = Fixtures::createUser(self::login(), 'administrator');
         self::$token     = Fixtures::mintToken('admin', self::label(), self::$userId);
         self::$readToken = Fixtures::mintToken('read', self::readLabel(), self::$userId);
+
+        MuPlugin::drop(self::SAVES, self::savesSource());
     }
 
     public static function tearDownAfterClass(): void
@@ -72,6 +82,8 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        MuPlugin::remove(self::SAVES);
+
         foreach (self::$posts as $id) { Fixtures::deletePost($id); }
         self::$posts = [];
 
@@ -279,6 +291,70 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         self::assertStringNotContainsString('read one with get-revision, restore one with restore-revision', $list, 'The old sentence, which offered every token a restore, is back.');
     }
 
+    /**
+     * Round 2, should-fix 1. A terms-only or featured-image-only update is a real save:
+     * `modified` moves and save_post fires, as it did at eb75223 - a cache or search plugin
+     * listening for saves must hear of it. A floating draft is not re-dated by it.
+     *
+     * @group sprint-14d
+     */
+    public function testATermsOnlyOrImageOnlyUpdateIsARealSave(): void
+    {
+        $tag   = Fixtures::createTerm('post_tag', Fixtures::name('ut-save-tag'));
+        $image = Fixtures::createAttachment(Fixtures::name('ut-save-image'), self::$userId, Fixtures::name('ut-save-image.png'));
+        self::$posts[] = $image;
+
+        foreach (['terms' => ['terms' => ['post_tag' => [$tag]]], 'featured_image' => ['featured_image' => $image]] as $field => $sent) {
+            $id = $this->newPost(['post_title' => Fixtures::name('ut-save-' . $field), 'post_status' => 'draft']);
+            self::setModified($id, '2020-01-01 00:00:00');
+            $before = self::row($id);
+
+            $data  = $this->update($id, $sent);
+            $after = self::row($id);
+
+            self::assertSame([$field], $data['changed'], "{$field}-only update: " . implode(', ', $data['changed']));
+            self::assertNotSame($before['post_modified'], $after['post_modified'], "A {$field}-only update did not move `modified`.");
+            self::assertSame('1', self::saves($id), "A {$field}-only update did not fire save_post exactly once.");
+            self::assertSame($before['post_date'], $after['post_date'], "A {$field}-only update re-dated a floating draft.");
+            self::assertSame(self::ZERO_DATE, $after['post_date_gmt']);
+        }
+
+        WpCli::tryRun(['term', 'delete', 'post_tag', (string) $tag]);
+
+        // And an update that changes nothing still saves nothing.
+        $id = $this->newPost(['post_title' => Fixtures::name('ut-save-none'), 'post_status' => 'draft']);
+        $this->update($id, ['title' => Fixtures::name('ut-save-none')]);
+        self::assertSame('', self::saves($id), 'An update that changed nothing fired save_post.');
+    }
+
+    /**
+     * Round 2, should-fix 2. `terms` REPLACES, so an empty list clears the taxonomy and
+     * `changed` says so - except that WordPress gives a `post` left with no category its
+     * default category (wp_insert_post: "'post' requires at least one category").
+     *
+     * @group sprint-14d
+     */
+    public function testAnEmptyTermsListClearsTheTaxonomy(): void
+    {
+        $tag = Fixtures::createTerm('post_tag', Fixtures::name('ut-clear-tag'));
+        $cat = Fixtures::createTerm('category', Fixtures::name('ut-clear-cat'));
+        $id  = $this->newPost(['post_title' => Fixtures::name('ut-clear'), 'post_status' => 'draft']);
+        Fixtures::setPostTerms($id, 'post_tag', [$tag]);
+        Fixtures::setPostTerms($id, 'category', [$cat]);
+
+        $data = $this->update($id, ['terms' => ['post_tag' => []]]);
+        self::assertSame([], self::row($id)['terms']['post_tag'], 'An empty post_tag list left the tags on the post.');
+        self::assertSame(['terms'], $data['changed']);
+
+        $default = (int) trim(WpCli::evaluate('echo (int) get_option("default_category");'));
+        $data    = $this->update($id, ['terms' => ['category' => []]]);
+        self::assertSame([$default], self::row($id)['terms']['category'], 'Clearing category did not leave exactly the default category.');
+        self::assertSame(['terms'], $data['changed']);
+
+        WpCli::tryRun(['term', 'delete', 'post_tag', (string) $tag]);
+        WpCli::tryRun(['term', 'delete', 'category', (string) $cat]);
+    }
+
     /* ------------------------------------------------------------------
      * helpers
      * ---------------------------------------------------------------- */
@@ -340,6 +416,32 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         }
 
         return $decoded;
+    }
+
+    /** How many times save_post fired for $id in this run's requests ('' for never). */
+    private static function saves(int $id): string
+    {
+        return trim(WpCli::evaluate(sprintf('echo (string) get_post_meta(%d, %s, true);', $id, var_export(self::SAVES_KEY, true))));
+    }
+
+    /** save_post, counted per post in post meta, for THIS RUN'S requests only. */
+    private static function savesSource(): string
+    {
+        $run    = Fixtures::runId();
+        $header = 'HTTP_' . strtoupper(str_replace('-', '_', IntegrationTestCase::RUN_HEADER));
+        $key    = self::SAVES_KEY;
+
+        return <<<PHP
+/**
+ * wp-mcp sprint-14d save_post counter for run {$run}. Dropped and removed by
+ * tests/integration/UpdatePostTruthTest.php. Counts only this run's requests.
+ */
+add_action('save_post', static function (\$postId) {
+    if (!isset(\$_SERVER['{$header}']) || \$_SERVER['{$header}'] !== '{$run}') { return; }
+    if (wp_is_post_revision(\$postId)) { return; }
+    update_post_meta(\$postId, '{$key}', (int) get_post_meta(\$postId, '{$key}', true) + 1);
+}, 10, 1);
+PHP;
     }
 
     private function servedDescription(string $token, string $name): string

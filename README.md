@@ -317,12 +317,15 @@ Two things make that true:
 - **A value sent back unchanged is not re-written.** `update-post` leaves out every field
   equal to what is stored, so re-shaping cannot change it: a title wp-admin stored as
   `x<y z` is no longer stripped to `x`, and a draft nobody dated stays undated. An update
-  that changes nothing writes nothing - no revision, no new modified date.
+  that changes nothing writes nothing - no revision, no new modified date. An update that
+  changes anything, terms or the featured image alone included, is a real save: `modified`
+  moves and WordPress's save hooks fire, so cache and search plugins hear of it.
   `update-menu-item` keeps a label's stored bytes when it is sent back as `get-menu` read
   it.
 
 `get-post`'s `terms` entries can be sent to `update-post` as they are: `terms` takes an id,
-a name, or the `{id, name, slug}` object itself.
+a name, or the `{id, name, slug}` object itself. An empty list clears that taxonomy - except
+that WordPress gives a post left with no category its default category.
 
 ### Finding content
 
@@ -558,7 +561,7 @@ classic menu you change may not be what visitors see.
   url, target, classes, parent, position among its siblings, menu_order in the whole menu,
   status, and children. `title` is the item's own label as typed - a label wp-admin stored
   as `FDA &#038; GMP` reads `FDA & GMP` - or, when it has none, the linked page's stored
-  title.
+  title or the linked term's name, decoded like every term name.
 - `add-menu-item {menu_id, type, object_id?, url?, title?, parent_id?, position?, target?,
   classes?}` adds one. `type` is `custom` for a plain link, a post type such as `page`, or a
   taxonomy such as `category`. A linked post must exist and be readable by you. A custom url
