@@ -1788,16 +1788,17 @@ function wpmcp_core_tools() {
                 . ' caller may see), search (title, excerpt and content; a leading "-"'
                 . ' on a word EXCLUDES it), category and'
                 . ' tag (slug or id), term ("taxonomy:slug" for any other taxonomy),'
-                . ' author (id or login), after and before (ISO 8601 date or datetime,'
+                . ' author (id or login), after and before (ISO 8601,'
                 . ' inclusive), orderby ("date", "modified" or "title"; default "date"),'
                 . ' order ("asc" or "desc"; default "desc"), limit (default 20, max 100)'
                 . ' and page (default 1, max 100; has_more is false at page 100 - narrow the'
                 . ' filter to reach further). A filter naming something that does'
-                . ' not exist, or something the caller may not see, returns an empty'
-                . ' list rather than an error. Returns count, page, limit, has_more and items;'
-                . ' each item is id, title (the stored column, as get-post returns it), type,'
+                . ' not exist, or that the caller may not see, returns an empty'
+                . ' list, not an error. Returns count, page, limit, has_more and items;'
+                . ' each item is id, title (the stored column, as get-post gives it), type,'
                 . ' status, slug, link, date and modified - ISO 8601 site-local, or null where'
-                . ' the column holds no date. There is no total.',
+                . ' the column holds no date. link is ?p=ID while a post is draft, pending,'
+                . ' future or trashed. There is no total.',
             'inputSchema' => array('type' => 'object', 'properties' => array(
                 'post_type' => array('type' => 'string', 'description' => 'Post type to list. Default "post".'),
                 'status'    => array('type' => 'string', 'description' => 'One post status. Default: every status the caller may see.'),
@@ -1933,22 +1934,21 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'Read one post or page in full. Args: id (integer,'
-                . ' required). Returns id, title, type, status, slug, link, content,'
+            'description' => 'Read one post or page in full. Args: id'
+                . ' (required). Returns id, title, type, status, slug, link, content,'
                 . ' excerpt, author {id, name}, date, date_gmt, modified and'
                 . ' modified_gmt as ISO 8601, or null where the column holds no date -'
                 . ' a draft nobody dated. featured_image {id, url} or null, terms'
                 . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
-                . ' entry {id, name, slug} with the name as typed (see list-terms), and revisions -'
-                . ' the number of stored'
-                . ' revisions, or null when the caller may read the post but not edit'
+                . ' entry {id, name, slug}, the name as typed (see list-terms), and revisions -'
+                . ' the number of stored revisions, or null when the caller cannot edit'
                 . ' it. title, content and excerpt are the stored columns, not the display'
-                . ' rendering: quotes, apostrophes, ampersands and backslashes read back as'
+                . ' rendering: quotes, apostrophes, ampersands and backslashes are as'
                 . ' stored. Writing one back is not guaranteed unchanged: update-post strips'
-                . ' tags from a title, and without unfiltered_html WordPress encodes some'
-                . ' characters. link is the rendered permalink. A post the caller may not read,'
-                . ' a post that is not there, and an id of the wrong kind of thing all answer'
-                . ' identically.',
+                . ' tags from a title, and without unfiltered_html core encodes some'
+                . ' characters. link is the rendered permalink, or ?p=ID while the post is'
+                . ' draft, pending, future or trashed. A post the caller may not read, one that is not there and an'
+                . ' id of the wrong kind all answer identically.',
             'inputSchema' => array('type' => 'object',
                 'properties' => array('id' => array('type' => 'integer', 'description' => 'Post ID.')),
                 'required' => array('id')),
@@ -2044,7 +2044,9 @@ function wpmcp_content_tools() {
             . ' posts. `featured_image` is an image attachment id you may edit, or 0 for'
             . ' none. Tags are stripped from the title. Returns id, link, status, changed (the'
             . ' fields this call set), date and date_gmt when date was sent, and terms_refused'
-            . ' or terms_failed when a term could not be assigned.',
+            . ' or terms_failed when a term could not be assigned. link is the plain ?p=ID'
+            . ' form while the post is draft, pending, future or trashed, whatever the'
+            . ' permalink structure.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'title' => array('type' => 'string'), 'content' => array('type' => 'string'),
             'post_type' => array('type' => 'string'), 'status' => array('type' => 'string'),
@@ -2148,19 +2150,20 @@ function wpmcp_content_tools() {
         // is the status-transition table in that sprint's report, and the revision
         // sentence is what a revision-less post and a revisioned one each do.
         'description' => 'Update a post or page. Args: id (required) plus any of title,'
-            . ' content, status ("publish" publishes), excerpt, slug, terms, date, author and'
-            . ' featured_image. A field you send REPLACES what was there;'
-            . ' one equal to its stored value is not written, and an update that changes'
+            . ' content, status, excerpt, slug, terms, date, author and'
+            . ' featured_image. A field sent REPLACES what was there;'
+            . ' one equal to what is stored is not written, and an update that changes'
             . ' nothing writes nothing. Tags are stripped from a changed title. Returns id,'
             . ' link, status and changed: every field whose'
-            . ' stored value now differs, core\'s own moves included - it re-dates an undated'
+            . ' stored value now differs, core\'s moves included - it re-dates an undated'
             . ' draft, and on a status change re-slugs: leaving draft or pending, a slug-less'
             . ' post gets one from its title and a taken slug a -N suffix; trashing appends'
-            . ' __trashed. date and date_gmt come back when date changed or was sent. Refused,'
-            . ' naming who, while another user edits it. After a TEXT change'
-            . ' the NEWEST revision holds what you sent and the one below is the pre-edit text'
-            . ' restore-revision undoes to; otherwise no revision is added, except that the'
-            . ' first write to a post with none saves one.',
+            . ' __trashed. link is ?p=ID for a draft, pending, future or trashed post.'
+            . ' date and date_gmt come back when date moved or was sent.'
+            . ' Refused, naming who, while another user edits it. After a TEXT change'
+            . ' the NEWEST revision holds what you sent, the one below the pre-edit text'
+            . ' restore-revision undoes to; otherwise none is added, except by the'
+            . ' first write that CHANGES something to a post with none.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer'), 'title' => array('type' => 'string'),
             'content' => array('type' => 'string'),
@@ -3039,8 +3042,11 @@ function wpmcp_taxonomy_tools() {
             . ' search (in name and slug), hide_empty (default false), limit (default 20, max'
             . ' 100) and page (default 1, max 100; has_more is false at page 100 - narrow the'
             . ' search to reach further). Returns count, page, limit, has_more and items; each'
-            . ' item is id, name, slug, taxonomy, count (posts in the term) and parent (0 at the'
-            . ' top). name is as typed: WordPress stores & < > as &amp; &lt; &gt;, and they come'
+            . ' item is id, name, slug, taxonomy, count and parent (0 at the'
+            . ' top). count is how many PUBLISHED posts are in the term: a term used only on'
+            . ' drafts, pending or scheduled posts reads 0, and hide_empty leaves it out. No'
+            . ' item carries a date - terms have no date column.'
+            . ' name is as typed: WordPress stores & < > as &amp; &lt; &gt;, and they come'
             . ' back decoded, so a name read here can be sent to create-term or in update-post\'s'
             . ' terms and names the same term.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
@@ -3088,7 +3094,8 @@ function wpmcp_taxonomy_tools() {
             'openWorldHint' => false,
         ),
         'description' => 'Create a taxonomy term. Args: taxonomy (required), name (required), slug,'
-            . ' parent (a term id, hierarchical taxonomies only) and description. Returns id,'
+            . ' parent (a term id, hierarchical taxonomies only) and description. Tags are'
+            . ' stripped from the name, and the result does not say so. Returns id,'
             . ' name (as typed - see list-terms) and slug; a slug already taken gets a -N suffix.'
             . ' A name the taxonomy already has (under the same parent) is refused, naming the'
             . ' existing term\'s id. Needs permission to edit terms in the taxonomy.',
@@ -3891,7 +3898,7 @@ function wpmcp_code_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'List stored versions of a theme file. Args: path (required). Returns path and versions, newest first, each with id, saved_at (ISO 8601 site-local, as every list tool gives dates), size (bytes), sha256, reason (write, delete, restore or sweep) and saved_by (a login, or system). The site keeps a bounded number per file (20 by default), so there is no paging. A path with no stored versions returns an empty list, which is not an error. Pass an id to code-restore to put that version back.',
+        'description' => 'List stored versions of a theme file. Args: path (required). Returns path and versions, newest first, each with id, saved_at (ISO 8601 site-local, as every date these tools return), size (bytes), sha256, reason (write, delete, restore or sweep) and saved_by (a login, or system). The site keeps a bounded number per file (20 by default), so there is no paging. A path with no stored versions returns an empty list, which is not an error. Pass an id to code-restore to put that version back.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('path' => array('type' => 'string')), 'required' => array('path')),
         'run' => function ($a) {
@@ -5885,7 +5892,7 @@ function wpmcp_inventory_tools() {
         'annotations' => $readHints,
         'description' => 'List the site\'s users you are allowed to see. With the list_users'
             . ' capability (Administrators): every user, each with id, name, login, email, roles'
-            . ' and registered (ISO 8601 site-local, as every list tool gives dates), and the'
+            . ' and registered (ISO 8601 site-local, as every date these tools return), and the'
             . ' role and search filters (the search argument says where it looks). Without list_users - an Editor, Author or Contributor -'
             . ' only users who have published posts, as id and name, as in the WordPress REST API;'
             . ' role and search are refused. name is the display name the user chose, often their'

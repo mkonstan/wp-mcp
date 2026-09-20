@@ -347,10 +347,11 @@ that WordPress gives a post left with no category its default category.
 
 It answers with `count`, `page`, `limit`, `has_more` and `items`. Each item is `id`,
 `title`, `type`, `status`, `slug`, `link`, `date` and `modified` - the dates in ISO 8601,
-null where the column holds no date, exactly as `get-post` reports them. There is no total, on
-purpose: a total is a count of posts the caller has not been shown, and on the
-own-unpublished side it would be a count of somebody's drafts. Page until `has_more` is
-`false`; at page 100 it is, and a narrower filter reaches the rest.
+null where the column holds no date, exactly as `get-post` reports them, and `link` in the
+same form `get-post` gives it. There is no total, on purpose: a total is a count of posts
+the caller has not been shown, and on the own-unpublished side it would be a count of
+somebody's drafts. Page until `has_more` is `false`; at page 100 it is, and a narrower
+filter reaches the rest.
 
 Two things it deliberately does not do. **Sticky posts are ignored**: WordPress pins them to
 the front of a home query regardless of what was asked for, which would mean a date window or
@@ -376,6 +377,13 @@ decided from their capabilities first; filters only narrow inside that.
 `content` and `excerpt` as stored, `author` as `{id, name}`, `date`, `date_gmt`,
 `modified` and `modified_gmt` as ISO 8601, `featured_image` as `{id, url}` or `null`,
 `terms` keyed by taxonomy with `{id, name, slug}` entries, and `revisions`.
+
+**`link` is what WordPress renders, and that is not always the pretty permalink.** While a
+post is a draft, pending, scheduled (`future`) or in the trash, WordPress renders the plain
+`?p=ID` form whatever the site's permalink structure is and whatever slug the post already
+holds - measured on both test sites. A `private` post gets the pretty permalink. Every tool
+that returns `link` - `list-posts`, `get-post`, `create-post` and `update-post` - returns
+the same form, read after the last write, so publishing a draft answers its new permalink.
 
 The title, like `content` and `excerpt`, is the stored column, not WordPress's display
 rendering, so quotes, apostrophes, ampersands and backslashes read back as stored, and a
@@ -482,15 +490,16 @@ nothing - no revision either.
 
 | Update | Revisions added |
 |---|---|
-| the first write to a post with no revisions, whatever it changes - even status only | 1, holding the text as it stands (WordPress's own `post_updated` handler saves it too) |
+| the first write that CHANGES something to a post with no revisions, even a status change | 1, holding the text as it stands (WordPress's own `post_updated` handler saves it too) |
 | the first write to a post with no revisions, changing its text | 2: the pre-edit text, then the new text above it |
 | a later update that changes title, content or excerpt | 1, holding the new text |
 | a later update that changes only terms or the featured image | 0 - it is still a save: `modified` moves and `save_post` fires |
 | a later update that changes anything else | 0 |
 | an update that sends back only what is stored | 0 - nothing is written |
 
-So "no text change, no revision" holds from the second write on; the first write to a
-never-revised post always leaves one.
+So "no text change, no revision" holds from the second write on; the first write that
+CHANGES something on a never-revised post always leaves one. A write that changes nothing
+is not that first write: it writes nothing at all, and leaves no revision.
 
 **Which revision is the undo, and it is not the newest one.** After any edit, the newest
 revision holds *the text you just wrote* - that is the one WordPress saves afterwards - and

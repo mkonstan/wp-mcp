@@ -8,7 +8,8 @@
  *      name every field SENT, so an identical title came back as `changed: ["title"]`
  *      (cold client #4), and core's own moves were caught only for the two fields somebody
  *      had thought to compare.
- *   2. The revision sentence. MEASURED: the first write to a post with no revisions adds one
+ *   2. The revision sentence. MEASURED: the first write that CHANGES something on a post
+ *      with no revisions adds one
  *      revision whatever it changes - core's post_updated handler does it on its own - and
  *      an update of an identical title used to create it too, so "no text change, no
  *      revision" was false on a live site (seosemia.net, 2026-09-18). An update that
@@ -276,7 +277,8 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
         self::assertStringNotContainsString('no text change, no revision', $update, 'The false revision claim is back.');
         foreach ([
             'an update that changes nothing writes nothing',
-            'first write to a post with none saves one',
+            'first write that CHANGES something to a post with none',
+            '?p=ID for a draft, pending, future or trashed post',
             'NEWEST revision',
             'pre-edit',
             'every field whose stored value now differs',

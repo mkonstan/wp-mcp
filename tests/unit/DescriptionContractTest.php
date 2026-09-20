@@ -107,6 +107,51 @@ final class DescriptionContractTest extends TestCase
     }
 
     /**
+     * Round 4. The five sentences two cold clients read at 84a8e4b and acted on, each
+     * replaced by the measured one. Held here, in the unit tier, because each is a claim
+     * about behaviour that did not change and must not drift again:
+     *
+     *   - every tool that returns `link` says it is the plain ?p=ID form while the post is
+     *     a draft, pending, scheduled or trashed (measured on both sites, pretty structure,
+     *     slug present);
+     *   - `create-term` says tags are stripped from a name, as `create-post` does of a title
+     *     (measured: `Arts & Crafts <b>` stores `Arts & Crafts`; a menu item label is NOT
+     *     stripped, so the menu tools say nothing of the kind);
+     *   - `list-terms` says which posts `count` counts, and that it carries no date;
+     *   - no description claims every list tool gives dates - `list-terms` gives none.
+     *
+     * @group sprint-14d
+     */
+    public function testTheMeasuredSentencesAreTheServedOnes(): void
+    {
+        $catalog = WireSerializationTest::catalog();
+
+        foreach (['list-posts', 'get-post', 'create-post', 'update-post'] as $name) {
+            $description = (string) $catalog[$name]['description'];
+
+            self::assertStringContainsString('?p=ID', $description, "{$name} does not say what link is on an unpublished post.");
+            foreach (['draft', 'pending', 'future', 'trash'] as $status) {
+                self::assertStringContainsString($status, $description, "{$name} does not name {$status} among the statuses link is ?p=ID for.");
+            }
+        }
+
+        $term = (string) $catalog['create-term']['description'];
+        self::assertStringContainsString('Tags are stripped from the name', $term, 'create-term still says a name comes back as typed with nothing stripped.');
+
+        $terms = (string) $catalog['list-terms']['description'];
+        self::assertStringContainsString('PUBLISHED posts', $terms, 'list-terms does not say which posts count counts.');
+        self::assertStringContainsString('no item carries a date', strtolower($terms), 'list-terms does not say it returns no date.');
+
+        foreach ($catalog as $name => $tool) {
+            self::assertStringNotContainsString(
+                'as every list tool gives dates',
+                (string) $tool['description'],
+                "{$name} claims every list tool gives dates; list-terms gives none."
+            );
+        }
+    }
+
+    /**
      * G3's prose half: every tool that takes `page` says that has_more is false at page 100.
      *
      * @group sprint-14d

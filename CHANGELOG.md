@@ -80,11 +80,12 @@ marked (shape).**
 
 **Descriptions and results that said something untrue**
 
-- **`update-post`**: "no text change, no revision" was false - the first write to a post with
-  no revisions always leaves one, whatever it changes (WordPress's own `post_updated` handler
-  saves it). The description now says so, and states the re-slug rule rather than two cases:
-  scheduling and going private derive a slug too, and a taken slug gets a `-N` suffix. README
-  carries both measured tables.
+- **`update-post`**: "no text change, no revision" was false - the first write that CHANGES
+  something on a post with no revisions leaves one whatever it changed (WordPress's own
+  `post_updated` handler saves it). The description now says so. A write that changes nothing
+  is not that first write: it writes nothing at all, so it leaves no revision either. The
+  description also states the re-slug rule rather than two cases: scheduling and going private
+  derive a slug too, and a taken slug gets a `-N` suffix. README carries both measured tables.
 - **`delete-post`**: "force=false trashes" was false for a custom post type and for a post
   already in the trash - both were deleted permanently while the result said `trashed: true`.
   force=false now trashes a post of any type and leaves a trashed one where it is, and
@@ -106,6 +107,20 @@ marked (shape).**
   `list-terms`, `list-comments`, `upload-media` (a URL is the only way in; types and size
   limit), the code tools, `create-term`, `delete-term`, `moderate-comment` and `reply-comment`
   had not. A test now fails for a description without one.
+- **`link` is not always the pretty permalink.** While a post is a draft, pending, scheduled
+  or in the trash, WordPress renders the plain `?p=ID` form whatever the site's permalink
+  structure is and whatever slug the post holds - measured on both test sites. `list-posts`,
+  `get-post`, `create-post` and `update-post` all say so now; a `private` post does get the
+  pretty permalink.
+- **`create-term`** now says that tags are stripped from the name, as `create-post` says of a
+  title: `Arts & Crafts <b>` is stored as `Arts & Crafts` and the result does not mention it.
+  (Measured: a menu item's label, through `add-menu-item` and `update-menu-item`, is NOT
+  stripped, so those two say nothing of the kind.)
+- **`list-terms`** now says that `count` is how many PUBLISHED posts are in the term - a term
+  used only on drafts or scheduled posts reads `0` - and that no item carries a date.
+- **`code-history` and `list-users`** said their date was "ISO 8601 site-local, as every list
+  tool gives dates", and `list-terms` returns no date at all. Both now say "as every date
+  these tools return".
 - **Read scope is not privacy.** Settings > WP MCP says, where a token is minted, that a
   read-scope token reads everything its user can - every user's email, for an administrator -
   and that scope gates writing only. The handshake instructions carry the same line.
@@ -445,7 +460,8 @@ marked (shape).**
 - **No more `Private: ` and `Protected: ` prefixes** on the titles of private and
   password-protected posts: that prefix is display text, not the stored title.
 - `link`, and a media `url`, stay as WordPress renders them - there is no column to write
-  those back to.
+  those back to. For `link` that rendering is the plain `?p=ID` form until the post is
+  published or private.
 
 ### Added: `list-posts` items carry `date` and `modified`
 
