@@ -96,7 +96,23 @@ function wpmcp_uninstall_trace_dir() {
 
     foreach (glob($dir . '/trace-*.log') as $log) { $known[] = $log; }
 
+    // wp-admin/includes/file.php is loaded when the Plugins screen deletes a plugin, and
+    // is not when WP-CLI does; either way this is the one file here PHP compiles, and a
+    // delete is a change to it. The guard is spelled out rather than calling
+    // wpmcp_opcache_invalidate(): nothing from the plugin is loaded in this request (see
+    // the header), which is the same reason every option name above is a literal.
+    if (!function_exists('wp_opcache_invalidate') && is_readable(ABSPATH . 'wp-admin/includes/file.php')) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+
     foreach ($known as $file) {
+        // BEFORE the unlink, for the reason code-delete gives: opcache_invalidate()
+        // resolves the path on disk first, so after the unlink it answers false and the
+        // entry for the deleted path survives.
+        if (str_ends_with($file, '.php') && function_exists('wp_opcache_invalidate')) {
+            wp_opcache_invalidate($file, true);
+        }
+
         if (is_file($file)) { @unlink($file); }
     }
 

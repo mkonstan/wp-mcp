@@ -768,6 +768,12 @@ function wpmcp_migrate_sweep_stale_backups() {
             continue;
         }
 
+        // NO OPCODE-CACHE INVALIDATION HERE, AND THAT IS NOT AN OVERSIGHT. What this
+        // unlinks is `<name>.bak` - the ORIGINAL is untouched, and `.bak` is not an
+        // extension PHP compiles, so there is nothing in the opcode cache under this
+        // path to tell. wp_opcache_invalidate() would refuse it on exactly that test
+        // (wp-admin/includes/file.php:2762-2765). The sweep writes no file at all; it
+        // reads one, stores the bytes in the table and deletes it.
         if (!@unlink($abs)) {
             $tally['skipped_undeletable']++;
             $tally['skipped_paths'][] = $found . ' (stored as version ' . $id . ' but could not be deleted)';

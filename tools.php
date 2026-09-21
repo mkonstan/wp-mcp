@@ -344,6 +344,82 @@ function wpmcp_php_parse_ok($code) {
 }
 
 /**
+ * Tell the opcode cache that a PHP file on disk is not what it has compiled.
+ *
+ * A WRITE IS NOT FINISHED UNTIL THE OPCODE CACHE IS TOLD. On a host running
+ * `opcache.validate_timestamps=0` - every tuned production host, and the default of
+ * several managed WordPress platforms - PHP never stats a file it has already compiled.
+ * code-write answered `bytes: 4096` and the site went on executing the OLD functions.php
+ * until the pool was restarted. Every tool here that changes a compiled file therefore
+ * calls this, and core's own theme editor is the pattern: it invalidates after the write
+ * (`wp-admin/includes/file.php:525`, after the `fwrite`) AND AGAIN after the rollback
+ * (`:638`, after the `file_put_contents` that puts the previous contents back), so a write
+ * that is undone does not leave the undone bytes compiled.
+ *
+ * `wp_opcache_invalidate()` IS `@since 5.5.0` - exactly this plugin's floor (`Requires at
+ * least: 5.5`) - and lives in `wp-admin/includes/file.php`, which a REST request does not
+ * load. That require is the whole reason this is a function rather than five call sites:
+ * without it the call is a fatal on the one request shape this plugin ever runs in.
+ *
+ * NOTHING HERE DEPENDS ON AN OPCODE CACHE BEING PRESENT. Core's function is already
+ * guarded: it returns false, silently, when `opcache_invalidate()` is not defined, when
+ * `opcache.restrict_api` excludes the calling script, when the cache is off, and when the
+ * path is not a `.php` file (`file.php:2725-2777`). false is not a failure - it is "there
+ * was nothing to tell" - so no caller of this treats it as one and no tool result carries
+ * it. A result field saying `opcache: false` would be read by an agent as "the change is
+ * not live", which is untrue on every host without an opcode cache. The tool's claim stays
+ * what it has always been: what it did to the FILE.
+ *
+ * THE EXTENSION TEST IS CORE'S, spelled here so five call sites do not each have to make
+ * it. `.php` is the only member of wpmcp_code_allowed_ext() that PHP compiles.
+ *
+ * WHAT IT ANSWERS, MEASURED on both Local sites (opcache loaded, `opcache.enable=1`,
+ * `opcache.restrict_api` empty): TRUE for a `.php` path that exists, FALSE for a `.php`
+ * path that does not. PHP resolves the path on the filesystem before it looks in the cache
+ * (`zend_accel_invalidate()`), so a file that has just been unlinked cannot be invalidated
+ * at all - which is why code-delete calls this BEFORE its unlink and not after it, and why
+ * the second call of a revert that unlinks a file it created answers false and is left
+ * where core puts it. FALSE is never an error here; see above.
+ *
+ * The action fires AFTER the attempt, carrying what core answered, and is the only
+ * observable this leaves: see tests/integration/OpcacheInvalidationTest.php, which counts
+ * it per file-changing act and reads the file from disk at the moment it fires, so the
+ * ordering (invalidate after the write, not before it) is measured rather than read.
+ *
+ * @param string $abs Absolute path of the file that changed - the file need not still exist.
+ * @return bool What wp_opcache_invalidate() answered: true when the cache was told,
+ *              false when there was nothing or nobody to tell.
+ */
+function wpmcp_opcache_invalidate($abs) {
+    $abs = (string) $abs;
+
+    // Core's own test (file.php:2762-2765). A path this returns on is not compiled by
+    // PHP, so there is nothing to invalidate and no witness to fire.
+    if (strtolower(substr($abs, -4)) !== '.php') { return false; }
+
+    if (!function_exists('wp_opcache_invalidate')
+        && defined('ABSPATH') && is_readable(ABSPATH . 'wp-admin/includes/file.php')) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+
+    $invalidated = function_exists('wp_opcache_invalidate')
+        ? (bool) wp_opcache_invalidate($abs, true)
+        : false;
+
+    /**
+     * A compiled file changed on disk and the opcode cache has just been told.
+     *
+     * @since 1.1.0
+     *
+     * @param string $abs         Absolute path of the file that changed.
+     * @param bool   $invalidated What wp_opcache_invalidate() answered.
+     */
+    do_action('wpmcp_compiled_file_changed', $abs, $invalidated);
+
+    return $invalidated;
+}
+
+/**
  * Limit the post tools to real, viewable content types. Excludes internal types
  * (revisions, nav_menu_item, wp_template, wp_global_styles, etc.) and attachments
  * (those have their own media tools). Public CPTs are allowed automatically.
@@ -3832,6 +3908,10 @@ function wpmcp_code_tools() {
             $bytes = file_put_contents($r['abs'], $content);
             if ($bytes === false) { return new WP_Error('wpmcp_write_failed', 'Could not write file.'); }
 
+            // AFTER THE WRITE, as core's editor does (wp-admin/includes/file.php:525).
+            // A no-op on anything but a .php path; see wpmcp_opcache_invalidate().
+            wpmcp_opcache_invalidate($r['abs']);
+
             $reverted = false; $perr = null;
             if (strtolower(pathinfo($r['rel'], PATHINFO_EXTENSION)) === 'php') {
                 $chk = wpmcp_php_parse_ok($content);
@@ -3842,6 +3922,10 @@ function wpmcp_code_tools() {
                     // disagree, and nothing under the document root is involved.
                     if ($existed) { file_put_contents($r['abs'], $prior); } else { @unlink($r['abs']); }
                     $reverted = true;
+                    // AND AGAIN AFTER THE ROLLBACK (file.php:638). The bytes the cache was
+                    // told about two lines up are no longer on disk, and a revert that
+                    // leaves them compiled is the defect running backwards.
+                    wpmcp_opcache_invalidate($r['abs']);
                 }
             }
             $out = array(
@@ -3875,6 +3959,19 @@ function wpmcp_code_tools() {
             // Stored first, and the delete does not happen if it could not be.
             $saved = wpmcp_code_version_current($r['abs'], $r['rel'], 'delete');
             if (is_wp_error($saved)) { return $saved; }
+
+            // A DELETE IS A CHANGE TO A COMPILED FILE TOO - and it is the one place this
+            // plugin invalidates BEFORE the change rather than after it. MEASURED, not
+            // preferred: `opcache_invalidate()` resolves the path on the filesystem first
+            // (`zend_accel_invalidate()`), so once the file is gone it answers false and
+            // drops nothing - the entry for the deleted path survives. Called here, while
+            // the path still resolves, it actually removes it. Core has no delete in its
+            // editor to mirror, so this is core's rule ("the cache must not hold bytes
+            // that are not on disk") applied at the only moment the API can act.
+            //
+            // If the unlink below then fails, the cache has been told about a file that
+            // did not change - which costs one recompile and nothing else.
+            wpmcp_opcache_invalidate($r['abs']);
 
             // UNLINKED, not renamed. The rename left the whole file, readable, one
             // extension away, inside the document root - which is what the version store
@@ -3990,6 +4087,10 @@ function wpmcp_code_tools() {
             $bytes = file_put_contents($r['abs'], $content);
             if ($bytes === false) { return new WP_Error('wpmcp_write_failed', 'Could not write file.'); }
 
+            // The same two calls code-write makes, for the same reason: a restore is a
+            // write, and a restore that fails its parse check is a rollback.
+            wpmcp_opcache_invalidate($r['abs']);
+
             $reverted = false; $perr = null;
             if (strtolower(pathinfo($r['rel'], PATHINFO_EXTENSION)) === 'php') {
                 $chk = wpmcp_php_parse_ok($content);
@@ -3997,6 +4098,7 @@ function wpmcp_code_tools() {
                     $perr = $chk;
                     if ($existed) { file_put_contents($r['abs'], $prior); } else { @unlink($r['abs']); }
                     $reverted = true;
+                    wpmcp_opcache_invalidate($r['abs']);
                 }
             }
 

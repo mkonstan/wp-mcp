@@ -179,6 +179,38 @@ add_filter('preprocess_comment', static function (\$commentdata) use (\$wpmcp_te
 add_action('comment_post', static function (\$comment_id, \$approved) use (\$wpmcp_test_record) {
     \$wpmcp_test_record('comment_post', array('id' => (int) \$comment_id, 'approved' => \$approved));
 }, 10, 2);
+
+/*
+ * THE OPCODE-CACHE WITNESS (sprint 14e). wpmcp_opcache_invalidate() fires this action
+ * immediately after calling wp_opcache_invalidate(), so a recording is proof the call was
+ * made - and the FILE IS READ FROM DISK HERE, which is what makes the recording proof of
+ * ORDER as well: an invalidation that ran before its write would record the old bytes, and
+ * one that ran before its rollback would record the rolled-back-from bytes. Without the
+ * disk read this would only say "our own helper was reached".
+ */
+add_action('wpmcp_compiled_file_changed', static function (\$abs, \$invalidated) use (\$wpmcp_test_record) {
+    \$abs = (string) \$abs;
+
+    // unlink() clears the entry for its own path, but the write branch stat()ed the file
+    // before touching it; clear it so `exists` is this moment's answer, not an older one.
+    clearstatcache(true, \$abs);
+
+    \$exists = is_file(\$abs);
+
+    \$wpmcp_test_record('wpmcp_compiled_file_changed', array(
+        'path'        => \$abs,
+        'invalidated' => \$invalidated ? 1 : 0,
+        'exists'      => \$exists ? 1 : 0,
+        'md5'         => \$exists ? (string) md5_file(\$abs) : '',
+        // wp-admin/includes/file.php is NOT loaded on a REST request, so this is the half
+        // of the fix that a code-reading review cannot confirm.
+        'core_loaded' => function_exists('wp_opcache_invalidate') ? 1 : 0,
+        // What core's own guard will answer on this host, measured in the request that
+        // made the call rather than assumed from a php.ini somebody read.
+        'opcache_on'  => (function_exists('opcache_invalidate') && ini_get('opcache.enable')) ? 1 : 0,
+        'restrict'    => (string) ini_get('opcache.restrict_api'),
+    ));
+}, 10, 2);
 PHP;
     }
 
