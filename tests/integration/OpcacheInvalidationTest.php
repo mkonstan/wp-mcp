@@ -5,13 +5,21 @@
  * while the path can still be resolved.
  *
  * THE DEFECT THIS CLOSES. code-write, code-restore and code-delete changed a `.php` file
- * and said nothing to the opcode cache. On a host running `opcache.validate_timestamps=0`
- * - a tuned production host, and the default of several managed WordPress platforms - PHP
- * never stats a file it has already compiled, so the tool answered `bytes: 4096` while the
- * site went on executing the previous `functions.php` until the pool was restarted. A
- * success that is not true is worse than a failure. Core's own theme editor has always
- * made the call, twice: after the write (`wp-admin/includes/file.php:525`) and again after
- * its rollback (`:638`).
+ * and said nothing to the opcode cache. The condition is measurable rather than rhetorical:
+ * `opcache.validate_timestamps=0`, where PHP never stats a file it has already compiled, or
+ * a raised `opcache.revalidate_freq`, where it stats it no more often than that. So the tool
+ * answered `bytes: 4096` while the site went on executing the previous `functions.php` -
+ * until the pool was restarted, or for up to `revalidate_freq` seconds. A success that is not
+ * true is worse than a failure. Core's own theme editor has always made the call, twice:
+ * after the write (`wp-admin/includes/file.php:525`) and again after its rollback (`:638`).
+ *
+ * ONE MUTATION THIS TEST CANNOT SEE, and it is asserted elsewhere rather than left implicit:
+ * dropping `$force = true`. With `opcache.validate_timestamps=1` - what both Local sites and
+ * the CI container run - `opcache_invalidate($p, false)` returns true whether or not it
+ * marked anything, so the count, the md5, the ordering and the boolean are all unchanged by
+ * the drop. No host can be asked that question, so it is asserted against the SOURCE in
+ * `tests/unit/OpcacheForceArgumentTest.php`, which reads every real call in the plugin with
+ * `token_get_all()` and requires a literal `true`.
  *
  * WHY THIS IS NOT A CODE REVIEW. The claim "the call is made" cannot be read off the
  * source with any confidence, because the function lives in `wp-admin/includes/file.php`,

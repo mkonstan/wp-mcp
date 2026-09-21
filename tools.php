@@ -346,11 +346,12 @@ function wpmcp_php_parse_ok($code) {
 /**
  * Tell the opcode cache that a PHP file on disk is not what it has compiled.
  *
- * A WRITE IS NOT FINISHED UNTIL THE OPCODE CACHE IS TOLD. On a host running
- * `opcache.validate_timestamps=0` - every tuned production host, and the default of
- * several managed WordPress platforms - PHP never stats a file it has already compiled.
- * code-write answered `bytes: 4096` and the site went on executing the OLD functions.php
- * until the pool was restarted. Every tool here that changes a compiled file therefore
+ * A WRITE IS NOT FINISHED UNTIL THE OPCODE CACHE IS TOLD. The measurable condition is
+ * `opcache.validate_timestamps=0`, where PHP never stats a file it has already compiled,
+ * or a raised `opcache.revalidate_freq`, where it stats it no more often than that - at
+ * `revalidate_freq=60` the old bytes run for up to a minute, which is the same defect with
+ * a clock on it. code-write answered `bytes: 4096` and the site went on executing the OLD
+ * functions.php until the pool was restarted. Every tool here that changes a compiled file therefore
  * calls this, and core's own theme editor is the pattern: it invalidates after the write
  * (`wp-admin/includes/file.php:525`, after the `fwrite`) AND AGAIN after the rollback
  * (`:638`, after the `file_put_contents` that puts the previous contents back), so a write
@@ -364,11 +365,23 @@ function wpmcp_php_parse_ok($code) {
  * NOTHING HERE DEPENDS ON AN OPCODE CACHE BEING PRESENT. Core's function is already
  * guarded: it returns false, silently, when `opcache_invalidate()` is not defined, when
  * `opcache.restrict_api` excludes the calling script, when the cache is off, and when the
- * path is not a `.php` file (`file.php:2725-2777`). false is not a failure - it is "there
- * was nothing to tell" - so no caller of this treats it as one and no tool result carries
- * it. A result field saying `opcache: false` would be read by an agent as "the change is
- * not live", which is untrue on every host without an opcode cache. The tool's claim stays
- * what it has always been: what it did to the FILE.
+ * path is not a `.php` file (`file.php:2725-2777`).
+ *
+ * BUT FALSE IS TWO DIFFERENT ANSWERS, and the difference matters to an operator. For "no
+ * opcode cache", "the cache is off" and "not a .php file" it means THERE WAS NOTHING TO
+ * TELL, and nothing is wrong. For `opcache.restrict_api` excluding the REST front
+ * controller, and for a site whose `wp_opcache_invalidate_file` filter returns false, THERE
+ * IS A CACHE AND IT WAS NOT TOLD: the bytes are on disk and the old code can keep running,
+ * which is the pre-fix symptom exactly. A third case answers TRUE and is still not enough -
+ * a PHP pool spread over more than one node on a shared filesystem, where the write lands
+ * everywhere and the invalidation lands only on the node that served the request.
+ *
+ * NONE OF THAT GOES IN THE RESULT. false is not a failure, so no caller treats it as one,
+ * and a field saying `opcache: false` would be read by an agent as "the change is not
+ * live" - untrue on every host without a cache, which is most of them. The tool's claim
+ * stays what it has always been: what it did to the FILE. The three cases above are
+ * documented in the README and the CHANGELOG, where an operator can be told which setting
+ * to look at; an agent cannot act on them and must not be handed them as a boolean.
  *
  * THE EXTENSION TEST IS CORE'S, spelled here so five call sites do not each have to make
  * it. `.php` is the only member of wpmcp_code_allowed_ext() that PHP compiles.
@@ -3971,6 +3984,20 @@ function wpmcp_code_tools() {
             //
             // If the unlink below then fails, the cache has been told about a file that
             // did not change - which costs one recompile and nothing else.
+            //
+            // THERE IS A RACE HERE THAT THIS API CANNOT CLOSE, AND IT IS NOT A REASON TO
+            // MOVE THE CALL BACK DOWN. Between this line and the unlink, a CONCURRENT
+            // request that includes this file recompiles it - the file is still on disk -
+            // into a fresh, valid entry. The unlink then removes the file, and on a
+            // `validate_timestamps=0` host that entry serves a file that is not there
+            // until the pool restarts, because no `opcache_invalidate()` can reach a path
+            // that no longer resolves. The window is two adjacent statements wide and
+            // needs a concurrent include of that exact file inside it.
+            //
+            // Invalidating AFTER the unlink instead does not close it - it makes it
+            // certain, for every delete, concurrent or not. Only `opcache_reset()` or a
+            // pool restart clears the entry once the file is gone, and neither is a thing
+            // a tool call may do to a site. So: before, knowingly.
             wpmcp_opcache_invalidate($r['abs']);
 
             // UNLINKED, not renamed. The rename left the whole file, readable, one
