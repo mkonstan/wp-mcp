@@ -4,7 +4,7 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.0
 
-**Unreleased.** The auth surface, rebuilt around what hosted MCP clients actually do.
+**Released 2026-09-21.** The auth surface, rebuilt around what hosted MCP clients actually do.
 Three breaking changes, all in how a token is presented and how long it lives. The protocol
 negotiation and the wire format are untouched. The tools grew, and some of their results
 changed shape so that what they return is true and can be written back: every such change
