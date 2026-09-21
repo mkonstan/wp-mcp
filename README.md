@@ -776,6 +776,20 @@ The file API is fenced:
   `{prefix}wpmcp_file_versions`. If they cannot be stored, the change does not happen.
 - PHP is parse-checked after every write and reverted automatically on a syntax error, so
   a broken edit does not stick. The revert writes back the bytes that were just versioned.
+- **The opcode cache is told, so the change is live when the tool returns.** Every write,
+  revert, restore and delete of a `.php` file calls WordPress's own
+  `wp_opcache_invalidate()` - after the write, and again after a revert, exactly where
+  core's theme editor calls it. Without that, a host running
+  `opcache.validate_timestamps=0` (every tuned production host) keeps executing the file it
+  compiled earlier: the tool reports the bytes it wrote and the site does not change until
+  the PHP pool restarts. A delete invalidates just *before* removing the file, because PHP
+  resolves the path on disk before it looks in the cache.
+
+  On a host with no opcode cache there is nothing to tell and nothing happens - core's
+  function says so by returning false, which is not an error. **No result field reports it**:
+  a `false` there would read as "the change is not live", which would be untrue on exactly
+  the hosts that never had the problem. What a code tool tells you is what it did to the
+  file.
 
 ### Versions, history and restore
 

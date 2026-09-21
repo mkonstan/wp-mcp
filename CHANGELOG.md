@@ -162,6 +162,40 @@ marked (shape).**
   plugin then reports a build it is not running. Nothing git or the recipes do can produce
   that. README and `docs/RELEASE.md` both say so.
 
+### Fixed: a theme-file change now reaches the opcode cache, so the site really runs what you wrote
+
+- **`code-write`, `code-restore` and `code-delete` changed a PHP file and never told PHP's
+  opcode cache.** On a host running `opcache.validate_timestamps=0` - every tuned
+  production host, and the default of several managed WordPress platforms - PHP does not
+  stat a file it has already compiled. So before this fix, on such a host: `code-write`
+  answered `bytes: 4096` and your site went on running the OLD `functions.php` until the
+  PHP pool was restarted; a write reverted for a syntax error could leave the *rejected*
+  bytes compiled and running while the tool reported `reverted: true`; and a file
+  `code-delete` removed could keep executing with nothing on disk to explain it. Nothing in
+  the result said so, because as far as the file was concerned everything had worked. If you
+  have used these tools on such a host and a change appeared not to take effect, that is
+  what happened - and a PHP-FPM or web-server restart was the workaround.
+- **Every path in the plugin that changes a file PHP compiles now calls
+  `wp_opcache_invalidate()`**, which is WordPress core's own function (since 5.5, this
+  plugin's floor) and exactly what core's built-in theme editor calls. Following core, the
+  call is made after a write **and again after a rollback**, so a reverted write does not
+  leave the reverted bytes cached. `code-delete` is the one that invalidates *before* its
+  unlink rather than after: PHP resolves the path on disk before it looks in the cache, so
+  once the file is gone there is nothing left to drop - measured, not assumed.
+- **Nothing behaves differently on a host with no opcode cache, which is most of them.**
+  Core's function already returns false, silently, when there is no cache, when the host
+  restricts the API, or when the file is not a `.php` file at all. That is "there was
+  nothing to tell", not a failure, and it is why **no tool result gained a field about the
+  cache**: `opcache: false` would read to a client as "the change is not live", which would
+  be untrue on every host without one. What the tools claim is unchanged - what they did to
+  the file.
+- Also covered: the empty `index.php` the plugin writes into `wp-content/wpmcp/`, and the
+  same file when Delete removes it. The 1.0.x backup sweep needs nothing - what it deletes
+  is a `.bak`, which PHP does not compile.
+- Found by reading core's theme editor beside ours, and proved on both test sites by a
+  test that reads the file from disk at the instant the call is made - so the *order* is
+  measured rather than inferred from the source.
+
 ### Fixed: two sentences in `update-post` that described the opposite of what it does
 
 - **"Only the fields you send change" was false for a draft nobody dated.** WordPress
