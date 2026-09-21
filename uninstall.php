@@ -34,6 +34,8 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
  * wpmcp_trace_log_unwritable set when a trace went to error_log() instead
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
+ * wpmcp_sql_enabled         the sql-select switch
+ * wpmcp_meta_keys           the post meta keys the meta tools may read and write
  */
 $wpmcp_options = array(
     'wpmcp_db_ver',
@@ -42,6 +44,8 @@ $wpmcp_options = array(
     'wpmcp_trace_log_unwritable',
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
+    'wpmcp_sql_enabled',
+    'wpmcp_meta_keys',
 );
 
 /** Every transient. Deleted through the API, because an object cache holds them too. */
@@ -63,14 +67,20 @@ function wpmcp_uninstall_site(array $options, array $transients) {
     foreach ($options as $option) { delete_option($option); }
     foreach ($transients as $transient) { delete_transient($transient); }
 
-    // The table name is built the same way wpmcp_install() builds it: $wpdb->prefix plus
-    // the bare name. On multisite $wpdb->prefix is the CURRENT site's prefix, which is why
-    // this runs inside the per-site loop below.
-    $table = $wpdb->prefix . 'wpmcp_tokens';
+    // The table names are built the same way wpmcp_install() builds them: $wpdb->prefix
+    // plus the bare name. On multisite $wpdb->prefix is the CURRENT site's prefix, which
+    // is why this runs inside the per-site loop below.
+    //
+    // BOTH TABLES. wpmcp_file_versions holds the previous contents of theme files the
+    // code tools changed - up to half a megabyte per row - so a plugin that left it
+    // behind would leave the largest thing it ever wrote.
+    foreach (array('wpmcp_tokens', 'wpmcp_file_versions') as $bare) {
+        $table = $wpdb->prefix . $bare;
 
-    // Interpolated rather than prepared: DROP TABLE takes no placeholders, and the only
-    // variable part is a prefix WordPress itself set.
-    $wpdb->query("DROP TABLE IF EXISTS `{$table}`"); // phpcs:ignore
+        // Interpolated rather than prepared: DROP TABLE takes no placeholders, and the
+        // only variable part is a prefix WordPress itself set.
+        $wpdb->query("DROP TABLE IF EXISTS `{$table}`"); // phpcs:ignore
+    }
 }
 
 /** Remove the trace log directory and everything the plugin put in it. */
@@ -86,7 +96,23 @@ function wpmcp_uninstall_trace_dir() {
 
     foreach (glob($dir . '/trace-*.log') as $log) { $known[] = $log; }
 
+    // wp-admin/includes/file.php is loaded when the Plugins screen deletes a plugin, and
+    // is not when WP-CLI does; either way this is the one file here PHP compiles, and a
+    // delete is a change to it. The guard is spelled out rather than calling
+    // wpmcp_opcache_invalidate(): nothing from the plugin is loaded in this request (see
+    // the header), which is the same reason every option name above is a literal.
+    if (!function_exists('wp_opcache_invalidate') && is_readable(ABSPATH . 'wp-admin/includes/file.php')) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+
     foreach ($known as $file) {
+        // BEFORE the unlink, for the reason code-delete gives: opcache_invalidate()
+        // resolves the path on disk first, so after the unlink it answers false and the
+        // entry for the deleted path survives.
+        if (str_ends_with($file, '.php') && function_exists('wp_opcache_invalidate')) {
+            wp_opcache_invalidate($file, true);
+        }
+
         if (is_file($file)) { @unlink($file); }
     }
 

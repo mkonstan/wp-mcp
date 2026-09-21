@@ -4,9 +4,12 @@
  *
  * WP MCP - DIY MCP-over-HTTP endpoint.
  *
- * Routes:
- *   POST /wp-json/wpmcp/mcp/{token}   (token in the path)
- *   POST /wp-json/wpmcp/mcp           (token in Authorization: Bearer header)
+ * Route:
+ *   POST /wp-json/wpmcp/mcp           - ONE URL, and the credential is the
+ *   `Authorization: Bearer <64 lower-case hex>` header and nothing else. A URL that
+ *   carries a token is written into every access log, proxy log and browser history it
+ *   passes through, and a hosted connector re-uses it for months; so there is no such
+ *   URL any more and a path with a token in it is a plain REST 404.
  * Speaks minimal MCP JSON-RPC 2.0: initialize, notifications/initialized,
  * tools/list, tools/call, ping. Single JSON response per request (no SSE).
  * Handshake: `initialize` echoes a supported protocolVersion and otherwise answers with
@@ -16,7 +19,9 @@
  * Transport: HTTPS required, Origin checked against the site's own, POST must be
  *   application/json. All three before the token is read - see wpmcp_authorize(),
  *   whose docblock states the full order of the gates.
- * Auth: the token is validated per request (shape, lookup, user, expiry, TOFU IP).
+ * Auth: the token is validated per request (shape, lookup, user, expiry). It is NOT
+ *   bound to a client address: an Anthropic-hosted connector calls from a pool of
+ *   egress addresses, so there is no single address to hold it to.
  *   Every failure is ONE byte-identical 401; the reason is in the auth event.
  * Identity: the request runs as the WordPress user the token was minted for.
  * Scope: 'read' tokens are refused any tool flagged write=true.
@@ -55,17 +60,19 @@ add_action('rest_api_init', function () {
         'callback'            => 'wpmcp_handle',
         'permission_callback' => 'wpmcp_authorize',
     );
-    // Token in the URL path: convenient, but the path lands in server access logs.
-    register_rest_route('wpmcp', '/mcp/(?P<token>[a-f0-9]{64})', $route);
-    // Token in an Authorization: Bearer header against a constant URL: kept out of logs.
+    // ONE route, at a constant URL. The credential is the Authorization header and
+    // nothing else - see wpmcp_extract_token(). A route whose path carried the token
+    // used to be registered here alongside it; it is gone, because the path form put the
+    // credential into every log on the way and a hosted connector cannot be handed a new
+    // URL without being deleted and re-added.
     register_rest_route('wpmcp', '/mcp', $route);
 });
 
 /* ---------------- the verb gate ---------------- */
 
-/** Is this REST route one of ours? Both forms, token or no token. */
+/** Is this REST route ours? There is exactly one. */
 function wpmcp_is_our_route($route) {
-    return (bool) preg_match('#^/wpmcp/mcp(/[a-f0-9]{64})?$#', (string) $route);
+    return (string) $route === '/wpmcp/mcp';
 }
 
 /**
@@ -128,23 +135,34 @@ function wpmcp_gate_request_method($result, $server, $request) {
     return $response;
 }
 
-/** The JSON-RPC method on this request (read from the POST body), or '' if none. */
-function wpmcp_request_method(WP_REST_Request $req) {
-    $b = json_decode($req->get_body(), true);
-    return (is_array($b) && isset($b['method'])) ? (string) $b['method'] : '';
-}
-
 /**
- * Token from either the URL path segment or an "Authorization: Bearer <token>"
- * header. Path wins if both are present. Empty string if neither (-> dormant 401).
+ * The token from `Authorization: Bearer <token>`, and from nowhere else. Empty string
+ * when there is none, which is the dormant 401 with reason=missing.
+ *
+ * THE APACHE CGI CASE IS CORE'S, NOT OURS - and this function briefly carried a copy of
+ * core's answer to it, which was dead code. PHP run as CGI or FastCGI never receives the
+ * `Authorization` header (Apache consumes it for its own auth machinery and does not
+ * export it), so $_SERVER['HTTP_AUTHORIZATION'] is absent; WordPress's own .htaccess
+ * block re-exports the value as REDIRECT_HTTP_AUTHORIZATION, and
+ * `WP_REST_Server::get_headers()` maps that back onto AUTHORIZATION when, and only when,
+ * HTTP_AUTHORIZATION is empty (wp-includes/rest-api/class-wp-rest-server.php - verified
+ * on WP 7.0 and 7.1). So `get_header('authorization')` is already correct on such a host
+ * and a second read here could never fire.
+ *
+ * That matters for where somebody debugs: if a real Apache box answers reason=missing,
+ * the thing to check is the .htaccess block, not this function.
+ *
+ * The scheme is matched case-insensitively - RFC 7235 says it is - and only `Bearer`.
+ * A `Basic <base64>` with its first seven characters cut off is not a credential and
+ * has no business reaching a database lookup.
  */
 function wpmcp_extract_token(WP_REST_Request $req) {
-    $tok = (string) $req['token'];
-    if ($tok !== '') { return $tok; }
     $auth = (string) $req->get_header('authorization');
+
     if ($auth !== '' && stripos($auth, 'bearer ') === 0) {
         return trim(substr($auth, 7));
     }
+
     return '';
 }
 
@@ -292,21 +310,29 @@ function wpmcp_unauthorized() {
  *   2. Origin           present and not ours -> 403; absent -> allowed (non-browser)
  *   3. Content-Type     not application/json -> 415
  *   3b. body size       CONTENT_LENGTH > WPMCP_MAX_BODY                -> 413
- *   4. token shape      64 lower-case hex, from the path or Bearer -> 401
+ *   4. token shape      64 lower-case hex, from Authorization: Bearer -> 401
  *   5. token lookup     by SHA-256 hash                            -> 401
  *   6. user exists      get_userdata(user_id)                      -> 401
- *   7. expiry           expires_at <= now                          -> 401
- *   8. IP pin           bound_ip set and different                 -> 401
- *      ... then the pin is CREATED here, for a tools/call on an unbound token
- *   9. scope            enforced at dispatch, in wpmcp_handle()
- *  10. protocol version enforced at dispatch, in wpmcp_dispatch()
+ *   7. lifetime timers  window closed -> 401 (dormant); past the hard
+ *                       end -> 401 (dead). Same 401 either way.     -> 401
+ *   8. scope            enforced at dispatch, in wpmcp_handle()
+ *   9. protocol version enforced at dispatch, in wpmcp_dispatch()
+ *
+ * THERE IS NO ADDRESS GATE, and its absence is a decision rather than an omission. A
+ * token used to lock to the address of its first tool call and be refused from anywhere
+ * else. Measured on a public test site on 2026-09-13, an Anthropic-hosted connector
+ * (claude.ai, Claude Desktop) calls from a POOL - 160.79.106.164, .185, .186 and .187
+ * inside one minute - so that lock held the token to whichever came first and refused
+ * the rest of the session. There is no single address to hold a token to, so none is
+ * used; the caller's address is still recorded on every auth event, where it informs an
+ * operator without deciding anything.
  *
  * WHY THIS ORDER. 1-3 are properties of the envelope and cost nothing, so they run
  * before the credential is even read: a request refused for being plaintext must not
  * first have its token looked up in the database, or the refusal becomes a token
- * oracle with a timing side channel. 4-8 narrow from "is this string even a token" to
- * "is it this token, still alive, from the right place", cheapest first and each one a
- * precondition of the next. 6 precedes 7 so a dead token's row is not even touched.
+ * oracle with a timing side channel. 4-7 narrow from "is this string even a token" to
+ * "is it this token, and is it still alive", cheapest first and each one a precondition
+ * of the next. 6 precedes 7 so a dead token's row is not even touched.
  *
  * 3b IS A CAP ON WORK, NOT ON MEMORY, and the difference matters. By the time any of
  * this runs, WordPress core has already read the whole body and json_decode'd it - see
@@ -318,8 +344,8 @@ function wpmcp_unauthorized() {
  * a measurement, which is fine in this direction: a client that understates it gets its
  * body truncated by the server instead.
  *
- * THIS PLUGIN READS NO PART OF THE REQUEST BODY BEFORE 8 - but WordPress does, and the
- * earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
+ * THIS PLUGIN READS NO PART OF THE REQUEST BODY AT ALL in this function - but WordPress
+ * does, and an earlier version of this comment claimed otherwise. `WP_REST_Server::dispatch()` calls
  * `$request->has_valid_params()`, which calls `parse_json_params()` for any
  * application/json body, and only then does `respond_to_request()` reach the
  * permission_callback. So a malformed body is answered by core with 400
@@ -328,20 +354,21 @@ function wpmcp_unauthorized() {
  * That refusal leaks nothing about the token - core never looks at one - but it is not
  * this function's refusal and it is not in this order.
  *
- * What this function changed is the plugin's own read: the TOFU pin needs to know whether
- * this is a tools/call, so wpmcp_request_method() used to json_decode() the body at the
- * TOP of the callback, on every request, valid token or not. It now runs after gate 8.
+ * The plugin's own read of the body is gone from this function entirely. It existed for
+ * one reason - the address pin needed to know whether the request was a tools/call, so a
+ * helper json_decode'd the body on every request, valid token or not - and the pin is
+ * gone with it.
  *
- * 9 AND 10 ARE THE GATES NOT IN THIS FUNCTION, and deliberately - both need the parsed
+ * 8 AND 9 ARE THE GATES NOT IN THIS FUNCTION, and deliberately - both need the parsed
  * body, so neither can run here without reading it, which is the thing this ordering was
  * rearranged to avoid.
  *
- * 9, scope: the decision needs the tool name, which only exists once the body is parsed,
+ * 8, scope: the decision needs the tool name, which only exists once the body is parsed,
  * and its refusal is an MCP tool error (200 with isError) rather than an HTTP status,
  * because a read token calling a write tool is a correctly authenticated request asking
  * for something it may not have. It fires the scope_deny event from wpmcp_handle().
  *
- * 10, MCP-Protocol-Version: the gate needs to know whether the method is `initialize`,
+ * 9, MCP-Protocol-Version: the gate needs to know whether the method is `initialize`,
  * which is exempt, and its refusal is a JSON-RPC -32600 body on HTTP 400 - a shape this
  * function cannot produce at all, since a permission_callback's WP_Error becomes WP's own
  * `{"code","message","data"}` REST error and never a JSON-RPC envelope. That is what
@@ -434,18 +461,11 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
         );
     }
 
-    // 4-8.
+    // 4-7.
     $row = wpmcp_validate(wpmcp_extract_token($req), $ip);
     if (is_wp_error($row)) {
         // The reason is already in the validate_fail event. One answer on the wire.
         return wpmcp_unauthorized();
-    }
-
-    // The TOFU pin, now that the token has passed: only a tool call creates it, so
-    // discovery and the handshake can happen from anywhere. This is the first thing
-    // on the request path that looks at the body.
-    if (wpmcp_request_method($req) === 'tools/call') {
-        wpmcp_bind_token_ip($row, $ip);
     }
 
     // Identity: run as the user the token was minted for, so every capability check
@@ -514,19 +534,58 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         mean to extend a tool, but it cannot do it by overwriting the
  *                         entry whose `write` flag is the gate.
  *
- * The built-in tools all carry `'write' => true|false` explicitly - 20 of them, one
+ * The built-in tools all carry `'write' => true|false` explicitly - 25 of them, one
  * per entry - so the checks apply uniformly rather than trusting "ours" over "theirs".
  * If a future built-in forgets the key it disappears from the listing and the log says
  * so, which is the loud failure.
  */
 function wpmcp_tools() {
     $tools = array();
-    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools') as $fn) {
+    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_revision_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools', 'wpmcp_menu_tools', 'wpmcp_inventory_tools') as $fn) {
         if (function_exists($fn)) { $tools = array_merge($tools, $fn()); }
     }
-    // Code tools are exposed only when explicitly enabled in Settings > WP MCP.
-    if (function_exists('wpmcp_code_tools') && function_exists('wpmcp_code_enabled') && wpmcp_code_enabled()) {
+    // Code tools are exposed only when the switch in Settings > WP MCP is on AND the site
+    // does not forbid file editing outright. BOTH, because a tool that can never run must
+    // not be listed: on a site with the switch on and DISALLOW_FILE_EDIT true in
+    // wp-config, tools/list advertised all six and every one of them then refused.
+    // Measured on a real public site. wpmcp_code_constants_forbid() is the same check the
+    // run closures make through wpmcp_code_forbidden(), which is why it is a function and
+    // not two more `defined()` calls here - two copies of a gate drift.
+    if (function_exists('wpmcp_code_tools')
+        && function_exists('wpmcp_code_enabled')
+        && function_exists('wpmcp_code_constants_forbid')
+        && wpmcp_code_enabled()
+        && !wpmcp_code_constants_forbid()) {
         $tools = array_merge($tools, wpmcp_code_tools());
+    }
+
+    // sql-select is exposed only when its own switch in Settings > WP MCP is on, and the
+    // same rule applies for the same reason: a tool that cannot run must not be listed.
+    // There is no second condition here because there is no site-wide constant that
+    // forbids reading the database - the switch is the whole gate, plus admin scope,
+    // which endpoint.php applies to every `write` tool.
+    //
+    // WITH THE SWITCH OFF THE TOOL DOES NOT EXIST. It is absent from tools/list, and
+    // tools/call answers the SAME -32602 "Unknown tool: sql-select" it answers for a name
+    // nobody ever registered - because that refusal comes from this registry being the
+    // only place a tool name is looked up. A distinct "it exists but is disabled" would
+    // tell an unauthorised caller a fact about this site's configuration for free.
+    if (function_exists('wpmcp_sql_tools')
+        && function_exists('wpmcp_sql_enabled')
+        && wpmcp_sql_enabled()) {
+        $tools = array_merge($tools, wpmcp_sql_tools());
+    }
+
+    // The post-meta tools are exposed only when the operator has declared at least one
+    // meta key in Settings > WP MCP, and the rule is the third instance of the same one:
+    // a tool that cannot run must not be listed. With an empty allow-list every
+    // get-post-meta and set-post-meta call is refused by definition, so on a bare site -
+    // which is what this plugin is built toward - the pair simply does not exist, and
+    // calling either by name answers the "Unknown tool" -32602 an unregistered name gets.
+    if (function_exists('wpmcp_meta_tools')
+        && function_exists('wpmcp_meta_enabled')
+        && wpmcp_meta_enabled()) {
+        $tools = array_merge($tools, wpmcp_meta_tools());
     }
 
     // What the plugin itself registered, to compare the filter's output against.
@@ -839,12 +898,39 @@ function wpmcp_negotiated_protocol_version($params) {
 }
 
 /**
+ * `serverInfo`: who is answering, which version, and which BUILD of it.
+ *
+ * NAME AND VERSION STAY EXACTLY WHAT THE SPEC ASKS FOR. `name` is an identifier and
+ * `version` a clean semantic version, because a client may display or compare them and
+ * MCP's Implementation object says so. The build is a THIRD key beside them, never a
+ * suffix on the version: the spec's objects carry keys a client does not know through
+ * untouched, so a client that ignores `build` is unaffected, and a client that wants to
+ * report which build a site is running has it without a tool call.
+ *
+ * `source` here means the site is running the plugin out of a git checkout rather than
+ * from a built zip. See wpmcp_build_label().
+ *
+ * @return array{name:string,version:string,build:string}
+ */
+function wpmcp_server_info() {
+    return array(
+        'name'    => 'wp-mcp',
+        'version' => WPMCP_VER,
+        'build'   => wpmcp_build_label(),
+    );
+}
+
+/**
  * What this server tells a client it is, once, at the handshake.
  *
  * THREE FACTS, AND THEY ARE THE THREE THAT CHANGE WHAT AN AGENT DOES. Not a feature
  * list: an agent that knows its reach is one WordPress user's stops treating a refusal as
  * a bug to retry, and an agent that knows write tools need a different token stops
  * looking for the write tool it cannot see. Everything else it can learn from tools/list.
+ *
+ * The last clause is the one corollary of the third fact a caller gets wrong (sprint 14d):
+ * a read-scope token is not a privacy boundary. It reads everything its user can, which for
+ * an administrator includes every user's email. The mint form says the same to the operator.
  */
 function wpmcp_server_instructions() {
     return 'This is a WordPress site exposed as MCP tools: posts, pages, taxonomies,'
@@ -855,7 +941,8 @@ function wpmcp_server_instructions() {
         . " refusal is usually that ceiling, not a malformed call.\n"
         . 'Tools that write - create, update, delete, upload - need an admin-scope token.'
         . ' With a read-scope token they are not listed at all, so the tool list you get'
-        . ' is already what this token may do.';
+        . " is already what this token may do. Scope gates writing only: a read-scope token"
+        . " reads everything its user can.";
 }
 
 /**
@@ -1035,7 +1122,7 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             return wpmcp_rpc_ok($id, array(
                 'protocolVersion' => wpmcp_negotiated_protocol_version($params),
                 'capabilities'    => wpmcp_objectify_object_map(array('tools' => array())),
-                'serverInfo'      => array('name' => 'wp-mcp', 'version' => WPMCP_VER),
+                'serverInfo'      => wpmcp_server_info(),
                 'instructions'    => wpmcp_server_instructions(),
             ));
 
@@ -1100,7 +1187,7 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             if (!isset($tools[$name])) {
                 return wpmcp_rpc_err($id, -32602, 'Unknown tool: ' . $name);
             }
-            // Scope gate - gate 9 of wpmcp_authorize()'s sequence, enforced here
+            // Scope gate - gate 8 of wpmcp_authorize()'s sequence, enforced here
             // because it is the first point at which the tool name exists.
             $session = $GLOBALS['wpmcp_session'];
             if (!empty($tools[$name]['write']) && (!$session || $session->scope !== 'admin')) {

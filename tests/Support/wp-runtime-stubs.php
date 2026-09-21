@@ -30,11 +30,31 @@
  * ADDED FOR SPRINT 2 (auth events). wpmcp_mint() now fires one, which reaches
  * do_action through wpmcp_auth_event() and apply_filters through wpmcp_client_ip().
  * do_action RECORDS rather than ignoring, because "the event fired" is the claim.
+ *
+ * ADDED FOR SPRINT 8 ROUND 2 (the path jail). wpmcp_code_resolve() is the first plugin
+ * function a unit test drives against the FILESYSTEM, and it needs exactly two more
+ * things: get_stylesheet_directory() to say where the jail is, and get_option() for the
+ * denylist. Both are backed by $GLOBALS['wpmcp_test_wp'] like everything else here, and
+ * a unit test points the first at a scratch directory it built itself - which is what
+ * lets "a denied directory reached through ./ is still denied" be a two-millisecond
+ * assertion over the real function rather than a live-site probe.
+ *
+ *   options          array<string, mixed>  what get_option() returns, by name
+ *   stylesheet_dir   string                what get_stylesheet_directory() returns
+ *   stylesheet       string                what get_stylesheet() returns
  */
 
 if (!isset($GLOBALS['wpmcp_test_wp'])) {
     $GLOBALS['wpmcp_test_wp'] = array('current_user_id' => 0, 'users' => array(), 'caps' => array(), 'actions' => array());
 }
+
+// ADDED FOR SPRINT 9. `$wpdb->get_results($sql, ARRAY_N)` is the first call in this
+// plugin to name one of wpdb's output constants, and without it the call raises an
+// "Undefined constant" Error that sql-select's own catch swallows into a trace - so the
+// unit tier reported every green path as a server failure. Core defines it in
+// wp-includes/wp-db.php; the value is core's.
+if (!defined('ARRAY_N')) { define('ARRAY_N', 'ARRAY_N'); }
+if (!defined('ARRAY_A')) { define('ARRAY_A', 'ARRAY_A'); }
 
 if (!class_exists('WP_Error')) {
     /**
@@ -138,13 +158,29 @@ if (!function_exists('current_user_can')) {
 
 if (!function_exists('apply_filters')) {
     /**
-     * No filters are registered in the unit tier, so this returns the value unchanged
-     * - which is what real WordPress does with no callbacks attached. Reached from
-     * wpmcp_client_ip() (the wpmcp_client_ip filter) via wpmcp_auth_event().
+     * Returns the value unchanged unless a test attached a callback to $hook through
+     * WordPressRuntime::addFilter() - which is what real WordPress does with no
+     * callbacks attached. Reached from wpmcp_client_ip() (the wpmcp_client_ip filter)
+     * via wpmcp_auth_event(), and since sprint 14b from wpmcp_is_local_environment().
      */
     function apply_filters($hook, $value, ...$args)
     {
-        return $value;
+        $callback = $GLOBALS['wpmcp_test_wp']['filters'][$hook] ?? null;
+
+        return $callback === null ? $value : $callback($value, ...$args);
+    }
+}
+
+if (!function_exists('wp_get_environment_type')) {
+    /**
+     * ADDED FOR SPRINT 14B. The window cap depends on it. Real WordPress caches its
+     * answer for the process; this one reads the global each time, which is what lets a
+     * unit test put both branches under the same loaded plugin. Defaults to
+     * 'production', core's answer when nothing is configured.
+     */
+    function wp_get_environment_type()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['environment'] ?? 'production');
     }
 }
 
@@ -184,5 +220,72 @@ if (!function_exists('sanitize_text_field')) {
     function sanitize_text_field($str)
     {
         return trim(strip_tags((string) $str));
+    }
+}
+
+if (!function_exists('get_option')) {
+    /**
+     * Only what the test set, and the caller's default otherwise. Deliberately NOT a
+     * store that remembers writes: nothing in the unit tier calls update_option, and a
+     * stub that pretended to persist would make a test of the real option pass without
+     * one.
+     */
+    function get_option($option, $default = false)
+    {
+        $options = $GLOBALS['wpmcp_test_wp']['options'] ?? array();
+
+        return array_key_exists($option, $options) ? $options[$option] : $default;
+    }
+}
+
+if (!function_exists('get_stylesheet_directory')) {
+    /** The jail's root. A unit test points it at a scratch directory it built. */
+    function get_stylesheet_directory()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['stylesheet_dir'] ?? '');
+    }
+}
+
+if (!function_exists('get_stylesheet')) {
+    /** The active theme's slug, which sprint 8 writes into every version row. */
+    function get_stylesheet()
+    {
+        return (string) ($GLOBALS['wpmcp_test_wp']['stylesheet'] ?? '');
+    }
+}
+
+/**
+ * ADDED FOR SPRINT 7 (header-only credential). wpmcp_extract_token() type-hints
+ * WP_REST_Request and reads exactly one thing from it - the `authorization` header.
+ * PHP resolves the hint at CALL time, so this class only has to exist for a unit
+ * test to hand the function something; it is not a WordPress stand-in and is
+ * deliberately not growing past what is read.
+ */
+if (!class_exists('WP_REST_Request')) {
+    class WP_REST_Request
+    {
+        /** @var array<string, string> header name (lower case) => value */
+        private $headers = array();
+
+        /** @param array<string, string> $headers */
+        public function __construct($headers = array())
+        {
+            foreach ((array) $headers as $name => $value) {
+                $this->headers[strtolower((string) $name)] = (string) $value;
+            }
+        }
+
+        /** Real WP_REST_Request returns null for a header it does not have. */
+        public function get_header($name)
+        {
+            $name = strtolower((string) $name);
+
+            return isset($this->headers[$name]) ? $this->headers[$name] : null;
+        }
+
+        public function get_body()
+        {
+            return '';
+        }
     }
 }

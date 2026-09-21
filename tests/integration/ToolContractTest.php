@@ -13,7 +13,7 @@
  *   - `create-post` with a key nobody declared must leave no post behind. Same claim,
  *     against a real built-in and a real database.
  *
- * AND THE REGRESSION GATE IS NOT IN THIS FILE. "All 20 tools still pass their existing
+ * AND THE REGRESSION GATE IS NOT IN THIS FILE. "All 23 tools still pass their existing
  * Sprint 1-4 tests under the validator" is asserted by those tests continuing to be
  * green, which is the whole point of running the suite rather than this group alone.
  *
@@ -324,7 +324,7 @@ final class ToolContractTest extends FixtureIntegrationTestCase
      *
      * THERE IS NO SECOND PAGE TODAY - the page size is larger than the surface on purpose,
      * so `nextCursor` is absent and that absence is asserted rather than assumed. What is
-     * being pinned is that the parameter is READ: a server that ignores `cursor` silently
+     * being asserted is that the parameter is READ: a server that ignores `cursor` silently
      * re-serves page one forever, and a client paginating against it never terminates.
      *
      * @group sprint-5

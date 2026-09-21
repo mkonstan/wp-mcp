@@ -1,0 +1,17 @@
+# WP MCP - the build stamp, written by git, never by hand.
+#
+# .gitattributes marks this file export-subst, so `git archive` replaces the three
+# placeholders below with the commit it is archiving. Every zip built by the recipe in
+# docs/RELEASE.md therefore says which commit it came from, and nobody has to remember
+# to bump anything.
+#
+# In a git checkout the placeholders stay literal, which is what you are looking at now.
+# The plugin reads that as "no build", reports the word `source` on its settings page,
+# on the Plugins screen, in initialize's serverInfo and in site-info, and invents
+# nothing. See wpmcp_build_stamp_parse() in wp-mcp.php.
+#
+# The plugin's Version:, WPMCP_VER and serverInfo.version are NOT touched by any of
+# this: they stay a clean semantic version on every build. docs/RELEASE.md says why.
+commit=$Format:%H$
+short=$Format:%h$
+date=$Format:%cI$

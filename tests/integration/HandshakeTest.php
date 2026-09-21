@@ -136,7 +136,7 @@ final class HandshakeTest extends FixtureIntegrationTestCase
     /**
      * `capabilities` is EXACTLY `{"tools":{}}` - asserted on the raw bytes.
      *
-     * Two things are being pinned. That `tools` serializes as an OBJECT: json_decode turns
+     * Two things are being nailed down here. That `tools` serializes as an OBJECT: json_decode turns
      * `[]` and `{}` into the same PHP array, so a decoded assertion cannot see the bug at
      * all. And that nothing else is claimed: no `listChanged` (this server cannot notify),
      * no `prompts`, `resources` or `logging` (it serves none). A capability the server does

@@ -118,7 +118,12 @@ echo "smoke: expecting the tool to report site name '${BLOGNAME}' and WordPress 
 # A READ-SCOPE token, minted for user 1 exactly as Settings > WP MCP would. Read scope is
 # the point: this gate is about the handshake and the tool surface, and a write token would
 # put a destructive tool in a live agent's hands for no extra assurance.
-TOKEN="$(wp eval "\$r = wpmcp_mint('read', '${LABEL}', 900, 1); echo is_wp_error(\$r) ? 'MINT-ERROR: ' . \$r->get_error_message() : \$r['raw'];" --user=1 | tr -d '\r')"
+# A FIFTEEN-MINUTE ACTIVE WINDOW INSIDE A ONE-DAY LIFETIME. The window is what the gate
+# needs - one run takes seconds - and the lifetime is the shortest the model allows, so a
+# token this script somehow fails to revoke is rubbish within the day rather than within
+# the year. The two arguments are the sprint-7 shape: wpmcp_mint(scope, label, window,
+# lifetime, user).
+TOKEN="$(wp eval "\$r = wpmcp_mint('read', '${LABEL}', 900, DAY_IN_SECONDS, 1); echo is_wp_error(\$r) ? 'MINT-ERROR: ' . \$r->get_error_message() : \$r['raw'];" --user=1 | tr -d '\r')"
 
 case "$TOKEN" in
     [0-9a-f][0-9a-f]*) ;;
@@ -130,24 +135,35 @@ if [ ${#TOKEN} -ne 64 ]; then
     exit 1
 fi
 
-echo "smoke: token minted (read scope, 15 min, label ${LABEL})."
+echo "smoke: token minted (read scope, 15 min window, 1 day lifetime, label ${LABEL})."
 
 # ---------------------------------------------------------------- the client's config
 #
-# THE PATH-URL FORM, `/wp-json/wpmcp/mcp/<token>` - the route registered in endpoint.php as
-# `/mcp/(?P<token>[a-f0-9]{64})`. Claude Code could send `Authorization: Bearer` instead
-# (`-H`, or a `headers` key here) and the endpoint accepts both, but the path form is what
-# the GUI clients are stuck with, so it is the form worth exercising.
+# THE HEADER FORM, AND IT IS NOW THE ONLY FORM. The endpoint registers one route, at the
+# constant URL below, and takes the credential from `Authorization: Bearer` and nowhere
+# else. The URL that carried the token in its path is gone - it was written into every
+# access log and proxy log it passed through, and a hosted connector re-sent it for months.
+#
+# So this gate exercises exactly what every real client now does, GUI clients included:
+# claude.ai and Claude Desktop custom connectors have a "Request headers" setting that
+# delivers `authorization: Bearer <token>` intact (measured on a public site, 2026-09-13),
+# and the equivalent by hand is
+#
+#   claude mcp add --transport http wpmcp <url> --header "Authorization: Bearer <token>"
+#
+# A `headers` map in the config file is that same thing for a `--mcp-config` run, which is
+# what this script uses so that nothing global on this machine is touched.
 
 WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t wpmcp-smoke)"
-ENDPOINT="${SITE_URL}/wp-json/wpmcp/mcp/${TOKEN}"
+ENDPOINT="${SITE_URL}/wp-json/wpmcp/mcp"
 
 cat > "${WORKDIR}/.mcp.json" <<JSON
 {
   "mcpServers": {
     "wpmcp": {
       "type": "http",
-      "url": "${ENDPOINT}"
+      "url": "${ENDPOINT}",
+      "headers": { "Authorization": "Bearer ${TOKEN}" }
     }
   }
 }

@@ -68,7 +68,7 @@ final class ToolContractTest extends TestCase
     }
 
     /**
-     * All four hints, on all twenty tools, as real booleans.
+     * All four hints, on every tool in the catalog, as real booleans.
      *
      * @group sprint-5
      */
@@ -168,6 +168,58 @@ final class ToolContractTest extends TestCase
             'code-read'        => [false, true,  false],
             'code-write'       => [true,  false, false],
             'code-delete'      => [true,  true,  false],
+            // Sprint 8. code-history only reads, and reads nothing it could destroy.
+            'code-history'     => [false, true,  false],
+            // code-restore overwrites a theme file with something else, which is the act
+            // code-write performs and carries the same judgement. NOT idempotent for
+            // code-write's reason: the file ends up the same, the history does not - a
+            // second call stores another version of what it replaced.
+            'code-restore'     => [true,  false, false],
+            // Sprint 9. sql-select cannot write - the server refuses it, not a
+            // filter - so it destroys nothing, and running the same SELECT twice
+            // has no additional effect because it has no effect at all. Its
+            // readOnlyHint is false like every other admin-scope tool's, which
+            // testReadOnlyHintIsDerivedFromTheWriteFlag above asserts on its own.
+            'sql-select'       => [false, true,  false],
+            // Sprint 11. get-post-meta reads one post's allow-listed keys and nothing
+            // else. set-post-meta REPLACES the key - every row under it goes and what
+            // was sent is written - which is update-post's judgement for update-post's
+            // reason: destructiveHint: false is MCP's promise that an update is
+            // additive, and replacing three rows with one is not additive. Idempotent
+            // because writing the same value twice leaves the same rows.
+            'get-post-meta'    => [false, true,  false],
+            'set-post-meta'    => [true,  true,  false],
+            // Sprint 12. list-revisions and get-revision only read. restore-revision
+            // REPLACES the post's title, content and excerpt with the revision's - saved
+            // first, so it is undoable, but undoable is not additive, which is
+            // update-post's judgement for update-post's reason. Idempotent because a
+            // second restore of the same revision finds the post already holding it, and
+            // core stores no revision for an unchanged post.
+            'list-revisions'   => [false, true,  false],
+            'get-revision'     => [false, true,  false],
+            'restore-revision' => [true,  true,  false],
+            // Sprint 13. list-menus and get-menu only read. add-menu-item brings a new
+            // item into being and replaces none - it renumbers its siblings' menu_order,
+            // which keeps the order they had - so it is create-post's judgement, and not
+            // idempotent for the same reason: a second call adds a second item.
+            // update-menu-item REPLACES the label, link, target and classes it is sent,
+            // update-post's judgement. remove-menu-item deletes outright; menu items have
+            // no trash.
+            'list-menus'       => [false, true,  false],
+            'get-menu'         => [false, true,  false],
+            'add-menu-item'    => [false, false, false],
+            'update-menu-item' => [true,  true,  false],
+            'remove-menu-item' => [true,  true,  false],
+            // Sprint 14. All five only read: nothing destroyed, the same answer twice, and
+            // no other server reached - list-plugins and list-themes read the update data
+            // as stored and never refresh it. list-plugins and list-themes are admin-scope
+            // readers, so their readOnlyHint is false like code-list's and sql-select's,
+            // which testReadOnlyHintIsDerivedFromTheWriteFlag asserts on its own.
+            'list-users'       => [false, true,  false],
+            'get-user'         => [false, true,  false],
+            'get-option'       => [false, true,  false],
+            'list-plugins'     => [false, true,  false],
+            'list-themes'      => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();
@@ -314,6 +366,82 @@ final class ToolContractTest extends TestCase
     }
 
     /**
+     * EVERY listing query merges wpmcp_list_query_guards(), and this is a GREP on purpose.
+     *
+     * The three arguments in that array are the ones no caller may touch and every listing
+     * query must carry - and two of them are invisible from outside:
+     *
+     *   ignore_sticky_posts  The integration tier proves it, with a stuck fixture: without
+     *                        it a listing filtered only by after/before, status or orderby
+     *                        is a HOME query, and core splices every sticky post into the
+     *                        front of one with post_status => 'publish' and none of the
+     *                        original conditions.
+     *   update_post_meta_cache  NOTHING ELSE CHECKS THIS AT ALL. It is not observable on the
+     *                        wire: the listing returns the same six fields either way. What
+     *                        it changes is that the depth fetch - up to 10,001 rows a query
+     *                        at the page cap - stops priming the postmeta cache for rows
+     *                        whose meta nobody reads, which on a site carrying ACF or SEO
+     *                        meta is the difference between slow and fatal. A behavioural
+     *                        test would have to measure memory; this asserts the argument.
+     *
+     * The grep is what catches the failure the guards exist to prevent: a THIRD listing
+     * query, added later, written without them. A behavioural test would only cover the two
+     * queries that exist today.
+     *
+     * SCOPED TO wpmcp_core_tools(), and the reason is a measurement rather than laziness.
+     * list-media also runs a WP_Query, it also passes no search term by default, and it is
+     * therefore also a home query - but core scopes the sticky fetch to the QUERY'S OWN
+     * post_type (`$post_type = $query_vars['post_type']`, class-wp-query.php:2012, used at
+     * :3612), and list-media asks for `attachment` while a sticky post is a `post`, so the
+     * splice returns nothing there. It must also KEEP the meta cache, because it returns
+     * file URLs and `wp_get_attachment_url()` reads `_wp_attached_file`. Widening this grep
+     * to the whole file would be demanding the wrong thing of it.
+     *
+     * The same scoping is why list-posts is only exposed on `post_type: "post"` - its
+     * default, and so the ordinary call.
+     *
+     * @group sprint-10
+     */
+    public function testEveryListingQueryCarriesTheSharedQueryGuards(): void
+    {
+        $source = file_get_contents(WPMCP_PLUGIN_DIR . '/tools.php');
+
+        self::assertIsString($source, 'tools.php could not be read, so this proves nothing.');
+
+        $start = strpos($source, 'function wpmcp_core_tools()');
+        self::assertNotFalse($start, 'wpmcp_core_tools() is gone from tools.php.');
+
+        $end = strpos($source, "\nfunction wpmcp_content_tools()", $start);
+        self::assertNotFalse($end, 'wpmcp_content_tools() no longer follows wpmcp_core_tools().');
+
+        $source  = substr($source, $start, $end - $start);
+        $queries = preg_match_all('/new WP_Query\(/', $source);
+        $guarded = preg_match_all(
+            '/new WP_Query\(\s*array_merge\(\s*\$filters,\s*wpmcp_list_query_guards\(\)/',
+            $source
+        );
+
+        self::assertSame(2, $queries, 'list-posts is meant to run exactly two queries (KB 0.4).');
+        self::assertSame(
+            $queries,
+            $guarded,
+            "{$queries} WP_Query calls in wpmcp_core_tools(), {$guarded} of them merging"
+            . ' wpmcp_list_query_guards(). A listing query written without the guards is a'
+            . ' listing that answers a date window with posts outside it, and primes the'
+            . ' postmeta cache for ten thousand rows nobody reads.'
+        );
+
+        // The one value nothing else in the suite can see. `true` for the other two is
+        // asserted behaviourally: no_found_rows by the has_more paging tests,
+        // ignore_sticky_posts by the stuck fixture in PostFilterReadsTest.
+        self::assertFalse(
+            wpmcp_list_query_guards()['update_post_meta_cache'],
+            'The listing primes the postmeta cache again. Nothing on the wire changes when'
+            . ' it does, which is exactly why it needs an assertion here.'
+        );
+    }
+
+    /**
      * The first sentence of every description says what the tool does, in under 50
      * characters, starting with a verb.
      *
@@ -342,7 +470,8 @@ final class ToolContractTest extends TestCase
 
             // A PERIOD FOLLOWED BY A SPACE OR THE END OF THE STRING, not any period.
             // The first version of this test looked for any '.' and code-delete passed on
-            // the dot in `.bak` at index 44 while its real first sentence ran to 63.
+            // the dot inside a file extension at index 44, while its real first sentence
+            // ran to 63.
             $sentenceEnd = preg_match('/\.(\s|$)/', $description, $match, PREG_OFFSET_CAPTURE) === 1
                 ? $match[0][1]
                 : false;

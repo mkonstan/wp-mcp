@@ -29,6 +29,105 @@ final class FakeWpdb
     /** What the next insert() should return. false makes wpmcp_mint() report failure. */
     public bool $insertSucceeds = true;
 
+    /**
+     * What get_row() answers with, or null for "no such row".
+     *
+     * ONE ROW, NOT A TABLE, and deliberately. The unit tier calls wpmcp_validate() to
+     * ask what it does with a row once it has one - is this token expired, is its user
+     * gone, does the caller's address matter. Which row a SHA-256 lookup returns is a
+     * question about SQL, and SQL is the integration tier's business; a fake that
+     * re-implemented the lookup would be asserting its own behaviour.
+     */
+    public ?object $row = null;
+
+    /** Every update() call, in order: ['table', 'data', 'where', ...]. */
+    public array $updates = [];
+
+    /** Every delete() call, in order: ['table' => ..., 'where' => ...]. */
+    public array $deletes = [];
+
+    /* --------------------------------------------------------------------
+     * Sprint 9: the slice sql-select touches.
+     *
+     * It is a READ path, so none of this records a write - what it records is the ORDER
+     * of the session statements, which is the whole of sql-select's safety argument:
+     * caps, then START TRANSACTION READ ONLY, then the wrapped statement, then ROLLBACK,
+     * and ROLLBACK last WHATEVER HAPPENED. `query()` already keeps them in $queries.
+     * ------------------------------------------------------------------ */
+
+    /** What get_results() answers with: a list of positional rows. */
+    public array $results = [];
+
+    /** Column names get_col_info('name') answers with. */
+    public array $columnNames = [];
+
+    /** Set by get_results() from $errorOnGetResults; read by the code under test. */
+    public string $last_error = '';
+
+    /** The message get_results() should leave in last_error, or '' for success. */
+    public string $errorOnGetResults = '';
+
+    /** A throwable get_results() should throw instead of answering. */
+    public ?\Throwable $throwOnGetResults = null;
+
+    /** What db_server_info() reports. Put 'MariaDB' in it to take the other branch. */
+    public string $serverInfo = '8.4.0';
+
+    /** Current suppress_errors state; the setter returns the PREVIOUS one, as wpdb does. */
+    public bool $suppressErrors = false;
+
+    public function get_results($query, $output = null)
+    {
+        $this->queries[] = $query;
+
+        if ($this->throwOnGetResults !== null) {
+            throw $this->throwOnGetResults;
+        }
+
+        $this->last_error = $this->errorOnGetResults;
+
+        return $this->errorOnGetResults === '' ? $this->results : null;
+    }
+
+    public function get_col_info($info = 'name', $col_offset = -1)
+    {
+        return $this->columnNames;
+    }
+
+    /**
+     * What get_var() answers, by query string, with a fallback for anything unlisted.
+     *
+     * sql-select reads two session variables before it changes them, so the restore in its
+     * `finally` has something to put back. A fake that answered null for both would make
+     * every restore assertion pass by never running.
+     *
+     * @var array<string, string|null>
+     */
+    public array $vars = [];
+
+    /** What get_var() answers for a query not in $vars. */
+    public ?string $defaultVar = null;
+
+    public function get_var($query = null, $x = 0, $y = 0)
+    {
+        $this->queries[] = $query;
+
+        return $this->vars[$query] ?? $this->defaultVar;
+    }
+
+    public function suppress_errors($suppress = true)
+    {
+        $previous             = $this->suppressErrors;
+        $this->suppressErrors = (bool) $suppress;
+
+        return $previous;
+    }
+
+    public function db_server_info()
+    {
+        return $this->serverInfo;
+    }
+
     public function insert($table, $data, $format = null)
     {
         $this->inserts[] = ['table' => $table, 'data' => $data, 'format' => $format];
@@ -47,6 +146,45 @@ final class FakeWpdb
         $this->queries[] = $sql;
 
         return 0;
+    }
+
+    /**
+     * Substitute %s / %d / %f the way $wpdb->prepare does, well enough for a recorded
+     * query string to be readable in a failure message. Nothing asserts on the SQL.
+     */
+    public function prepare($query, ...$args)
+    {
+        if (count($args) === 1 && is_array($args[0])) {
+            $args = $args[0];
+        }
+
+        foreach ($args as $arg) {
+            $replacement = is_int($arg) || is_float($arg) ? (string) $arg : "'" . $arg . "'";
+            $query = preg_replace('/%[sdf]/', $replacement, (string) $query, 1);
+        }
+
+        return $query;
+    }
+
+    public function get_row($query)
+    {
+        $this->queries[] = $query;
+
+        return $this->row;
+    }
+
+    public function update($table, $data, $where, $format = null, $whereFormat = null)
+    {
+        $this->updates[] = ['table' => $table, 'data' => $data, 'where' => $where];
+
+        return 1;
+    }
+
+    public function delete($table, $where, $format = null)
+    {
+        $this->deletes[] = ['table' => $table, 'where' => $where];
+
+        return 1;
     }
 
     /** The data array of the most recent insert(), or null if there was none. */

@@ -37,13 +37,11 @@ use WpMcp\Tests\Support\WpCli;
 final class AuthEventsTest extends FixtureIntegrationTestCase
 {
     private static function readLabel(): string { return Fixtures::name('events-read'); }
-    private static function pinLabel(): string { return Fixtures::name('events-pin'); }
     private static function mintLabel(): string { return Fixtures::name('events-mint'); }
     private static function login(): string { return Fixtures::name('events-author'); }
 
     private static int $userId = 0;
     private static string $readToken = '';
-    private static string $pinToken = '';
 
     public static function setUpBeforeClass(): void
     {
@@ -63,11 +61,6 @@ final class AuthEventsTest extends FixtureIntegrationTestCase
 
         // read scope, so the scope gate has something to refuse.
         self::$readToken = Fixtures::mintToken('read', self::readLabel(), self::$userId);
-
-        // A SECOND, UNTOUCHED token for the pin test. The TOFU bind happens once per
-        // token, ever, so a token any other test has called a tool with is already
-        // bound and cannot show the event.
-        self::$pinToken = Fixtures::mintToken('read', self::pinLabel(), self::$userId);
     }
 
     public static function tearDownAfterClass(): void
@@ -82,7 +75,7 @@ final class AuthEventsTest extends FixtureIntegrationTestCase
         TestRecorder::uninstall();
         Fixtures::deleteUser(self::$userId);
 
-        foreach ([self::readLabel(), self::pinLabel(), self::mintLabel()] as $label) {
+        foreach ([self::readLabel(), self::mintLabel()] as $label) {
             Fixtures::deleteTokensLabelled($label);
         }
 
@@ -106,8 +99,8 @@ final class AuthEventsTest extends FixtureIntegrationTestCase
             . ' add_action("wpmcp_auth_event", function ($type, $context) use (&$seen) {'
             . '  $seen[] = array("type" => $type, "context" => $context);'
             . ' }, 10, 2);'
-            . ' $minted = wpmcp_mint("read", ' . self::phpString(self::mintLabel()) . ', 3600, '
-            . (int) self::$userId . ');'
+            . ' $minted = wpmcp_mint("read", ' . self::phpString(self::mintLabel())
+            . ', 3600, 30 * DAY_IN_SECONDS, ' . (int) self::$userId . ');'
             . ' if (is_wp_error($minted)) { echo wp_json_encode(array("error" => $minted->get_error_message())); return; }'
             . ' $revoked = wpmcp_revoke($minted["id"]);'
             . ' echo wp_json_encode(array('
@@ -154,63 +147,45 @@ final class AuthEventsTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * pin_bind fires once, on the FIRST tool call, and not again on the second.
+     * An ACCEPTED request fires nothing at all.
      *
-     * The second half is what makes this a test of the binding rather than of tool
-     * calls: an event that fired on every call would be noise in the log and would say
-     * nothing about when the token actually locked to an address.
+     * REPLACES the two address-binding tests that stood here until Sprint 7. Those
+     * asserted that a token's first tool call fired exactly one binding event and that
+     * discovery fired none; the binding they described does not exist any more (see
+     * tests/integration/ConnectorAddressPoolTest.php for why), so they are not
+     * rewritten - the claim they made is gone.
      *
-     * @group sprint-2
+     * What is left is the claim that outlived them and that the README states: there is
+     * NO success event, so an audit listener waiting for an "ok" waits forever. It was
+     * true before and it is stricter now, because the one exception has been removed.
+     *
+     * @group sprint-7
      */
-    public function testThePinBindsOnceOnTheFirstToolCall(): void
+    public function testAnAcceptedRequestFiresNoAuthEventAtAll(): void
     {
         TestRecorder::reset();
 
-        $mcp = $this->mcp(self::$pinToken);
+        $mcp = $this->mcp(self::$readToken);
 
-        $first = $mcp->callTool('site-info');
-        self::assertFalse($first->isError, 'The fixture token could not call a tool: ' . $first->text);
+        $discovery = $mcp->post('tools/list');
+        self::assertSame(200, $discovery->getStatusCode(), (string) $discovery->getBody());
 
-        self::assertSame(
-            1,
-            TestRecorder::countOf(TestRecorder::AUTH . 'pin_bind'),
-            'The first tool call on an unbound token did not fire exactly one pin_bind.'
+        $call = $mcp->callTool('site-info');
+        self::assertFalse($call->isError, 'The fixture token could not call a tool: ' . $call->text);
+
+        $types = array_map(
+            static fn (array $e): string => (string) ($e['event'] ?? ''),
+            TestRecorder::events()
         );
 
-        $details = TestRecorder::detailsOf(TestRecorder::AUTH . 'pin_bind')[0];
-        self::assertGreaterThan(0, (int) $details['token_id']);
-        self::assertSame(self::$userId, (int) $details['user_id']);
-
-        $mcp->callTool('site-info');
-
         self::assertSame(
-            1,
-            TestRecorder::countOf(TestRecorder::AUTH . 'pin_bind'),
-            'The pin bound a second time. A token binds once, and the event says when.'
-        );
-    }
-
-    /**
-     * A discovery call does NOT bind the pin, and therefore fires no pin_bind - which
-     * is also the proof that the body is parsed only after the credential passed: the
-     * decision depends on the JSON-RPC method, and it is made after validation.
-     *
-     * @group sprint-2
-     */
-    public function testToolsListDoesNotBindThePin(): void
-    {
-        $unbound = Fixtures::mintToken('read', self::pinLabel(), self::$userId);
-
-        TestRecorder::reset();
-
-        $response = $this->mcp($unbound)->post('tools/list');
-        self::assertSame(200, $response->getStatusCode(), (string) $response->getBody());
-
-        self::assertSame(
-            0,
-            TestRecorder::countOf(TestRecorder::AUTH . 'pin_bind'),
-            'tools/list bound the TOFU pin. Discovery is supposed to be possible from'
-            . ' anywhere; only a tool call locks the token to an address.'
+            [],
+            array_values(array_filter(
+                $types,
+                static fn (string $t) => str_starts_with($t, TestRecorder::AUTH)
+            )),
+            'An accepted discovery and an accepted tool call fired auth events: '
+            . implode(', ', $types)
         );
     }
 

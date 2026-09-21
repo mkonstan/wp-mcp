@@ -118,6 +118,117 @@ final class UninstallTest extends TestCase
     }
 
     /**
+     * Every table the plugin CREATEs is named in uninstall.php, read out of the plugin's
+     * own CREATE TABLE statements rather than listed here.
+     *
+     * The test above names one table as a literal, which is the assertion that caught
+     * nothing when a second table arrived: a list written by hand does not grow when the
+     * schema does. This one asks the schema. wpmcp_install() gained
+     * `wpmcp_file_versions` in revision 4, and that table holds up to half a megabyte of
+     * theme source per row - the largest thing this plugin ever writes, and the worst
+     * thing to leave on somebody's site after they delete it.
+     *
+     * @group sprint-8
+     */
+    public function testUninstallDropsEveryTableThePluginCreates(): void
+    {
+        $tables = self::tableNamesInPluginSource();
+
+        // COMMENTS STRIPPED, and that is the point of reading it this way: the comment
+        // above the drop names the new table, so a `str_contains` over the raw file goes
+        // green on prose while the table survives the uninstall. Only code counts.
+        $uninstall = self::codeOnly('uninstall.php');
+
+        self::assertContains(
+            'wpmcp_tokens',
+            $tables,
+            'The scan found no CREATE TABLE for the token table, so it is reading the'
+            . ' source wrongly and would not notice a new table either.'
+        );
+
+        self::assertStringContainsString(
+            'DROP TABLE IF EXISTS',
+            $uninstall,
+            'uninstall.php drops no table at all.'
+        );
+
+        foreach ($tables as $bare) {
+            self::assertStringContainsString(
+                "'" . $bare . "'",
+                $uninstall,
+                "wpmcp_install() creates the table '{$bare}' and no CODE in uninstall.php"
+                . ' names it, so deleting the plugin would leave it in the database.'
+            );
+        }
+    }
+
+    /** A plugin file's source with every comment and docblock removed. */
+    private static function codeOnly(string $relative): string
+    {
+        $code = '';
+
+        foreach (token_get_all(self::read($relative)) as $token) {
+            if (is_array($token)) {
+                if (in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                    continue;
+                }
+
+                $code .= $token[1];
+                continue;
+            }
+
+            $code .= $token;
+        }
+
+        return $code;
+    }
+
+    /**
+     * The bare (unprefixed) name of every table wpmcp_install() creates, taken from the
+     * `$wpdb->prefix . CONSTANT` expressions its CREATE TABLE statements are built from.
+     *
+     * @return list<string>
+     */
+    private static function tableNamesInPluginSource(): array
+    {
+        $source = self::read('wp-mcp.php');
+        $names  = [];
+
+        // define('WPMCP_TABLE', 'wpmcp_tokens') and friends.
+        preg_match_all(
+            "/define\(\s*'(WPMCP_[A-Z0-9_]*TABLE)'\s*,\s*'([a-z0-9_]+)'/",
+            $source,
+            $constants,
+            PREG_SET_ORDER
+        );
+
+        $byName = [];
+
+        foreach ($constants as $constant) {
+            $byName[$constant[1]] = $constant[2];
+        }
+
+        // "CREATE TABLE $table (" is built from $wpdb->prefix . CONSTANT a line or two
+        // earlier, so the CONSTANTS that appear in a prefix expression are the tables.
+        preg_match_all(
+            '/\$wpdb->prefix\s*\.\s*(WPMCP_[A-Z0-9_]*TABLE)/',
+            $source,
+            $used,
+            PREG_SET_ORDER
+        );
+
+        foreach ($used as $use) {
+            if (isset($byName[$use[1]]) && !in_array($byName[$use[1]], $names, true)) {
+                $names[] = $byName[$use[1]];
+            }
+        }
+
+        sort($names);
+
+        return $names;
+    }
+
+    /**
      * Every `wpmcp_*` option or transient key the plugin source touches, key => where.
      *
      * @return array<string, string>

@@ -1,7 +1,7 @@
 name: Release
 
 # Build + gate + publish the install zip whenever a version tag is pushed.
-#   git tag v1.0.0 && git push origin v1 --tags
+#   git tag v1.1.0 && git push origin v1.1 --tags
 # produces a GitHub Release with a verified wp-mcp.zip attached. See docs/RELEASE.md.
 #
 # The tests run HERE, in this workflow, rather than being read off ci.yml: ci.yml is
@@ -40,11 +40,29 @@ jobs:
           done
           exit $status
 
-      - name: Guard - tools.php auto-revert check is present (wpmcp_bak_ok x3)
+      - name: Guard - the parse check and the version-first rule are still wired in
+        # TWO MARKERS, because the tools make two promises and one count cannot hold
+        # both. The first WAS a count of the old backup-path helper, gone with the
+        # sibling files it guarded (schema revision 4 - the version table); its subject
+        # was never those files but the AUTO-REVERT, which they used to be half of.
+        #
+        #   wpmcp_php_parse_ok       x3  definition, code-write, code-restore
+        #   wpmcp_code_version_current x4  definition, code-write, code-delete,
+        #                                code-restore
+        #
+        # The second is the sprint-8 review's correction: the old guard's third site was
+        # code-delete, which the parse-check count does not reach (it deletes rather than
+        # writing PHP), so nothing was left guarding "every mutation versions first" -
+        # the promise the whole version table exists to keep. A new writer or deleter
+        # added without one of the two makes this red, which is the point.
         run: |
-          count=$(grep -c "wpmcp_bak_ok" tools.php)
-          echo "wpmcp_bak_ok occurrences: $count (expected 3)"
-          test "$count" -eq 3
+          parse=$(grep -c "wpmcp_php_parse_ok" tools.php)
+          echo "wpmcp_php_parse_ok occurrences: $parse (expected 3)"
+          test "$parse" -eq 3
+
+          versioned=$(grep -c "wpmcp_code_version_current" tools.php)
+          echo "wpmcp_code_version_current occurrences: $versioned (expected 4)"
+          test "$versioned" -eq 4
 
   phpunit-unit:
     name: PHPUnit unit (PHP ${{ matrix.php }})
@@ -111,10 +129,12 @@ jobs:
           WPMCP_WP_ENV: '1'
         # Same check as ci.yml, and it has to be here too: ci.yml does not run on a tag
         # push, so this workflow is the only thing standing between a red gate and a
-        # published release. Keep the two lists in step.
+        # published release. Keep the two lists in step. sprint-9 was added in Sprint 9,
+        # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b, sprint-14c in Sprint 14c and sprint-14d in Sprint 14d, each on the day its gate
+        # closed.
         run: |
           status=0
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c sprint-14d; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
@@ -140,7 +160,11 @@ jobs:
 
       - name: WordPress logs (on failure)
         if: failure()
-        run: npx --yes @wordpress/env logs all || true
+        # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
+        # so without --watch=false this step never exits: a failed run once sat here for over
+        # two hours until it was cancelled. The timeout is the backstop.
+        timeout-minutes: 5
+        run: npx --yes @wordpress/env logs all --watch=false || true
 
       - name: Stop WordPress
         if: always()
@@ -182,12 +206,25 @@ jobs:
         # in src/. The autoloader maps WpMcp\A\B to src/A/B.php, so the first nested
         # namespace needs this to become `cp -r src dist/wp-mcp/` and the gate's file list
         # to become a find. There is no nested class to justify that yet.
+        #
+        # build.txt IS THE ONE FILE THAT IS NOT COPIED, and it is the one file that must
+        # not be: `cp` would put the literal placeholders in the zip and the published
+        # release would report its build as `source`, which is what a git checkout says.
+        # `git archive` is what performs the export-subst substitution (.gitattributes),
+        # so the stamp is taken from there and the gate below checks it separately -
+        # every other file is compared byte for byte against the source, and this one
+        # cannot be.
         run: |
-          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs
+          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs dist/stamp
           cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php dist/wp-mcp/
           cp LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md BUILD-NOTES.md dist/wp-mcp/
           cp src/*.php dist/wp-mcp/src/
           cp docs/*.md dist/wp-mcp/docs/
+          # `-f -` is explicit on purpose: GNU tar on Debian and Ubuntu defaults its
+          # archive to stdin, and nothing else does. On another runner image, or with
+          # bsdtar, a bare `tar -x` reads a tape device and this step dies saying so.
+          git archive --format=tar HEAD build.txt | tar -xf - -C dist/stamp
+          cp dist/stamp/build.txt dist/wp-mcp/build.txt
 
       - name: Build wp-mcp.zip (top-level wp-mcp/ folder)
         run: |
@@ -195,7 +232,7 @@ jobs:
           zip -r wp-mcp.zip wp-mcp -x '*.bak' '*.log'
           cd ..
 
-      - name: GATE - extracted content matches source, lints clean, bak-count == 3
+      - name: GATE - extracted content matches source, lints clean, both guards wired
         run: |
           mkdir -p verify
           unzip -q dist/wp-mcp.zip -d verify
@@ -208,13 +245,35 @@ jobs:
               echo "MISMATCH: $f differs from the zipped copy"; fail=1
             fi
           done
+          # THE BUILD STAMP, WHICH IS CHECKED AND NOT COMPARED. Its whole job is to
+          # differ from the source: the source carries git's placeholders and the zip
+          # carries this commit. What must hold is that the substitution happened - a
+          # zip with a leftover placeholder reports `source` and is indistinguishable
+          # from a checkout, which is the confusion the stamp exists to end.
+          stamp="verify/wp-mcp/build.txt"
+          expected=$(git rev-parse --short HEAD)
+          if [ ! -f "$stamp" ]; then
+            echo "MISSING: build.txt is not in the zip, so the release reports no build"; fail=1
+          elif grep -q 'Format:' "$stamp"; then
+            echo "UNSTAMPED: build.txt still carries a git placeholder"; cat "$stamp"; fail=1
+          elif ! grep -qx "short=$expected" "$stamp"; then
+            echo "WRONG COMMIT: build.txt does not say short=$expected"; cat "$stamp"; fail=1
+          else
+            echo "build stamp: $(grep -x "short=$expected" "$stamp")"
+          fi
           # Every PHP file the plugin loads at runtime is in the zip and parses there.
           for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php $(ls src/*.php); do
             php -l "verify/wp-mcp/$f" || fail=1
           done
-          bak=$(grep -c "wpmcp_bak_ok" verify/wp-mcp/tools.php)
-          echo "wpmcp_bak_ok in zip: $bak (expected 3)"
-          test "$bak" -eq 3 || fail=1
+          # The same two markers the lint job guards, asserted on the EXTRACTED copy:
+          # the question here is whether what is about to be published is what was
+          # tested.
+          parse=$(grep -c "wpmcp_php_parse_ok" verify/wp-mcp/tools.php)
+          echo "wpmcp_php_parse_ok in zip: $parse (expected 3)"
+          test "$parse" -eq 3 || fail=1
+          versioned=$(grep -c "wpmcp_code_version_current" verify/wp-mcp/tools.php)
+          echo "wpmcp_code_version_current in zip: $versioned (expected 4)"
+          test "$versioned" -eq 4 || fail=1
           if [ "$fail" -ne 0 ]; then echo "GATE FAILED - not releasing"; exit 1; fi
           echo "GATE PASSED"
 
@@ -224,5 +283,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/wp-mcp.zip \
             --title "${GITHUB_REF_NAME}" \
-            --notes "Automated release of ${GITHUB_REF_NAME}. Self-hosted WordPress MCP server with short-lived, admin-minted, IP-pinned tokens; read/admin scopes; opt-in jailed theme code editing. See CHANGELOG.md." \
+            --notes "Automated release of ${GITHUB_REF_NAME}. Self-hosted WordPress MCP server with short-lived, admin-minted, hashed-at-rest tokens; read/admin scopes; opt-in jailed theme code editing. See CHANGELOG.md." \
             --verify-tag

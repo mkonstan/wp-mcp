@@ -132,8 +132,17 @@ function wpmcp_trace_ensure_dir() {
     if (!is_dir($dir) && !wp_mkdir_p($dir)) { return false; }
 
     // index.php: an empty PHP file, so a server with directory indexes on shows nothing.
+    // The only .php file this plugin writes outside the theme, so it is the only other
+    // place the "a write is not finished until the opcode cache is told" rule reaches.
+    // It matters on a reinstall: uninstall deletes this path, and with
+    // opcache.validate_timestamps off the cache can still hold whatever was compiled from
+    // it. Invalidated only when we actually wrote, so a request that finds the file
+    // already there costs nothing.
     $index = $dir . '/index.php';
-    if (!file_exists($index)) { @file_put_contents($index, "<?php\n// Silence is golden.\n"); }
+    if (!file_exists($index)) {
+        @file_put_contents($index, "<?php\n// Silence is golden.\n");
+        wpmcp_opcache_invalidate($index);
+    }
 
     // .htaccess: Apache only, and written the way core writes its own.
     //

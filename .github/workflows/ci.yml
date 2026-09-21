@@ -5,7 +5,7 @@ name: CI
 # (`lint`, `phpunit-unit`, `integration`) - renaming a job here breaks the gate.
 on:
   push:
-    branches: [main, v1]
+    branches: [main, v1, v1.1]
   pull_request:
     branches: [main]
 
@@ -32,11 +32,29 @@ jobs:
           done
           exit $status
 
-      - name: Guard - tools.php auto-revert check is present (wpmcp_bak_ok x3)
+      - name: Guard - the parse check and the version-first rule are still wired in
+        # TWO MARKERS, because the tools make two promises and one count cannot hold
+        # both. The first WAS a count of the old backup-path helper, gone with the
+        # sibling files it guarded (schema revision 4 - the version table); its subject
+        # was never those files but the AUTO-REVERT, which they used to be half of.
+        #
+        #   wpmcp_php_parse_ok       x3  definition, code-write, code-restore
+        #   wpmcp_code_version_current x4  definition, code-write, code-delete,
+        #                                code-restore
+        #
+        # The second is the sprint-8 review's correction: the old guard's third site was
+        # code-delete, which the parse-check count does not reach (it deletes rather than
+        # writing PHP), so nothing was left guarding "every mutation versions first" -
+        # the promise the whole version table exists to keep. A new writer or deleter
+        # added without one of the two makes this red, which is the point.
         run: |
-          count=$(grep -c "wpmcp_bak_ok" tools.php)
-          echo "wpmcp_bak_ok occurrences: $count (expected 3)"
-          test "$count" -eq 3
+          parse=$(grep -c "wpmcp_php_parse_ok" tools.php)
+          echo "wpmcp_php_parse_ok occurrences: $parse (expected 3)"
+          test "$parse" -eq 3
+
+          versioned=$(grep -c "wpmcp_code_version_current" tools.php)
+          echo "wpmcp_code_version_current occurrences: $versioned (expected 4)"
+          test "$versioned" -eq 4
 
   phpunit-unit:
     # Pure PHP, no WordPress, no Docker. The matrix is the declared support floor
@@ -142,9 +160,39 @@ jobs:
           status=0
           # Every sprint that has closed. sprint-3, sprint-4 and sprint-5 were added in
           # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
-          # were never asserted in CI at all. A new sprint adds its group here on the day
-          # its gate closes, and the commit that adds it watches this job.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6; do
+          # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
+          # for the same reason: both gates had closed and neither was asserted anywhere
+          # but on the machine that ran them. sprint-9 was added in Sprint 9,
+          # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b, sprint-14c in Sprint 14c and sprint-14d in Sprint 14d, each on the day its gate
+          # closed. A new sprint adds its group here on the day its gate closes, and the
+          # commit that adds it watches this job.
+          #
+          # sprint-11 is the first group whose expectations depend on the SITE'S TIMEZONE:
+          # create-post's `date` stores post_date in local time and post_date_gmt in UTC,
+          # and the tests compute the second from the first through get_gmt_from_date() on
+          # the site rather than from a constant. Both Local sites and this container sit
+          # at UTC, so the case that actually exercises the conversion sends an explicit
+          # +05:30 offset. A red sprint-11 here on a green local run would be a wp-env
+          # whose timezone_string is not what this container has always had.
+          #
+          # sprint-10 is the first group that is mostly about ORDERING and PAGING, so it
+          # is the first a different COLLATION could move: list-posts compares titles in
+          # PHP with strcasecmp when it merges its two queries, and the rows it merges
+          # arrived in the server's own collation order. A red sprint-10 here on a green
+          # local run is very likely that.
+          #
+          # sprint-14c is the first group that shells out to GIT: it builds a real
+          # `git archive` of HEAD in a temp directory and reads the one file the plugin
+          # reads, which is the only way to prove that a built zip carries its commit
+          # without installing one. actions/checkout leaves a usable .git here and the
+          # runner has git on PATH; the test FAILS rather than skips if it does not,
+          # because a gate that skips is not a gate.
+          #
+          # sprint-9 is the first group whose subject depends on the DATABASE FLAVOUR:
+          # sql-select spells its session statement timeout one way on MySQL and another
+          # on MariaDB, and this container is the only MariaDB anyone on this project can
+          # reach. A red sprint-9 here on a green local run is very likely that.
+          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c sprint-14d; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
@@ -175,7 +223,11 @@ jobs:
 
       - name: WordPress logs (on failure)
         if: failure()
-        run: npx --yes @wordpress/env logs all || true
+        # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
+        # so without --watch=false this step never exits: a failed run once sat here for over
+        # two hours until it was cancelled. The timeout is the backstop.
+        timeout-minutes: 5
+        run: npx --yes @wordpress/env logs all --watch=false || true
 
       - name: Stop WordPress
         if: always()

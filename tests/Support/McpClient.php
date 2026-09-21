@@ -117,10 +117,22 @@ final class McpClient
         );
     }
 
-    /** Call a tool and unwrap the MCP result. */
-    public function callTool(string $name, array $arguments = []): ToolResult
+    /**
+     * Call a tool and unwrap the MCP result.
+     *
+     * $extraHeaders exists for fixtures that have to be armed PER REQUEST rather than per
+     * class. Sprint 9's sql-select switch is one: a mu-plugin that answered
+     * `pre_option_wpmcp_sql_enabled` with 1 for the whole class would expose every table
+     * the database user can read to every admin token on the site for as long as the
+     * class ran - on the stress site, a real client's. Gated on a header instead, the
+     * switch is on for exactly the requests that ask for it, and the same class can test
+     * the tool with the switch off by simply not sending the header.
+     *
+     * @param array<string, string> $extraHeaders
+     */
+    public function callTool(string $name, array $arguments = [], array $extraHeaders = []): ToolResult
     {
-        $response = $this->post('tools/call', ['name' => $name, 'arguments' => $arguments]);
+        $response = $this->post('tools/call', ['name' => $name, 'arguments' => $arguments], $extraHeaders);
         $status   = $response->getStatusCode();
         $raw      = (string) $response->getBody();
 

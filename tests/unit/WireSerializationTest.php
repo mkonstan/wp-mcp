@@ -249,8 +249,8 @@ final class WireSerializationTest extends TestCase
     /**
      * Every built-in tool's inputSchema, by name, without a WordPress runtime.
      *
-     * The code tools are included: they are part of the catalog whether or not the option
-     * that exposes them is on, and their schemas are just as much on the wire.
+     * The code tools and sql-select are included: they are part of the catalog whether or
+     * not the option that exposes them is on, and their schemas are just as much on the wire.
      *
      * @return array<string, array>
      */
@@ -266,7 +266,7 @@ final class WireSerializationTest extends TestCase
     }
 
     /**
-     * The catalog, assembled from the five+one tool functions directly.
+     * The catalog, assembled from the seven tool functions directly.
      *
      * NOT through wpmcp_tools(), which calls apply_filters() and get_option() - a unit
      * test has no WordPress. The functions themselves only build arrays; the `run`
@@ -281,10 +281,15 @@ final class WireSerializationTest extends TestCase
         foreach ([
             'wpmcp_core_tools',
             'wpmcp_content_tools',
+            'wpmcp_revision_tools',
+            'wpmcp_meta_tools',
             'wpmcp_taxonomy_tools',
             'wpmcp_media_tools',
             'wpmcp_comment_tools',
             'wpmcp_code_tools',
+            'wpmcp_sql_tools',
+            'wpmcp_menu_tools',
+            'wpmcp_inventory_tools',
         ] as $fn) {
             self::assertTrue(function_exists($fn), "{$fn}() is gone from tools.php.");
 
@@ -292,9 +297,9 @@ final class WireSerializationTest extends TestCase
         }
 
         self::assertCount(
-            20,
+            38,
             $tools,
-            'The catalog is not 20 tools any more. That is the product (see the build'
+            'The catalog is not 38 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
             . ' detail - update this number deliberately. Got: ' . implode(', ', array_keys($tools))
         );

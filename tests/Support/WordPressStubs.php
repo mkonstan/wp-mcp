@@ -7,11 +7,11 @@
  * requiring wp-mcp.php with a stub set, reading the fatal error, adding exactly the
  * symbol it named, repeating until the require succeeded. It converged on
  *
- *   constants  ABSPATH, HOUR_IN_SECONDS
+ *   constants  ABSPATH, HOUR_IN_SECONDS, DAY_IN_SECONDS
  *   functions  register_activation_hook, register_deactivation_hook,
  *              add_action, plugin_dir_path
  *
- * With those six, `require wp-mcp.php` succeeds from an unrelated working directory
+ * With those seven, `require wp-mcp.php` succeeds from an unrelated working directory
  * and every plugin function is declared (wpmcp_mint, wpmcp_validate, wpmcp_tools,
  * wpmcp_handle, wpmcp_render_admin, wpmcp_core_tools ... wpmcp_code_tools), because
  * wpmcp_bootstrap() pulls in tools.php, admin.php and endpoint.php.
@@ -73,6 +73,7 @@ final class WordPressStubs
         return [
             'ABSPATH',
             'HOUR_IN_SECONDS',
+            'DAY_IN_SECONDS',
             'register_activation_hook',
             'register_deactivation_hook',
             'add_action',
