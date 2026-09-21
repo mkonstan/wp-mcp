@@ -80,6 +80,15 @@ Then tag and push:
 git tag v1.1.0 && git push origin v1.1 --tags
 ```
 
+**Immediately after the tag is pushed, open the next version.** The first commit on the
+branch after a release bumps `Version:` and `WPMCP_VER` to the next number and adds a
+CHANGELOG section for it marked `**Unreleased.**` - patch for a fix cycle, minor when the
+cycle adds features. Without that step every dev zip cut during the cycle reports the
+version just RELEASED, which is false: those builds are not that release, they are what
+comes after it. With it, a dev zip reads as the version it will become plus its own build,
+and cutting the next release means deleting the word "Unreleased". Decided 2026-09-21
+(`analysis/53-open-decisions.md`, D15).
+
 The tag push triggers `.github/workflows/release.yml`. It lints every PHP file, runs the
 unit suite on PHP 8.1 through 8.4, runs the integration suite against a `wp-env`
 container, and re-runs each closed sprint's gate group on its own, checking that every

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
- * Version: 1.1.0
+ * Version: 1.1.1
  * Requires at least: 5.5
  * Requires PHP: 8.1
  * Author: Max Konstantinovski
@@ -50,7 +50,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '1.1.0');
+define('WPMCP_VER', '1.1.1');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 
 /**

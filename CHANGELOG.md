@@ -2,6 +2,10 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.1.1
+
+**Unreleased.** Open for the next cycle. Nothing in it yet.
+
 ## 1.1.0
 
 **Released 2026-09-21.** The auth surface, rebuilt around what hosted MCP clients actually do.
