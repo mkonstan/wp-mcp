@@ -14,8 +14,9 @@
  * after the write (`wp-admin/includes/file.php:525`) and again after its rollback (`:638`).
  *
  * ONE MUTATION THIS TEST CANNOT SEE, and it is asserted elsewhere rather than left implicit:
- * dropping `$force = true`. With `opcache.validate_timestamps=1` - what both Local sites and
- * the CI container run - `opcache_invalidate($p, false)` returns true whether or not it
+ * dropping `$force = true`. With `opcache.validate_timestamps=1` - measured on both Local
+ * sites, and expected but NOT measured on CI, which nothing has been pushed to -
+ * `opcache_invalidate($p, false)` returns true whether or not it
  * marked anything, so the count, the md5, the ordering and the boolean are all unchanged by
  * the drop. No host can be asked that question, so it is asserted against the SOURCE in
  * `tests/unit/OpcacheForceArgumentTest.php`, which reads every real call in the plugin with

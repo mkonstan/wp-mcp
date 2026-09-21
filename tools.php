@@ -348,9 +348,9 @@ function wpmcp_php_parse_ok($code) {
  *
  * A WRITE IS NOT FINISHED UNTIL THE OPCODE CACHE IS TOLD. The measurable condition is
  * `opcache.validate_timestamps=0`, where PHP never stats a file it has already compiled,
- * or a raised `opcache.revalidate_freq`, where it stats it no more often than that - at
- * `revalidate_freq=60` the old bytes run for up to a minute, which is the same defect with
- * a clock on it. code-write answered `bytes: 4096` and the site went on executing the OLD
+ * or ANY `opcache.revalidate_freq`, where it stats it no more often than that - at the
+ * default of 2 the old bytes run for up to two seconds and at 60 for up to a minute, which
+ * is the same defect with a clock on it. code-write answered `bytes: 4096` and the site went on executing the OLD
  * functions.php until the pool was restarted. Every tool here that changes a compiled file therefore
  * calls this, and core's own theme editor is the pattern: it invalidates after the write
  * (`wp-admin/includes/file.php:525`, after the `fwrite`) AND AGAIN after the rollback
@@ -376,12 +376,17 @@ function wpmcp_php_parse_ok($code) {
  * a PHP pool spread over more than one node on a shared filesystem, where the write lands
  * everywhere and the invalidation lands only on the node that served the request.
  *
- * NONE OF THAT GOES IN THE RESULT. false is not a failure, so no caller treats it as one,
- * and a field saying `opcache: false` would be read by an agent as "the change is not
- * live" - untrue on every host without a cache, which is most of them. The tool's claim
- * stays what it has always been: what it did to the FILE. The three cases above are
- * documented in the README and the CHANGELOG, where an operator can be told which setting
- * to look at; an agent cannot act on them and must not be handed them as a boolean.
+ * NONE OF THAT GOES IN THE RESULT, AND NOT REPORTING IS A CHOICE RATHER THAN A LIMIT. For
+ * the first two cases this plugin could tell the difference - `function_exists`
+ * `('opcache_invalidate')`, `ini_get('opcache.enable')` and `ini_get('opcache.restrict_api')`
+ * are all readable in the same request, and TestRecorder reads exactly those to assert
+ * against core's answer. It chooses not to: false is not a failure, so no caller treats it
+ * as one, and a field saying `opcache: false` would be read by an agent as "the change is
+ * not live" - which it would say on every host without a cache, which is most of them. Only
+ * the multi-node case is genuinely invisible here, and it answers true. The tool's claim
+ * stays what it has always been: what it did to the FILE. The three cases are written up in
+ * the README and the CHANGELOG, where the reader is an operator who can go and look at a
+ * setting; an agent cannot act on any of them and must not be handed them as a boolean.
  *
  * THE EXTENSION TEST IS CORE'S, spelled here so five call sites do not each have to make
  * it. `.php` is the only member of wpmcp_code_allowed_ext() that PHP compiles.

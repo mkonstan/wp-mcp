@@ -780,30 +780,34 @@ The file API is fenced:
   write, revert, restore and delete of a `.php` file calls WordPress's own
   `wp_opcache_invalidate()` - after the write, and again after a revert, exactly where
   core's theme editor calls it. Without that, a host running
-  `opcache.validate_timestamps=0`, or a raised `opcache.revalidate_freq`, keeps executing
-  the file it compiled earlier: the tool reports the bytes it wrote and the site does not
-  change until the cache expires or the PHP pool restarts. A delete invalidates just
-  *before* removing the file, because PHP resolves the path on disk before it looks in the
-  cache.
+  `opcache.validate_timestamps=0`, or any `opcache.revalidate_freq`, keeps executing the file
+  it compiled earlier: the tool reports the bytes it wrote and the site does not change until
+  the next revalidation or a restart - for ever with timestamps off, and at the default
+  `revalidate_freq` of 2, for up to two seconds. A delete invalidates just *before* removing
+  the file, because PHP resolves the path on disk before it looks in the cache.
 
   On a host with no opcode cache there is nothing to tell and nothing happens - core's
   function says so by returning false, which is not an error.
 
-  **Three cases where there IS a cache and it is not told**, so a write can be on disk and
-  not yet running. Check them first if a change does not take effect, and restart PHP-FPM to
-  make it take effect now:
+  **Three cases where a cache that exists keeps running the old file anyway**, so a write can
+  be on disk and not yet running. Check them first if a change does not take effect, and
+  restart PHP - PHP-FPM, or whatever runs it on your host - to make it take effect now:
 
   - `opcache.restrict_api` is set to a path that does not cover the script serving
     `/wp-json/`, so WordPress never makes the call.
   - Something on the site returns false from the `wp_opcache_invalidate_file` filter,
     WordPress's own opt-out.
-  - The PHP pool spans more than one node on a shared filesystem: the write lands for all of
-    them, the invalidation only for the node that served the request.
+  - The PHP pool spans more than one node on a shared filesystem. Here the local cache IS
+    told: the write lands for all of them, the invalidation only for the node that served the
+    request, and the others keep their copy until their next revalidation or a restart - so
+    restarting means every node, not only the one you called.
 
-  **No result field reports any of this.** A `false` there would read as "the change is not
-  live", which would be untrue on exactly the hosts that never had the problem - and the
-  three cases above are indistinguishable from "no cache" to the tool anyway. What a code
-  tool tells you is what it did to the file.
+  **The plugin does not report any of this, and that is a choice rather than a limit.** For
+  the first two cases it could tell - the state is readable in the same request - but a cache
+  field in a result would read to an agent as "the change is not live", and would say that on
+  every host that never had the problem. The cases above are the operator's to check, which is
+  why they are written here and not returned. What a code tool tells you is what it did to the
+  file.
 
 ### Versions, history and restore
 

@@ -166,9 +166,10 @@ marked (shape).**
 
 - **`code-write`, `code-restore` and `code-delete` changed a PHP file and never told PHP's
   opcode cache.** The hosts this bites are the ones running `opcache.validate_timestamps=0`,
-  where PHP does not stat a file it has already compiled, or a raised
-  `opcache.revalidate_freq`, where it stats it no more often than that - at
-  `revalidate_freq=60` the old code ran for up to a minute. So before this fix, on such a host: `code-write`
+  where PHP does not stat a file it has already compiled, or any
+  `opcache.revalidate_freq`, where it stats it no more often than that - at the default of 2
+  the old code ran for up to two seconds, at `revalidate_freq=60` for up to a minute. So
+  before this fix, on such a host: `code-write`
   answered `bytes: 4096` and your site went on running the OLD `functions.php` until the
   PHP pool was restarted; a write reverted for a syntax error could leave the *rejected*
   bytes compiled and running while the tool reported `reverted: true`; and a file
@@ -189,17 +190,21 @@ marked (shape).**
   failure, and it is why **no tool result gained a field about the cache**: `opcache: false`
   would read to a client as "the change is not live", which would be untrue on every host
   without one. What the tools claim is unchanged - what they did to the file.
-- **Three cases where the cache exists and is still not told, so a code tool can report a
-  successful write that the site is not yet running.** They are indistinguishable from "no
-  cache" both to the tool and to you, so if a change does not take effect, check these before
-  anything else - and restarting PHP-FPM remains the way to make it take effect now:
+- **Three cases where a cache that exists keeps running the old file anyway, so a code tool
+  can report a successful write the site is not yet running.** They are things you can check
+  and the plugin **does not report** them - not because it cannot tell (for the first two it
+  can), but because a cache field in a tool's result would read to an agent as "the change is
+  not live", and would say that on every host that never had the problem. So if a change does
+  not take effect, check these first; restarting PHP - PHP-FPM, or whatever runs it on your
+  host - remains the way to make it take effect now:
   - **`opcache.restrict_api` is set** to a path that does not cover the script serving
     `/wp-json/`. WordPress will not call the invalidation at all. Clear it, or widen it.
   - **A plugin or `mu-plugin` returns false from the `wp_opcache_invalidate_file` filter**,
     which is WordPress's own documented opt-out. Something on your site refused the call.
-  - **The PHP pool runs on more than one node over a shared filesystem.** The write lands
-    for every node; the invalidation lands only on the node that served the request. The
-    others keep their compiled copy until they are restarted or their cache expires.
+  - **The PHP pool runs on more than one node over a shared filesystem.** Here the local
+    cache IS told: the write lands for every node, and the invalidation lands only on the node
+    that served the request. The others keep their compiled copy until their next revalidation
+    or a restart - which means restarting **every** node, not just the one you called.
 - Also covered: the empty `index.php` the plugin writes into `wp-content/wpmcp/`, and the
   same file when Delete removes it. The 1.0.x backup sweep needs nothing - what it deletes
   is a `.bak`, which PHP does not compile.

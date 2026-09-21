@@ -5,7 +5,8 @@
  * WHY THIS IS A SOURCE TEST AND NOT A BEHAVIOURAL ONE. Sprint 14e's review tried to break
  * the witness test in `tests/integration/OpcacheInvalidationTest.php` and found exactly one
  * mutation it cannot see: dropping the second argument. With
- * `opcache.validate_timestamps=1` - which is what both Local sites and the CI container run -
+ * `opcache.validate_timestamps=1` - measured on both Local sites, and what the `wordpress`
+ * image CI runs on is EXPECTED to have, never measured, because nothing has been pushed -
  * `opcache_invalidate($path, false)` returns TRUE whether or not it actually marked the
  * entry, and it only marks it when the file's mtime has moved. So the recorded boolean, the
  * md5 read from disk, the count and the ordering are all unchanged by the drop, and the
@@ -25,7 +26,9 @@
  *
  * READ WITH `token_get_all()`, NOT A GREP. A grep for `wp_opcache_invalidate(` matches the
  * docblocks that name the function and the `function_exists('wp_opcache_invalidate')` guards,
- * and would have to exempt them by hand. The tokenizer sees only real calls.
+ * and would have to exempt them by hand. The tokenizer sees only real calls - in BOTH
+ * spellings PHP has for one, which is a correction rather than a design note: see
+ * namesTheFunction().
  *
  * @group sprint-14d
  */
@@ -114,7 +117,7 @@ final class OpcacheForceArgumentTest extends TestCase
         for ($i = 0; $i < $count; $i++) {
             $token = $tokens[$i];
 
-            if (!is_array($token) || $token[0] !== T_STRING || $token[1] !== self::FUNCTION) {
+            if (!is_array($token) || !self::namesTheFunction($token)) {
                 continue;
             }
 
@@ -138,6 +141,38 @@ final class OpcacheForceArgumentTest extends TestCase
         }
 
         return $found;
+    }
+
+    /**
+     * Does this token name the function - under either of the two spellings PHP tokenises
+     * differently?
+     *
+     * `wp_opcache_invalidate(...)` is one `T_STRING`. `\wp_opcache_invalidate(...)` - the
+     * same call, fully qualified, and the spelling an IDE offers inside a namespaced file -
+     * is ONE `T_NAME_FULLY_QUALIFIED` token including the leading backslash (PHP 8.0+), not
+     * a `\` followed by a `T_STRING`. Filtering on `T_STRING` alone therefore made a third
+     * call site written that way invisible to this test, so it could have shipped without
+     * `$force` and left this green. Found by the sprint-14e round-2 review with a tokenizer
+     * probe, and re-proved here by adding such a call and watching this test go red.
+     *
+     * A string callable - `call_user_func('wp_opcache_invalidate', $p)` - is still invisible
+     * and is left so deliberately: it is not a spelling anybody reaches for, and matching
+     * string literals would drag in every docblock and `function_exists()` guard that the
+     * tokenizer walk exists to skip.
+     *
+     * @param array{0: int, 1: string, 2: int} $token
+     */
+    private static function namesTheFunction(array $token): bool
+    {
+        if ($token[0] === T_STRING) {
+            return $token[1] === self::FUNCTION;
+        }
+
+        if (defined('T_NAME_FULLY_QUALIFIED') && $token[0] === T_NAME_FULLY_QUALIFIED) {
+            return $token[1] === '\\' . self::FUNCTION;
+        }
+
+        return false;
     }
 
     /**
