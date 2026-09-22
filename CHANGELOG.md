@@ -4,7 +4,67 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.1
 
-**Unreleased.** Open for the next cycle. Nothing in it yet.
+**Unreleased.** Open for the next cycle. One change a user can see, and a lot of change in
+how this plugin is tested.
+
+### Changed: the declared WordPress floor is 6.4, and CI executes it
+
+- **`Requires at least` is now `6.4`, not `5.5`.** The old number was a claim nobody had
+  ever run, and it was wrong. `restore-revision` hooks `_wp_put_post_revision` and filters
+  on its second argument, `$post_id`, which core records as `@since 6.4.0`. Below 6.4 the
+  action fires with one argument, the filter never matches, and the tool answers
+  `pre_restore_revision_id: null` and `new_revision_id: null` on **every** call - two fields
+  the README documents. Not an error and not a wrong answer: a silently empty one, which is
+  worse. Nothing between 6.4 and today's release buys the plugin anything, so nothing is
+  lost by saying the true number.
+- **`Requires at least` is a GATE, not a hint**, which is why the header had to move rather
+  than the README explaining itself: core's `validate_plugin_requirements()` refuses to
+  ACTIVATE a plugin below the version it declares. A header of 6.9 with prose promising
+  "6.4 to 6.8 works" would have been false for exactly the sites it was addressed to.
+- **The README opens with a requirements table and the version each feature needs.** Today
+  that table has one row, because with the Abilities bridge parked there is no feature gap:
+  everything documented works at 6.4. A later release that gates a feature on a newer
+  WordPress adds its own row, and says so in that feature's own tool description.
+- **A new CI job runs the whole integration suite on WordPress 6.4 with PHP 8.2**, beside the
+  existing leg on current WordPress, and a red floor blocks a release. Until now
+  `.wp-env.json` pinned `"core": null` - "whatever is current today" - so no declared floor
+  had ever executed. The pair is stated in the README because 6.4 shipped the same month as
+  PHP 8.3: claiming a combination nobody can run is the mistake the old "5.5 with PHP 8.1"
+  pair made.
+
+### Fixed: a test that had to win a race with cron
+
+- **`TokenLifecycleTest` no longer loses its own fixture to the plugin's hourly sweep.** On
+  run 35669745657 a dead token's row was deleted between the request that was supposed to be
+  refused and the assertion that read the row back. A dead row is precisely what the sweep
+  deletes, so no fixture shape avoids the race: the five test classes that need a dead row to
+  survive now take the sweep off the schedule for their duration and put it back afterwards,
+  and the dead-token test FIRES the sweep at the worst possible moment on every run, so the
+  hold-off is proved rather than hoped for. No plugin code changed.
+
+### Changed: how this repository tests itself
+
+None of this is visible on a site. It is recorded because it changes what a green tick means.
+
+- **One integration run, not two.** CI ran the suite and then re-ran PHPUnit once per closed
+  sprint group, to prove no gate had silently skipped - 1 h 35 m 23 s followed by 1 h 38 m 28 s
+  of re-executing the same tests in the same container (run 35514259397). The same three
+  numbers per group are now read out of the one run's JUnit log. PHPUnit 10.5 refuses to
+  combine `--group` with `--list-tests`, so the group map comes from `--list-tests-xml`,
+  which is the only form that carries `groups=`.
+- **The gate-group list is one file**, `.github/sprint-gate-groups.txt`, read by both
+  workflows. It used to be written out twice and kept in step by a comment.
+- **A commit that ships byte-identical PHP is not re-tested.** `bin/code-fingerprint.sh`
+  hashes the git blob ids of exactly the files that go into the zip, and beside it the files
+  that decide what the tests are and where they run. A green run files its verdict under that
+  fingerprint; a later commit with the same fingerprint skips the WordPress tiers and PRINTS
+  which run it is reusing. The lint job and the unit tier always run, documentation included,
+  because `VersionConsistencyTest` ties this changelog's top heading to the version in the
+  code. A weekly scheduled run re-proves everything, because a matching fingerprint says the
+  code is identical and says nothing about WordPress or the container.
+- **A release reuses that verdict instead of re-running the gate.** Publishing still requires
+  a green full run for the code being published; what changed is that the run may be the one
+  CI already did. A one-word changelog commit used to get a 90-minute release gate.
 
 ## 1.1.0
 

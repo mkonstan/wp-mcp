@@ -89,12 +89,14 @@ comes after it. With it, a dev zip reads as the version it will become plus its 
 and cutting the next release means deleting the word "Unreleased". Decided 2026-09-21
 (`analysis/53-open-decisions.md`, D15).
 
-The tag push triggers `.github/workflows/release.yml`. It lints every PHP file, runs the
-unit suite on PHP 8.1 through 8.4, runs the integration suite against a `wp-env`
-container, and re-runs each closed sprint's gate group on its own, checking that every
-test in it ran rather than skipped. Only then does the `release` job build `wp-mcp.zip`,
-unzip it, compare every file against the source, lint the extracted copies, and publish a
-GitHub Release with the zip attached.
+The tag push triggers `.github/workflows/release.yml`, and the first thing it does is ask
+whether this code has already been proved. See **What the gate is now** below. When it has
+not, it lints every PHP file, runs the unit suite on PHP 8.1 through 8.4, runs the integration
+suite against a `wp-env` container on current WordPress and again on the declared floor, and
+checks from that run's JUnit log that every test in every closed sprint group executed rather
+than skipped. Only then does the `release` job build `wp-mcp.zip`, unzip it, compare every
+file against the source, lint the extracted copies, and publish a GitHub Release with the zip
+attached.
 
 That job stages the install set with `cp`, so it takes `build.txt` from
 `git archive HEAD build.txt` instead - the one file in the zip that is deliberately *not*
@@ -114,6 +116,54 @@ file that differs from its source, a `build.txt` that was not substituted, and a
 of its places (the definition, `code-write`, `code-restore`) and
 `wpmcp_code_version_current` in all four (the definition, `code-write`, `code-delete`,
 `code-restore`) - the second being "every mutation versions first", which is what the
-version table exists for. The `release` job has `needs: [lint, phpunit-unit,
-integration]`, so a red suite makes publishing impossible rather than inadvisable.
-Nothing here is run by hand, and the tag is the only trigger.
+version table exists for. The `release` job has `needs: [decide, lint, phpunit-unit,
+integration, integration-floor]`, so a red suite makes publishing impossible rather than
+inadvisable. Nothing here is run by hand, and a tag is the only trigger.
+
+## What the gate is now
+
+**The gate used to be "we ran the suite twice on this commit". It is now "a green full run
+exists for this code and this suite".** The same strength, in words that are about the code
+rather than about the number of times somebody pressed a button. `release.yml` used to
+re-run the whole gate on every tag with the reasoning that `ci.yml` does not run on a tag
+push, so there was no run to depend on - which is true of the COMMIT and not of the CODE.
+
+**The code fingerprint.** `bin/code-fingerprint.sh` prints three numbers for any commit:
+
+| | What it hashes | What a change to it means |
+|---|---|---|
+| `code` | the git blob ids of exactly the PHP that goes into the zip - `wp-mcp.php`, `endpoint.php`, `tools.php`, `trace.php`, `admin.php`, `uninstall.php`, `src/*.php` | the shipped code moved; everything runs |
+| `env` | both workflows, the gate-group list, `.wp-env.json`, `composer.json`, `composer.lock`, `phpunit.xml.dist`, `.gitattributes`, `tests/`, `bin/` | the suite or the container moved; everything runs |
+| `key` | the two together | what a green run is filed under |
+
+Run it yourself before pushing if you want to know what CI will do:
+
+```bash
+bin/code-fingerprint.sh          # HEAD
+bin/code-fingerprint.sh <ref>    # any commit
+```
+
+**How a verdict is stored.** A `ci.yml` run in which lint, the unit matrix, the current-core
+integration leg and the floor leg were ALL green uploads an artifact named
+`wpmcp-green-<key>`. That artifact is the verdict. It cannot be written by a run that skipped
+a tier, and it lives 90 days. Both workflows look for it by name; when they find one, the
+WordPress tiers are skipped and the run id being reused is printed in the log and in the run
+summary. **A skip is never silent** - a gate nobody can see skipping is how a gate stops
+gating.
+
+**What still always runs, on every commit including a documentation-only one:** the lint job
+and the unit tier on four PHP versions. `tests/unit/VersionConsistencyTest.php` ties this
+document's sibling `CHANGELOG.md` to `Version:` and `WPMCP_VER`, and
+`tests/unit/FloorConsistencyTest.php` ties the declared WordPress floor to the README and to
+the job that proves it. A markdown edit really can fail a test, and it costs a second.
+
+**What forces everything to run even when the code has not changed:** any change to the files
+in the `env` row above; the Monday 06:17 UTC schedule (because `.wp-env.json` pins
+`"core": null`, so the current-core leg's verdict goes stale without a commit being made); and
+`workflow_dispatch` with `force_full` set, for when you want the long answer on demand.
+
+**Proving the gate without publishing.** `release.yml` also triggers on a `citest-*` tag, and
+the publish step - only the publish step - requires a `v` tag. So a throwaway tag runs the
+fingerprint decision, the gate or its reuse, the zip build and the whole verification, and
+cannot create a release. That is how "it refuses to publish when the gate is red" is
+demonstrated rather than asserted. **Never use a `v*` tag for a test: that publishes.**
