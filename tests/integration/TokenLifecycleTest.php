@@ -59,9 +59,6 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
         self::buildFixtures(self::build(...), self::destroy(...));
     }
 
-    /** How many occurrences of the hourly sweep this class took off the schedule. */
-    private static int $sweepOccurrences = 0;
-
     private static function build(): void
     {
         Fixtures::purge();
@@ -74,7 +71,7 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
         // deletes - so there is no fixture shape that avoids the race and the test has to
         // own the timing. See Fixtures::suspendTokenSweep() for why unscheduling is the
         // whole of it. destroy() puts the schedule back.
-        self::$sweepOccurrences = Fixtures::suspendTokenSweep();
+        Fixtures::suspendTokenSweep();
 
         TestRecorder::install();
 
@@ -104,17 +101,21 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // FIRST, before anything that can throw. The sweep is the one thing this class took
+        // AWAY from the site rather than added to it, so the cost of not restoring it is
+        // paid by the site and not by the run: WordPress schedules this hook only on
+        // activation, so a teardown that dies at line two leaves a real site keeping dead
+        // token rows for ever. Everything below it is `tryRun`/`tryEvaluate` today, which is
+        // an argument for the current code and not for the next edit of it. Idempotent
+        // (analysis/58 §6).
+        Fixtures::resumeTokenSweep();
+
         TestRecorder::uninstall();
         Fixtures::deleteUser(self::$userId);
 
         foreach (self::labels() as $label) {
             Fixtures::deleteTokensLabelled($label);
         }
-
-        // Put the hourly sweep back. It is only ever scheduled on activation, so a suite
-        // that took it away and walked off would leave the site keeping dead token rows for
-        // ever, with nothing saying why.
-        Fixtures::resumeTokenSweep();
 
         Fixtures::purge();
     }

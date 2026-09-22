@@ -138,6 +138,15 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // FIRST, before anything that can throw. The sweep is the one thing this class took
+        // AWAY from the site rather than added to it, so the cost of not restoring it is
+        // paid by the site and not by the run: WordPress schedules this hook only on
+        // activation, so a teardown that dies at line two leaves a real site keeping dead
+        // token rows for ever. Everything below it is `tryRun`/`tryEvaluate` today, which is
+        // an argument for the current code and not for the next edit of it. Idempotent
+        // (analysis/58 §6).
+        Fixtures::resumeTokenSweep();
+
         Fixtures::revokeTokenIds(self::$unprefixedIds);
 
         self::$unprefixedIds = [];
@@ -154,9 +163,6 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
                 self::literal(self::$dir)
             ));
         }
-
-        // Put the hourly sweep back; the plugin only ever schedules it on activation.
-        Fixtures::resumeTokenSweep();
 
         Fixtures::purge();
     }
