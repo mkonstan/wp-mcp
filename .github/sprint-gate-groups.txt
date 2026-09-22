@@ -1,0 +1,57 @@
+# THE CLOSED SPRINT GATES, one per line, in the order they closed.
+#
+# The build plan defines a gate as `phpunit --group sprint-N` green in CI, with every test
+# in the group actually executed rather than skipped. This file is the list, and it is ONE
+# file on purpose: ci.yml and release.yml both read it, so the two can no longer drift.
+# They used to carry the list twice, and release.yml's copy had to be kept "in step" by
+# hand - a comment is not a mechanism.
+#
+# A new sprint adds its group here on the day its gate closes, and the commit that adds it
+# watches CI. A group listed here that no test carries makes the gate step RED (see
+# bin/ci-group-counts.php), so a renamed or deleted group cannot pass unnoticed.
+#
+# sprint-3, sprint-4 and sprint-5 were added in Sprint 6; before that the loop silently
+# stopped at sprint-2 and three gates were never asserted in CI at all. sprint-7 and
+# sprint-8 were added in Sprint 8, for the same reason: both gates had closed and neither
+# was asserted anywhere but on the machine that ran them. Each of the rest was added on the
+# day its own gate closed.
+#
+# Notes that used to live in ci.yml's loop, kept because they are what a red group means:
+#
+#   sprint-9  is the first group whose subject depends on the DATABASE FLAVOUR: sql-select
+#             spells its session statement timeout one way on MySQL and another on MariaDB,
+#             and the wp-env container is the only MariaDB anyone on this project can reach.
+#             A red sprint-9 in CI on a green local run is very likely that.
+#   sprint-10 is the first group that is mostly about ORDERING and PAGING, so it is the
+#             first a different COLLATION could move: list-posts compares titles in PHP
+#             with strcasecmp when it merges its two queries, and the rows it merges arrived
+#             in the server's own collation order.
+#   sprint-11 is the first group whose expectations depend on the SITE'S TIMEZONE:
+#             create-post's `date` stores post_date in local time and post_date_gmt in UTC,
+#             and the tests compute the second from the first through get_gmt_from_date() on
+#             the site rather than from a constant. Both Local sites and the container sit at
+#             UTC, so the case that actually exercises the conversion sends an explicit
+#             +05:30 offset.
+#   sprint-14c is the first group that shells out to GIT: it builds a real `git archive` of
+#             HEAD in a temp directory and reads the one file the plugin reads, which is the
+#             only way to prove that a built zip carries its commit without installing one.
+#             actions/checkout leaves a usable .git behind and the runner has git on PATH;
+#             the test FAILS rather than skips if it does not.
+sprint-0
+sprint-1
+sprint-2
+sprint-3
+sprint-4
+sprint-5
+sprint-6
+sprint-7
+sprint-8
+sprint-9
+sprint-10
+sprint-11
+sprint-12
+sprint-13
+sprint-14
+sprint-14b
+sprint-14c
+sprint-14d

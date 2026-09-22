@@ -1,16 +1,128 @@
 name: CI
 
-# Continuous safety net: lint every push and PR so broken PHP never reaches main,
-# then run the two test tiers. release.yml gates on the two test jobs by name
-# (`lint`, `phpunit-unit`, `integration`) - renaming a job here breaks the gate.
+# Continuous safety net: lint every push and PR so broken PHP never reaches main, then run
+# the test tiers. release.yml gates on job IDS (`lint`, `phpunit-unit`, `integration`,
+# `integration-floor`) - and those are ITS OWN jobs, not these; the two workflows are kept
+# in step by the shared group list and by this comment, and renaming a job in release.yml
+# is what breaks that gate.
+#
+# WHAT RUNS IS COMPUTED, NOT JUDGED (analysis/53-open-decisions.md, D17). `decide` prints a
+# CODE fingerprint over exactly the PHP that ships and an ENV fingerprint over the files
+# that decide what the tests are and where they run. When a green run already exists for
+# both, the WordPress tiers are skipped and the reuse is printed with the run id it is
+# reusing - never silently. The unit tier and the lint job ALWAYS run, docs included,
+# because VersionConsistencyTest ties the CHANGELOG's top heading to the version in the
+# code and a changelog edit really can fail a test.
 on:
   push:
-    branches: [main, v1, v1.1]
+    branches: [main, v1, v1.1, ci-lab]
   pull_request:
     branches: [main]
+  schedule:
+    # 06:17 UTC every Monday, and the reason is .wp-env.json's `"core": null`: the
+    # current-core leg runs against whatever WordPress is current on the day, so a green
+    # verdict goes stale without a single commit being made. WordPress ships a minor within
+    # days of a security issue, so a week is the longest gap that still catches one inside
+    # its own news cycle; it is also well inside the 90-day life of the artifact a green run
+    # is filed under, so the seal a reuse depends on is never close to expiring. A
+    # scheduled run always runs everything - see `decide`.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: 'Run the WordPress tiers even when a green run already exists for this fingerprint'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # `decide` asks the Actions API whether a green run already exists for this fingerprint.
+  actions: read
 
 jobs:
+  decide:
+    # THE ONLY JOB THAT DECIDES ANYTHING, and it is thirty seconds long. Everything below
+    # reads its outputs; nothing below re-derives them, so there is one answer per run.
+    name: Fingerprint (what has to run)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.fp.outputs.code }}
+      env: ${{ steps.fp.outputs.env }}
+      key: ${{ steps.fp.outputs.key }}
+      seal: ${{ steps.fp.outputs.seal }}
+      reuse: ${{ steps.reuse.outputs.reuse }}
+      reuse_run_id: ${{ steps.reuse.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compute the code and environment fingerprints
+        id: fp
+        run: |
+          set -euo pipefail
+          eval "$(bash bin/code-fingerprint.sh HEAD)"
+          # An empty fingerprint would make every commit look like every other one, which is
+          # the one failure of this mechanism that fails OPEN. Refuse rather than guess.
+          test -n "${code:-}" && test -n "${env:-}" && test -n "${key:-}"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "env=$env"   >> "$GITHUB_OUTPUT"
+          echo "key=$key"   >> "$GITHUB_OUTPUT"
+          echo "seal=wpmcp-green-$key" >> "$GITHUB_OUTPUT"
+          echo "code fingerprint: $code"
+          echo "env  fingerprint: $env"
+          echo "run key:          $key"
+
+      - name: Is a green full run already on file for this fingerprint?
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEAL: ${{ steps.fp.outputs.seal }}
+          FORCE: ${{ github.event_name == 'schedule' || inputs.force_full == true }}
+        run: |
+          set -euo pipefail
+
+          if [ "$FORCE" = "true" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+            printf '%s\n' \
+              "FULL RUN FORCED (${GITHUB_EVENT_NAME}). A matching fingerprint says the CODE" \
+              "is identical, not the environment - the scheduled run exists to re-prove the" \
+              "verdict against whatever WordPress and whatever container image are current" \
+              "today, because .wp-env.json pins neither." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # A seal is uploaded ONLY by a run in which lint, the unit matrix, the
+          # current-core integration leg and the floor leg were all green - see the `seal`
+          # job. So "an unexpired artifact with this name exists" and "a green full run
+          # exists for this exact code and this exact suite" are the same statement.
+          run_id=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f "name=${SEAL}" -f per_page=100 \
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty' \
+            || true)
+
+          if [ -n "${run_id:-}" ]; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+            {
+              echo "### The WordPress tiers are being SKIPPED, and here is exactly why"
+              echo
+              echo "- code fingerprint \`${{ steps.fp.outputs.code }}\`"
+              echo "- environment fingerprint \`${{ steps.fp.outputs.env }}\`"
+              echo "- run key \`${{ steps.fp.outputs.key }}\`"
+              echo "- reusing the green verdict of run [${run_id}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id})"
+              echo
+              echo "Two commits with the same code fingerprint ship byte-identical PHP, so"
+              echo "a test cannot tell them apart. The lint job and the unit tier still run."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Reusing run ${run_id}::No WordPress tier for code fingerprint ${{ steps.fp.outputs.code }}; run ${run_id} already proved it."
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+            echo "No green run on file for ${SEAL}. Running everything." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   lint:
+    # ALWAYS, docs included. It is eight seconds and it is where the drift guards live.
     name: PHP lint (8.2)
     runs-on: ubuntu-latest
     steps:
@@ -60,6 +172,12 @@ jobs:
     # Pure PHP, no WordPress, no Docker. The matrix is the declared support floor
     # (Requires PHP: 8.1) through the current release, so a syntax or behaviour
     # difference across versions shows up here rather than on a user's host.
+    #
+    # THIS TIER ALWAYS RUNS, even for a documentation-only commit, and it is the reason a
+    # docs commit is not exempt from testing: VersionConsistencyTest ties the top `## x.y.z`
+    # heading in CHANGELOG.md to `Version:` and `WPMCP_VER`, and FloorConsistencyTest ties
+    # the declared WordPress floor to the README and to the job that proves it. Either can
+    # go red on an edit that touches no PHP at all. It costs about a second.
     name: PHPUnit unit (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
     strategy:
@@ -88,8 +206,16 @@ jobs:
     # Black-box HTTP against a real WordPress. rest_do_request() would skip TLS,
     # Origin, Content-Type and the path-URL route, which is precisely where the
     # transport work lives - so this tier uses a real container over real HTTP.
+    #
+    # ONE RUN, NOT TWO. Until this sprint this job ran the suite and then re-ran PHPUnit
+    # once per closed sprint group to prove no gate had silently skipped: measured on run
+    # 35514259397 that was 1 h 35 m 23 s followed by 1 h 38 m 28 s of re-executing the same
+    # tests in the same container minutes later. The gates are now read out of the one run's
+    # JUnit log - see bin/ci-group-counts.php for how, and why a group map is needed at all.
     name: PHPUnit integration (wp-env)
     runs-on: ubuntu-latest
+    needs: decide
+    if: needs.decide.outputs.reuse != 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -109,7 +235,9 @@ jobs:
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Start WordPress (Docker, plugin mapped in and activated)
-        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it.
+        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it, and pins
+        # nothing: `"core": null` is wp-env's "latest stable WordPress", so THIS leg is the
+        # current-core leg and integration-floor below is the declared-floor leg.
         # ubuntu-latest runners ship Docker, so nothing else is needed.
         #
         # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
@@ -130,10 +258,13 @@ jobs:
         # tests (like every real MCP client) request /wp-json/.
         run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
 
-      - name: Confirm the plugin is active
-        run: npx --yes @wordpress/env run cli wp plugin list --status=active
+      - name: Confirm the plugin is active, and say which WordPress this is
+        run: |
+          npx --yes @wordpress/env run cli wp plugin list --status=active
+          npx --yes @wordpress/env run cli wp core version
 
-      - name: Integration suite
+      - name: Both suites, once, with the log the gates are read from
+        id: suite
         env:
           # @wordpress/env publishes the development instance on port 8888 by
           # default; it is plain HTTP, so TLS verification stays off.
@@ -143,56 +274,54 @@ jobs:
           # through `npx @wordpress/env run cli wp` instead. Without it every
           # fixture-bearing test skips - and a skip is green.
           WPMCP_WP_ENV: '1'
-        run: composer test:integration
+        # BOTH suites, not just `composer test:integration`, and that is not an accident:
+        # the per-group check below has to cover exactly what the old per-group re-runs
+        # covered, and those ran `phpunit --group sprint-N` over the whole configuration.
+        # Several gate groups (sprint-6 among them) live entirely in the unit tier. The unit
+        # suite adds about a second here.
+        run: vendor/bin/phpunit --log-junit junit-all.xml
 
-      - name: Sprint gates actually executed (a skipped gate is not a gate)
+      - name: Ask PHPUnit which group every test is in
+        id: map
+        # JUnit XML carries no group attribute, and `--group X --list-tests` is refused
+        # outright by PHPUnit 10.5 ("the --group and --list-tests options cannot be
+        # combined, --group is ignored"). `--list-tests-xml` is the one form that emits
+        # `groups=`, one row per data set, and it executes nothing.
+        run: vendor/bin/phpunit --list-tests-xml junit-map.xml
+
+      - name: Sprint gates actually executed - read from that one run
+        run: |
+          set -euo pipefail
+          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt \
+            | tr -d '\r' | grep -v '^[[:space:]]*$' | paste -sd, -)
+          echo "gate groups: $groups"
+          php bin/ci-group-counts.php \
+            --map=junit-map.xml --log=junit-all.xml \
+            --groups="$groups" --out=counts-from-log.txt
+
+      # ======================================================================
+      # ACCEPTANCE (a), AND IT IS TEMPORARY. Max's condition on this speed-up, in his own
+      # words: keep the OLD re-run step and the NEW log-based step on ONE run and require
+      # their per-group counts to be identical, then prove a deliberate skip turns the NEW
+      # step red, then remove the old step. These two steps ARE that condition, and the
+      # commit that closes acceptance (c) deletes both. They are not a permanent part of the
+      # gate - keeping them would keep the 1 h 38 m this sprint exists to remove.
+      # ======================================================================
+      - name: ACCEPTANCE (a) - the OLD step, re-running every group, unchanged
+        # It runs even when the new step went red, because acceptance (b) - a deliberate skip
+        # turning the NEW step red - is far more convincing beside the OLD step's verdict on
+        # the same skip. It does NOT run when the suite or the map failed: re-running every
+        # group for 1 h 38 m after a broken suite buys nothing.
+        if: always() && steps.suite.conclusion == 'success' && steps.map.conclusion == 'success'
         env:
           WPMCP_TEST_URL: http://localhost:8888
           WPMCP_WP_ENV: '1'
-        # The build plan defines a gate as `phpunit --group sprint-N` green in CI.
-        # Green is not enough: PHPUnit reports a wholly skipped group as green too,
-        # and that is exactly what happened to sprint-1 before WPMCP_WP_ENV existed.
-        #
-        # A class that skipped emits a <testsuite> carrying tests="0" (or no counts at
-        # all) and no <testcase> children, so the check is: at least one <testcase> in
-        # the log, and no WpMcp test class that contributed none.
         run: |
           status=0
-          # Every sprint that has closed. sprint-3, sprint-4 and sprint-5 were added in
-          # Sprint 6; before that the loop silently stopped at sprint-2 and three gates
-          # were never asserted in CI at all. sprint-7 and sprint-8 were added in Sprint 8,
-          # for the same reason: both gates had closed and neither was asserted anywhere
-          # but on the machine that ran them. sprint-9 was added in Sprint 9,
-          # sprint-10 in Sprint 10, sprint-11 in Sprint 11, sprint-12 in Sprint 12, sprint-13 in Sprint 13, sprint-14 in Sprint 14, sprint-14b in Sprint 14b, sprint-14c in Sprint 14c and sprint-14d in Sprint 14d, each on the day its gate
-          # closed. A new sprint adds its group here on the day its gate closes, and the
-          # commit that adds it watches this job.
-          #
-          # sprint-11 is the first group whose expectations depend on the SITE'S TIMEZONE:
-          # create-post's `date` stores post_date in local time and post_date_gmt in UTC,
-          # and the tests compute the second from the first through get_gmt_from_date() on
-          # the site rather than from a constant. Both Local sites and this container sit
-          # at UTC, so the case that actually exercises the conversion sends an explicit
-          # +05:30 offset. A red sprint-11 here on a green local run would be a wp-env
-          # whose timezone_string is not what this container has always had.
-          #
-          # sprint-10 is the first group that is mostly about ORDERING and PAGING, so it
-          # is the first a different COLLATION could move: list-posts compares titles in
-          # PHP with strcasecmp when it merges its two queries, and the rows it merges
-          # arrived in the server's own collation order. A red sprint-10 here on a green
-          # local run is very likely that.
-          #
-          # sprint-14c is the first group that shells out to GIT: it builds a real
-          # `git archive` of HEAD in a temp directory and reads the one file the plugin
-          # reads, which is the only way to prove that a built zip carries its commit
-          # without installing one. actions/checkout leaves a usable .git here and the
-          # runner has git on PATH; the test FAILS rather than skips if it does not,
-          # because a gate that skips is not a gate.
-          #
-          # sprint-9 is the first group whose subject depends on the DATABASE FLAVOUR:
-          # sql-select spells its session statement timeout one way on MySQL and another
-          # on MariaDB, and this container is the only MariaDB anyone on this project can
-          # reach. A red sprint-9 here on a green local run is very likely that.
-          for group in sprint-0 sprint-1 sprint-2 sprint-3 sprint-4 sprint-5 sprint-6 sprint-7 sprint-8 sprint-9 sprint-10 sprint-11 sprint-12 sprint-13 sprint-14 sprint-14b sprint-14c sprint-14d; do
+          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt \
+            | tr -d '\r' | grep -v '^[[:space:]]*$')
+          : > counts-from-rerun.txt
+          for group in $groups; do
             echo "::group::$group"
             log="junit-$group.xml"
             rm -f "$log"
@@ -205,21 +334,71 @@ jobs:
             fi
             cases=$(grep -c '<testcase ' "$log" || true)
             empty=$(grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -cv 'tests="[1-9]' || true)
-            # Per-TEST skips too: a class whose every method calls markTestSkipped
-            # still reports tests="N", so the class-level check above misses it. Those
-            # emit a <skipped/> child per testcase.
             skipped=$(grep -c '<skipped' "$log" || true)
-            echo "$group: testcases=$cases classes-that-ran-nothing=$empty skipped-tests=$skipped"
+            echo "$group: testcases=$cases classes-that-ran-nothing=$empty skipped-tests=$skipped" \
+              | tee -a counts-from-rerun.txt
             if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ] || [ "$skipped" -ne 0 ]; then
               echo "::error::$group did not execute every one of its tests. A gate that skips is not a gate."
-              grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -v 'tests="[1-9]' || true
-              grep -o '<testcase name="[^"]*"[^>]*>[[:space:]]*<skipped' "$log" || true
               status=1
             fi
             rm -f "$log"
             echo "::endgroup::"
           done
           exit $status
+
+      - name: ACCEPTANCE (a) - the two steps must agree, group for group
+        # A DIFF, not a pair of numbers for a human to read down. The whole risk of this
+        # change is that the new step counts something subtly different, and an eye is a
+        # poor instrument for eighteen lines of three numbers.
+        if: always()
+        run: |
+          if [ ! -f counts-from-log.txt ] || [ ! -f counts-from-rerun.txt ]; then
+            # One of the two steps never got to write its file, which means it failed - the
+            # job is already red for that reason and there is nothing here to mask.
+            echo "Both count files are needed for this comparison and one is missing:"
+            ls -l counts-from-log.txt counts-from-rerun.txt || true
+            exit 0
+          fi
+          echo "::group::from the one run's log"; cat counts-from-log.txt; echo "::endgroup::"
+          echo "::group::from re-running each group"; cat counts-from-rerun.txt; echo "::endgroup::"
+          if diff -u counts-from-rerun.txt counts-from-log.txt; then
+            echo "The log-based step and the per-group re-runs agree on every group."
+          else
+            echo "::error::The new log-based gate check disagrees with the per-group re-runs. The speed-up is not safe to adopt."
+            exit 1
+          fi
+
+      - name: Per-group wall clock, from the same log
+        # Free measurement, and the input to the next question anybody will ask: is it
+        # worth sharding this job into a matrix of groups? That answer needs per-group
+        # durations, which the log already has and nobody had ever read.
+        if: always()
+        run: |
+          php -r '
+            $x = simplexml_load_file("junit-all.xml");
+            $rows = [];
+            foreach ($x->xpath("//testsuite[@file]") as $s) {
+              $rows[(string) $s["name"]] = (float) $s["time"];
+            }
+            arsort($rows);
+            $total = array_sum($rows);
+            printf("%-58s %9s\n", "class", "seconds");
+            foreach ($rows as $n => $t) { printf("%-58s %9.1f\n", $n, $t); }
+            printf("%-58s %9.1f\n", "TOTAL", $total);
+          ' || true
+
+      - name: Upload the run log and the counts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-log-${{ github.run_attempt }}
+          path: |
+            junit-all.xml
+            junit-map.xml
+            counts-from-log.txt
+            counts-from-rerun.txt
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: WordPress logs (on failure)
         if: failure()
@@ -232,3 +411,135 @@ jobs:
       - name: Stop WordPress
         if: always()
         run: npx --yes @wordpress/env stop || true
+
+  integration-floor:
+    # THE DECLARED FLOOR, EXECUTED (analysis/53-open-decisions.md, D2; analysis/52 §10).
+    # `Requires at least:` is not a hint - core's validate_plugin_requirements() refuses
+    # ACTIVATION below it - and until this job existed the number in the header had never
+    # been run: .wp-env.json pins `"core": null`, so the only WordPress ever tested was
+    # whatever was current on the day.
+    #
+    # A SEPARATE JOB, NOT A MATRIX LEG on `integration`. A matrix renames the job to
+    # "PHPUnit integration (wp-env) (…)", and release.yml gates on job ids of its own
+    # copies; the scout that measured this (analysis/52 §10.2) names the rename as the way
+    # to break the release gate without noticing.
+    #
+    # PHP 8.2, NOT 8.3, and that pairing is stated in the README beside the requirement:
+    # WordPress 6.4 shipped in November 2023, the same month as PHP 8.3, and declaring a
+    # combination nobody can execute is the exact mistake the old "5.5 + PHP 8.1" claim
+    # made. WP_ENV_PHP_VERSION sets the container's PHP; the 8.2 above is the runner's,
+    # which only runs PHPUnit and Guzzle.
+    #
+    # NO per-group step here, deliberately. "Did every gate group run" is a property of the
+    # test suite, which the current-core leg already proves; asking it twice would add
+    # another 1 h 38 m for nothing (analysis/52 §10.3).
+    name: PHPUnit integration (floor WP 6.4 / PHP 8.2)
+    runs-on: ubuntu-latest
+    needs: decide
+    if: needs.decide.outputs.reuse != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Set up Node (for @wordpress/env)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Start WordPress at the declared floor
+        env:
+          # wp-env reads both of these from the environment and they override
+          # .wp-env.json, so this job sets the floor and .wp-env.json keeps saying
+          # "current" for the leg above. The tag is the bare `6.4` in WordPress/WordPress,
+          # which is 6.4.0 - the oldest release the header claims, and therefore the one
+          # worth executing.
+          WP_ENV_CORE: WordPress/WordPress#6.4
+          WP_ENV_PHP_VERSION: '8.2'
+        run: npx --yes @wordpress/env start --debug
+
+      - name: Enable pretty permalinks
+        run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
+
+      - name: Confirm this really is the floor, and that the plugin activated on it
+        # THE FIRST ASSERTION OF THIS JOB, and the one that makes the rest mean anything: a
+        # WP_ENV_CORE that wp-env quietly ignored would leave this leg testing current core
+        # twice and reporting a floor it never touched.
+        run: |
+          set -euo pipefail
+          version=$(npx --yes @wordpress/env run cli wp core version | tr -d '\r' | tail -1)
+          echo "wp core version: $version"
+          case "$version" in
+            6.4|6.4.*) echo "The container is at the declared floor." ;;
+            *) echo "::error::This leg is supposed to run the declared floor (6.4) and the container says ${version}. WP_ENV_CORE did not take."; exit 1 ;;
+          esac
+          npx --yes @wordpress/env run cli wp plugin list --status=active | tee active.txt
+          grep -q 'wp-mcp' active.txt || {
+            echo "::error::The plugin is not active on WordPress ${version}. A floor the plugin cannot activate on is not a floor."
+            exit 1
+          }
+
+      - name: Integration suite on the floor
+        env:
+          WPMCP_TEST_URL: http://localhost:8888
+          WPMCP_WP_ENV: '1'
+        run: composer test:integration
+
+      - name: WordPress logs (on failure)
+        if: failure()
+        timeout-minutes: 5
+        run: npx --yes @wordpress/env logs all --watch=false || true
+
+      - name: Stop WordPress
+        if: always()
+        run: npx --yes @wordpress/env stop || true
+
+  seal:
+    # THE ONE THING THAT MAKES A REUSE HONEST. This job uploads an artifact whose NAME is
+    # the run key, and it can only run when every tier above was green - `needs` without
+    # `always()` refuses to start otherwise, and a skipped dependency skips it too. So
+    # "an unexpired artifact called wpmcp-green-<key> exists" and "a green lint, unit
+    # matrix, current-core integration leg and floor leg exist for this exact code and this
+    # exact suite" are the same statement, and that is the statement `decide` and
+    # release.yml look up.
+    #
+    # It does not run on a reused verdict (reuse == 'true'), because the seal it would
+    # write is the seal it just read: a run that executed no WordPress tier must not be
+    # able to vouch for one.
+    name: Seal this fingerprint as proven
+    runs-on: ubuntu-latest
+    needs: [decide, lint, phpunit-unit, integration, integration-floor]
+    if: needs.decide.outputs.reuse == 'false'
+    steps:
+      - name: Write what was proven
+        run: |
+          mkdir -p seal
+          {
+            echo "code=${{ needs.decide.outputs.code }}"
+            echo "env=${{ needs.decide.outputs.env }}"
+            echo "key=${{ needs.decide.outputs.key }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
+            echo "commit=${{ github.sha }}"
+            echo "ref=${{ github.ref }}"
+            echo "proved=lint,phpunit-unit,integration,integration-floor"
+          } > "seal/${{ needs.decide.outputs.key }}.txt"
+          cat "seal/${{ needs.decide.outputs.key }}.txt"
+
+      - name: Upload the seal
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.decide.outputs.seal }}
+          path: seal/
+          # The retention is the real lifetime of a reusable verdict. 90 days is the
+          # maximum for a public repository, and the Monday schedule above re-proves the
+          # branch long before anything approaches it.
+          retention-days: 90

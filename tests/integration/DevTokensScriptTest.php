@@ -89,6 +89,13 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        // THE HOURLY SWEEP IS HELD OFF for this class, because it makes a token DEAD and
+        // then needs the row to still be there. `wpmcp_flush_expired_cb()` deletes exactly
+        // the rows `wpmcp_token_state()` calls dead, so the two sets are the same set and no
+        // fixture shape avoids the race - see Fixtures::suspendTokenSweep(), and run
+        // 35669745657, where this race cost a three-hour run. destroy() puts it back.
+        Fixtures::suspendTokenSweep();
+
         self::$userId = Fixtures::createUser(self::login(), 'administrator');
         self::$host   = WpCli::evaluate('echo strtolower((string) wp_parse_url(home_url(), PHP_URL_HOST));');
         self::$dir    = WpCli::evaluate(sprintf(
@@ -147,6 +154,9 @@ final class DevTokensScriptTest extends FixtureIntegrationTestCase
                 self::literal(self::$dir)
             ));
         }
+
+        // Put the hourly sweep back; the plugin only ever schedules it on activation.
+        Fixtures::resumeTokenSweep();
 
         Fixtures::purge();
     }

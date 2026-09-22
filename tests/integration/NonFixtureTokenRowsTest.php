@@ -89,6 +89,13 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        // THE HOURLY SWEEP IS HELD OFF for this class, because it makes a token DEAD and
+        // then needs the row to still be there. `wpmcp_flush_expired_cb()` deletes exactly
+        // the rows `wpmcp_token_state()` calls dead, so the two sets are the same set and no
+        // fixture shape avoids the race - see Fixtures::suspendTokenSweep(), and run
+        // 35669745657, where this race cost a three-hour run. destroy() puts it back.
+        Fixtures::suspendTokenSweep();
+
         // Owned by user 1, not by a fixture user: the test runs purge(), which deletes
         // this run's users, and a sentinel must outlive everything the run does.
         Fixtures::mintToken('read', self::sentinelLabel(), 1);
@@ -151,6 +158,10 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         Fixtures::deleteTokensLabelled(self::scratchLabel() . '-dev');
         Fixtures::deleteTokensLabelled(self::decoyLabel());
         Fixtures::deleteTokensLabelled(self::lookalikeSeedLabel());
+
+        // Put the hourly sweep back; the plugin only ever schedules it on activation.
+        Fixtures::resumeTokenSweep();
+
         Fixtures::purge();
     }
 

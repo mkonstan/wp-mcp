@@ -12,14 +12,39 @@ PHP files, a token table, and one REST route that stays dormant until a live tok
 | | |
 |---|---|
 | PHP | 8.1 or newer |
-| WordPress | 5.5 or newer |
+| WordPress | 6.4 or newer |
 | HTTPS | required; the endpoint refuses plaintext with 403 before it reads the token |
 
-The WordPress floor is `wp_new_comment()`, the function `reply-comment` hands its comment
-to. Core's history for it reads `@since 5.5.0 Introduced the comment_type argument`: from
-5.5 that key in the data you pass is an input the function reads, defaulting to `comment`
-when it is empty. `reply-comment` passes it, so on anything older it is passing an argument
-the function did not take. Everything else the plugin calls is older than 5.5.
+**What works at which WordPress version.** One row, because there is nothing to put in a
+second: the whole documented tool set works at 6.4, and every version above it. If a later
+release gates a feature on a newer WordPress, that feature gets its own row here and says so
+in its own tool description - WordPress has ONE `Requires at least` field for the whole
+plugin, not one per feature, so a per-feature condition has to be documented rather than
+implied.
+
+| WordPress | What you get |
+|---|---|
+| 6.4 and newer | Everything this README documents |
+
+**Where 6.4 comes from.** `_wp_put_post_revision`'s second argument, `$post_id`, which core
+records as `@since 6.4.0` (`wp-includes/revision.php`). `restore-revision` hooks that action
+and filters on that argument to know which revisions core wrote while restoring. Below 6.4
+the action fires with one argument, the filter never matches, and the tool returns
+`pre_restore_revision_id` and `new_revision_id` as `null` on every call - two fields this
+README documents. That is not an error and not a wrong answer; it is a silently empty one,
+which is worse. Everything else the plugin calls is older, the nearest being
+`wp_get_environment_type()`'s `'local'` value at 5.5.1 and `wp_new_comment()`'s
+`comment_type` argument at 5.5.0.
+
+**And 6.4 is executed, not asserted.** `Requires at least` is a gate, not a hint: core's
+`validate_plugin_requirements()` refuses to ACTIVATE a plugin below the version it declares,
+so a number nobody runs is a promise nobody has checked. CI runs the integration suite twice
+on every change - once against the current WordPress release and once against **WordPress
+6.4 on PHP 8.2**, which is the pairing this floor is actually tested at. 6.4 shipped the same
+month as PHP 8.3, so 8.2 is the newest PHP that combination has ever been sensible on; the
+`Requires PHP: 8.1` floor is proven separately by the unit tier, which runs on 8.1, 8.2, 8.3
+and 8.4. Declaring a combination nobody can execute is exactly the mistake the previous
+"WordPress 5.5 with PHP 8.1" claim made.
 
 HTTPS is not optional, and behind a proxy it needs one line of configuration. Read
 [HTTPS enforcement depends on your proxy](#https-enforcement-depends-on-your-proxy)
