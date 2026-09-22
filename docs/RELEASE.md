@@ -143,19 +143,51 @@ bin/code-fingerprint.sh          # HEAD
 bin/code-fingerprint.sh <ref>    # any commit
 ```
 
-**How a verdict is stored.** A `ci.yml` run in which lint, the unit matrix, the current-core
-integration leg and the floor leg were ALL green uploads an artifact named
-`wpmcp-green-<key>`. That artifact is the verdict. It cannot be written by a run that skipped
-a tier, and it lives 90 days. Both workflows look for it by name; when they find one, the
-WordPress tiers are skipped and the run id being reused is printed in the log and in the run
-summary. **A skip is never silent** - a gate nobody can see skipping is how a gate stops
-gating.
+**How a verdict is stored, and what makes it trustworthy.** A `ci.yml` run in which lint, the
+unit matrix, the current-core integration leg and the floor leg were ALL green uploads an
+artifact named `wpmcp-green-<key>`. That artifact is the verdict. It cannot be written by a run
+that skipped a tier, and it lives 90 days.
 
-**What still always runs, on every commit including a documentation-only one:** the lint job
-and the unit tier on four PHP versions. `tests/unit/VersionConsistencyTest.php` ties this
+**But an artifact NAME is not a proof**, and this repository is public: a pull request runs its
+own copy of `ci.yml`, and fork-PR artifacts are stored here. So `bin/reusable-green-run.sh` is
+what both workflows actually call, and it checks the RUN the artifact claims to come from:
+
+| Check | What it closes |
+|---|---|
+| `head_repository_id == repository_id` | anything that ran from a fork |
+| the run's `path` is `.github/workflows/ci.yml` | a seal from some other workflow |
+| its `conclusion` is `success` | a verdict from a run that was not green |
+| it was sealed within **14 days** | a verdict about a WordPress two minors old |
+| **its head commit's own fingerprint equals this key** | everything else |
+
+The last one is the one that does not trust a label: a forged artifact name would have to be
+accompanied by a commit **in this repository** whose shipped PHP and whose test suite are
+byte-identical to the one being released - at which point it is not a forgery, it is the same
+code. When a candidate is accepted the run id is printed in the log and in the run summary;
+when one is rejected, the reason is printed too. **A skip is never silent** - a gate nobody can
+see skipping is how a gate stops gating.
+
+*Why fourteen days.* The current-core leg runs against `"core": null`, so its verdict means
+"whatever WordPress was current that day", and GitHub runs the Monday schedule on the default
+branch only - a release branch's seal is never re-proved. A fortnight is shorter than the gap
+between WordPress minor releases, so a reused verdict is at most one generation behind and
+usually zero; it is far longer than the case reuse exists for (a documentation commit minutes
+after a green run); and it is far shorter than the 90 days the artifact lives, so the cap, not
+the expiry, is what decides. A tag cut months after the code was proved re-runs everything.
+
+**What still always runs, on every commit including a documentation-only one, and on every tag
+including a reused one:** the lint job and the unit tier on four PHP versions. `tests/unit/VersionConsistencyTest.php` ties this
 document's sibling `CHANGELOG.md` to `Version:` and `WPMCP_VER`, and
 `tests/unit/FloorConsistencyTest.php` ties the declared WordPress floor to the README and to
 the job that proves it. A markdown edit really can fail a test, and it costs a second.
+
+**That is why the release workflow runs them too, reuse or no reuse.** The fingerprint
+deliberately does not hash `README.md`, `CHANGELOG.md`, `SECURITY.md`, `ARCHITECTURE.md`,
+`BUILD-NOTES.md`, `LICENSE`, `docs/*.md` or `build.txt` - none of them is executed on a site -
+and every one of them ships in the zip. The unit tier is the only thing that tests them, so a
+reuse may stand in for the two WordPress tiers and may never stand in for lint or the unit
+tier. Before that was fixed, a commit that was sealed by its parent and RED on its own
+`VersionConsistencyTest` could be tagged and published.
 
 **What forces everything to run even when the code has not changed:** any change to the files
 in the `env` row above; the Monday 06:17 UTC schedule (because `.wp-env.json` pins

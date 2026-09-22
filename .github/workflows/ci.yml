@@ -75,8 +75,15 @@ jobs:
         id: reuse
         env:
           GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.fp.outputs.key }}
           SEAL: ${{ steps.fp.outputs.seal }}
           FORCE: ${{ github.event_name == 'schedule' || inputs.force_full == true }}
+          # THE AGE CAP, defended at length in bin/reusable-green-run.sh. Short version: a
+          # verdict about `"core": null` means "whatever WordPress was current that day", and
+          # GitHub runs the schedule on the DEFAULT branch only, so a release branch's seal is
+          # never re-proved. Fourteen days bounds a reused verdict to at most one WordPress
+          # generation behind, and it is far longer than the case reuse exists for.
+          MAX_AGE_DAYS: '14'
         run: |
           set -euo pipefail
 
@@ -93,12 +100,15 @@ jobs:
 
           # A seal is uploaded ONLY by a run in which lint, the unit matrix, the
           # current-core integration leg and the floor leg were all green - see the `seal`
-          # job. So "an unexpired artifact with this name exists" and "a green full run
-          # exists for this exact code and this exact suite" are the same statement.
-          run_id=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-            -f "name=${SEAL}" -f per_page=100 \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty' \
-            || true)
+          # job. That is necessary and it is not sufficient.
+          # An artifact NAME is not a proof. This repository is public, `ci.yml` has a
+          # pull_request trigger, a pull_request run executes the PR's OWN ci.yml, and
+          # fork-PR artifacts are stored in the base repository - so a name anyone can write
+          # must not be what a release rests on (analysis/58 §3b). The lookup therefore lives
+          # in a script that checks the RUN the artifact claims to come from: same
+          # repository, `.github/workflows/ci.yml`, conclusion success, inside the age cap,
+          # and a head commit whose own fingerprint is this key.
+          run_id=$(bash bin/reusable-green-run.sh "${GITHUB_REPOSITORY}" "${KEY}" "${MAX_AGE_DAYS}" || true)
 
           if [ -n "${run_id:-}" ]; then
             echo "reuse=true" >> "$GITHUB_OUTPUT"
@@ -408,6 +418,17 @@ jobs:
           case "$version" in
             6.4|6.4.*) echo "The container is at the declared floor." ;;
             *) echo "::error::This leg is supposed to run the declared floor (6.4) and the container says ${version}. WP_ENV_CORE did not take."; exit 1 ;;
+          esac
+          # AND THE OTHER HALF OF THE PAIR. The README says "WordPress 6.4 on PHP 8.2" and
+          # FloorConsistencyTest pins that sentence to WP_ENV_PHP_VERSION - but until now
+          # nothing asserted what the CONTAINER actually got. wp-env builds from
+          # `wordpress:php8.2` today; if it ever stopped honouring the variable the README
+          # sentence would go false with this job still green (analysis/58 §5).
+          php_version=$(npx --yes @wordpress/env run cli wp eval 'echo PHP_VERSION;' | tr -d '\r' | tail -1)
+          echo "container PHP: $php_version"
+          case "$php_version" in
+            8.2|8.2.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
+            *) echo "::error::This leg claims WordPress 6.4 on PHP 8.2 and the container is on PHP ${php_version}. WP_ENV_PHP_VERSION did not take, and the README sentence is now false."; exit 1 ;;
           esac
           npx --yes @wordpress/env run cli wp plugin list --status=active | tee active.txt
           grep -q 'wp-mcp' active.txt || {

@@ -13,9 +13,14 @@ name: Release
 # straight to building and verifying the zip; when none exists, all four gate jobs run
 # exactly as they always did.
 #
+# WHAT A REUSE MAY AND MAY NOT BUY. It may stand in for the two WordPress tiers, which are
+# about the shipped PHP and nothing else. It may NOT stand in for lint or the unit tier:
+# those run on every tag, because the fingerprint deliberately does not hash the markdown
+# that ships beside the code, and the unit tier is the only thing that tests it.
+#
 # THE SAFETY PROPERTY IS UNCHANGED IN STRENGTH AND DIFFERENT IN WORDS: it was "we ran the
-# suite twice on this code"; it is now "a green full run exists for this code and this
-# suite". The `release` job's `if:` is the whole proof and it is written out longhand for
+# suite twice on this code"; it is now "lint and the unit tier are green on THIS commit, and
+# a green full run exists for this code and this suite". The `release` job's `if:` is the whole proof and it is written out longhand for
 # that reason - either the reuse is real and every gate job was deliberately skipped, or
 # there is no reuse and every gate job succeeded. There is no third branch, and `always()`
 # is confined to that one expression so a cancelled or failed job can never read as green.
@@ -66,14 +71,21 @@ jobs:
         id: reuse
         env:
           GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.fp.outputs.key }}
           SEAL: wpmcp-green-${{ steps.fp.outputs.key }}
+          # Same cap as ci.yml, and the same reason - see bin/reusable-green-run.sh.
+          MAX_AGE_DAYS: '14'
         run: |
           set -euo pipefail
 
-          run_id=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-            -f "name=${SEAL}" -f per_page=100 \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty' \
-            || true)
+          # An artifact NAME is not a proof. This repository is public, `ci.yml` has a
+          # pull_request trigger, a pull_request run executes the PR's OWN ci.yml, and
+          # fork-PR artifacts are stored in the base repository - so a name anyone can write
+          # must not be what a release rests on (analysis/58 §3b). The lookup therefore lives
+          # in a script that checks the RUN the artifact claims to come from: same
+          # repository, `.github/workflows/ci.yml`, conclusion success, inside the age cap,
+          # and a head commit whose own fingerprint is this key.
+          run_id=$(bash bin/reusable-green-run.sh "${GITHUB_REPOSITORY}" "${KEY}" "${MAX_AGE_DAYS}" || true)
 
           if [ -n "${run_id:-}" ]; then
             echo "reuse=true" >> "$GITHUB_OUTPUT"
@@ -98,10 +110,10 @@ jobs:
           fi
 
   lint:
+    # ALWAYS, reuse or no reuse, and it does not wait for `decide` - it has nothing to
+    # decide. See `phpunit-unit` below for why the two cheap tiers are unconditional here.
     name: PHP lint (8.2)
     runs-on: ubuntu-latest
-    needs: decide
-    if: needs.decide.outputs.reuse != 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -146,10 +158,21 @@ jobs:
           test "$versioned" -eq 4
 
   phpunit-unit:
+    # ALWAYS, AND THIS IS THE ONE THING A REUSE MUST NOT BUY. The fingerprint deliberately
+    # does not hash README.md, CHANGELOG.md, SECURITY.md, ARCHITECTURE.md, BUILD-NOTES.md,
+    # LICENSE, docs/*.md or build.txt - none of them is executed on a site - and all of them
+    # SHIP in the zip this workflow builds. The unit tier is the only thing that tests them:
+    # VersionConsistencyTest ties CHANGELOG.md's top heading to `Version:` and `WPMCP_VER`,
+    # FloorConsistencyTest ties the README's requirements table to the declared floor, and
+    # BuildStampTest reads docs/RELEASE.md and build.txt.
+    #
+    # So the reuse branch used to have a hole exactly the width of those files: commit Y =
+    # sealed commit X plus a CHANGELOG heading that says 1.2.0 while the header says 1.1.1
+    # has X's fingerprint, inherits X's seal, and - before this - published, even though its
+    # own ci.yml run was RED on VersionConsistencyTest. Found by review (analysis/58 §1).
+    # The tier costs about forty seconds in parallel and it is not skippable.
     name: PHPUnit unit (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
-    needs: decide
-    if: needs.decide.outputs.reuse != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -280,6 +303,17 @@ jobs:
             6.4|6.4.*) echo "The container is at the declared floor." ;;
             *) echo "::error::This leg is supposed to run the declared floor (6.4) and the container says ${version}. WP_ENV_CORE did not take."; exit 1 ;;
           esac
+          # AND THE OTHER HALF OF THE PAIR. The README says "WordPress 6.4 on PHP 8.2" and
+          # FloorConsistencyTest pins that sentence to WP_ENV_PHP_VERSION - but until now
+          # nothing asserted what the CONTAINER actually got. wp-env builds from
+          # `wordpress:php8.2` today; if it ever stopped honouring the variable the README
+          # sentence would go false with this job still green (analysis/58 §5).
+          php_version=$(npx --yes @wordpress/env run cli wp eval 'echo PHP_VERSION;' | tr -d '\r' | tail -1)
+          echo "container PHP: $php_version"
+          case "$php_version" in
+            8.2|8.2.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
+            *) echo "::error::This leg claims WordPress 6.4 on PHP 8.2 and the container is on PHP ${php_version}. WP_ENV_PHP_VERSION did not take, and the README sentence is now false."; exit 1 ;;
+          esac
           npx --yes @wordpress/env run cli wp plugin list --status=active | tee active.txt
           grep -q 'wp-mcp' active.txt || {
             echo "::error::The plugin is not active on WordPress ${version}. A floor the plugin cannot activate on is not a floor."
@@ -306,28 +340,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: [decide, lint, phpunit-unit, integration, integration-floor]
     # THE WHOLE SAFETY PROPERTY, LONGHAND. `always()` is here only so that this job is
-    # evaluated when the four gate jobs were deliberately SKIPPED; every other clause then
-    # narrows it back to exactly two legitimate shapes, and nothing else can reach the
+    # evaluated when the two WordPress tiers were deliberately SKIPPED; every other clause
+    # then narrows it back to exactly two legitimate shapes, and nothing else can reach the
     # build. `needs.decide.result` must itself be success, or a broken fingerprint step
     # could leave `reuse` empty and be read as "no reuse, and no gate ran either".
+    #
+    # LINT AND THE UNIT TIER ARE REQUIRED OUTSIDE THE BRANCH, which is the fix for the one
+    # hole review found (analysis/58 §1): they run on every tag, so "success" is the only
+    # acceptable result for them whether or not the WordPress tiers were reused. Only
+    # `integration` and `integration-floor` carry the skipped/success pairing, because they
+    # are the only two a fingerprint can stand in for.
     #
     # Note the bracket spelling: a job id with a hyphen cannot be reached with a dot in a
     # GitHub expression, and `needs.phpunit-unit.result` parses as a SUBTRACTION.
     if: >-
       always()
       && needs.decide.result == 'success'
+      && needs.lint.result == 'success'
+      && needs['phpunit-unit'].result == 'success'
       && (
         (
           needs.decide.outputs.reuse == 'true'
-          && needs.lint.result == 'skipped'
-          && needs['phpunit-unit'].result == 'skipped'
           && needs.integration.result == 'skipped'
           && needs['integration-floor'].result == 'skipped'
         )
         || (
           needs.decide.outputs.reuse == 'false'
-          && needs.lint.result == 'success'
-          && needs['phpunit-unit'].result == 'success'
           && needs.integration.result == 'success'
           && needs['integration-floor'].result == 'success'
         )

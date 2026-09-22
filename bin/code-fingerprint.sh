@@ -70,6 +70,32 @@ tree_lines() {
     git ls-tree -r "$ref" -- "$@" | awk '$2 == "blob" { print $3, $4 }'
 }
 
+# EVERY LISTED PATH MUST STILL MATCH SOMETHING, and this is the only way the fingerprint can
+# quietly get WEAKER rather than noisier. `git ls-tree -r <ref> -- does/not/exist` prints
+# nothing and exits 0, so a path that is renamed or moved out of the tree drops out of the
+# hash in silence: the number keeps being computed, keeps looking stable, and simply stops
+# covering that file. A fingerprint that covers less than it says is worse than no
+# fingerprint, because a reuse is decided on it. Found by review (analysis/58 §2).
+#
+# The CODE half was accidentally protected already - its `grep '[.]php$'` exits 1 on no match
+# and `pipefail` aborts the script - but "accidentally" is not a guarantee, so both halves are
+# checked the same way, out loud, naming the path.
+require_paths() {
+    local half="$1"; shift
+    local path
+    for path in "$@"; do
+        if [ -z "$(git ls-tree -r "$ref" -- "$path" | head -1)" ]; then
+            echo "code-fingerprint: the $half half lists '$path' and $ref has nothing there." >&2
+            echo "code-fingerprint: a path that no longer matches is silently dropped from the hash," >&2
+            echo "code-fingerprint: so the fingerprint would stop covering it. Fix the list or the path." >&2
+            exit 1
+        fi
+    done
+}
+
+require_paths code "${code_paths[@]}"
+require_paths environment "${env_paths[@]}"
+
 # PHP only: only .php is executed on a site.
 code=$(tree_lines "${code_paths[@]}" | grep -E '[.]php$' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
 # Every file: a fixture .json or a shell script in bin/ changes what the suite does just
