@@ -264,7 +264,6 @@ jobs:
           npx --yes @wordpress/env run cli wp core version
 
       - name: Both suites, once, with the log the gates are read from
-        id: suite
         env:
           # @wordpress/env publishes the development instance on port 8888 by
           # default; it is plain HTTP, so TLS verification stays off.
@@ -282,7 +281,6 @@ jobs:
         run: vendor/bin/phpunit --log-junit junit-all.xml
 
       - name: Ask PHPUnit which group every test is in
-        id: map
         # JUnit XML carries no group attribute, and `--group X --list-tests` is refused
         # outright by PHPUnit 10.5 ("the --group and --list-tests options cannot be
         # combined, --group is ignored"). `--list-tests-xml` is the one form that emits
@@ -298,75 +296,6 @@ jobs:
           php bin/ci-group-counts.php \
             --map=junit-map.xml --log=junit-all.xml \
             --groups="$groups" --out=counts-from-log.txt
-
-      # ======================================================================
-      # ACCEPTANCE (a), AND IT IS TEMPORARY. Max's condition on this speed-up, in his own
-      # words: keep the OLD re-run step and the NEW log-based step on ONE run and require
-      # their per-group counts to be identical, then prove a deliberate skip turns the NEW
-      # step red, then remove the old step. These two steps ARE that condition, and the
-      # commit that closes acceptance (c) deletes both. They are not a permanent part of the
-      # gate - keeping them would keep the 1 h 38 m this sprint exists to remove.
-      # ======================================================================
-      - name: ACCEPTANCE (a) - the OLD step, re-running every group, unchanged
-        # It runs even when the new step went red, because acceptance (b) - a deliberate skip
-        # turning the NEW step red - is far more convincing beside the OLD step's verdict on
-        # the same skip. It does NOT run when the suite or the map failed: re-running every
-        # group for 1 h 38 m after a broken suite buys nothing.
-        if: always() && steps.suite.conclusion == 'success' && steps.map.conclusion == 'success'
-        env:
-          WPMCP_TEST_URL: http://localhost:8888
-          WPMCP_WP_ENV: '1'
-        run: |
-          status=0
-          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt \
-            | tr -d '\r' | grep -v '^[[:space:]]*$')
-          : > counts-from-rerun.txt
-          for group in $groups; do
-            echo "::group::$group"
-            log="junit-$group.xml"
-            rm -f "$log"
-            vendor/bin/phpunit --group "$group" --log-junit "$log" || status=1
-            if [ ! -f "$log" ]; then
-              echo "::error::$group produced no JUnit log."
-              status=1
-              echo "::endgroup::"
-              continue
-            fi
-            cases=$(grep -c '<testcase ' "$log" || true)
-            empty=$(grep -o '<testsuite name="WpMcp[^>]*' "$log" | grep -cv 'tests="[1-9]' || true)
-            skipped=$(grep -c '<skipped' "$log" || true)
-            echo "$group: testcases=$cases classes-that-ran-nothing=$empty skipped-tests=$skipped" \
-              | tee -a counts-from-rerun.txt
-            if [ "$cases" -eq 0 ] || [ "$empty" -ne 0 ] || [ "$skipped" -ne 0 ]; then
-              echo "::error::$group did not execute every one of its tests. A gate that skips is not a gate."
-              status=1
-            fi
-            rm -f "$log"
-            echo "::endgroup::"
-          done
-          exit $status
-
-      - name: ACCEPTANCE (a) - the two steps must agree, group for group
-        # A DIFF, not a pair of numbers for a human to read down. The whole risk of this
-        # change is that the new step counts something subtly different, and an eye is a
-        # poor instrument for eighteen lines of three numbers.
-        if: always()
-        run: |
-          if [ ! -f counts-from-log.txt ] || [ ! -f counts-from-rerun.txt ]; then
-            # One of the two steps never got to write its file, which means it failed - the
-            # job is already red for that reason and there is nothing here to mask.
-            echo "Both count files are needed for this comparison and one is missing:"
-            ls -l counts-from-log.txt counts-from-rerun.txt || true
-            exit 0
-          fi
-          echo "::group::from the one run's log"; cat counts-from-log.txt; echo "::endgroup::"
-          echo "::group::from re-running each group"; cat counts-from-rerun.txt; echo "::endgroup::"
-          if diff -u counts-from-rerun.txt counts-from-log.txt; then
-            echo "The log-based step and the per-group re-runs agree on every group."
-          else
-            echo "::error::The new log-based gate check disagrees with the per-group re-runs. The speed-up is not safe to adopt."
-            exit 1
-          fi
 
       - name: Per-group wall clock, from the same log
         # Free measurement, and the input to the next question anybody will ask: is it
@@ -396,7 +325,6 @@ jobs:
             junit-all.xml
             junit-map.xml
             counts-from-log.txt
-            counts-from-rerun.txt
           retention-days: 14
           if-no-files-found: warn
 
