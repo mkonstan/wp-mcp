@@ -441,7 +441,42 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
         $before = Fixtures::menuItemRows($menuId);
         $custom = ['type' => 'custom', 'url' => 'https://example.com/g5n', 'title' => Fixtures::name('g5n-never')];
 
-        foreach ([self::$publicPageId, self::$categoryId, $ids['A']] as $id) {
+        // POST IDS AND TERM IDS ARE SEPARATE COUNTERS, AND ON AN ALMOST-EMPTY DATABASE THEY
+        // COLLIDE. `get-menu` resolves its `id` as a nav_menu TERM, so a PAGE whose post id
+        // happens to equal one of this site's nav_menu term ids is, to that tool, a real menu -
+        // and the premise below correctly refuses to write to it. Found by sharding (D18): on a
+        // shard, this class runs in a container where almost nothing else has created posts or
+        // terms, `menu-public-page` came out as post 6 and the fixture menu as term 6, and the
+        // premise failed. It had never failed on a single full run, where thirty other classes
+        // have pushed the two counters far apart before this one starts - which is a hidden
+        // dependency on what ran BEFORE, and exactly the class of defect running the suite on
+        // six empty databases was always going to surface.
+        //
+        // So the candidates are CHOSEN rather than assumed: each keeps its kind and moves to a
+        // fresh id of the same kind if its integer happens to name a menu. A term id cannot
+        // collide - a category and a nav_menu are both terms, so one id is one of them - and
+        // needs no dance.
+        $page = self::idThatIsNotAMenu(
+            self::$publicPageId,
+            static function (): int {
+                $id = Fixtures::createPost(Fixtures::name('g5n-page'), 'publish', self::$editorId, 'x', 'page');
+                self::$posts[] = $id;
+
+                return $id;
+            }
+        );
+
+        $item = self::idThatIsNotAMenu(
+            $ids['A'],
+            static function () use ($menuId): int {
+                return Fixtures::createMenuItem($menuId, [
+                    'menu-item-title' => Fixtures::name('g5n-spare'),
+                    'menu-item-url'   => 'https://example.com/g5n-spare',
+                ]);
+            }
+        );
+
+        foreach ([$page, self::$categoryId, $item] as $id) {
             // BEFORE any write: a wrong id must never be a real menu of the site under test.
             self::assertFalse(Fixtures::isNavMenu($id), "Premise: id {$id} is a menu on this site; the test would write to it.");
 
@@ -847,6 +882,40 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
      *
      * @return array{0:int, 1:array<string, int>}
      */
+    /**
+     * An id of the right KIND whose integer does not also name one of this site's nav_menu terms.
+     *
+     * WHY THIS IS NOT PARANOIA. `wp_get_nav_menu_object()` takes an integer and looks it up as a
+     * term, so "a page id" and "a menu id" are the same kind of thing to it - they are just
+     * integers, from two counters that both start at 1. A test that wants to say "this id is NOT a
+     * menu" therefore cannot pick an id and assume; it has to look, and move on if it lost the
+     * coin toss. On a full run the two counters are hundreds apart by the time this class starts
+     * and the toss is never lost; on a shard, or on a fresh site, it is.
+     *
+     * $another must return a fresh id OF THE SAME KIND - a page for a page, a menu item for a
+     * menu item - or the case under test changes into a different case. Bounded, because an
+     * unbounded retry against a broken fixture is a hanging test: post ids only go up and this
+     * site has a handful of menus, so one retry is already generous.
+     *
+     * @param callable():int $another
+     */
+    private static function idThatIsNotAMenu(int $candidate, callable $another): int
+    {
+        for ($tries = 0; $tries < 4; $tries++) {
+            if (!Fixtures::isNavMenu($candidate)) {
+                return $candidate;
+            }
+
+            $candidate = $another();
+        }
+
+        self::fail(
+            "Could not find an id that is not one of this site's menus after four tries; the last"
+            . " was {$candidate}. Either the fixture factory is returning the same id every time or"
+            . ' this site has an implausible number of menus.'
+        );
+    }
+
     private static function menuWithItems(string $what, array $tree): array
     {
         $menuId = self::menu($what);
