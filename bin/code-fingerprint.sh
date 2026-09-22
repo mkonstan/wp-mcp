@@ -30,8 +30,16 @@
 # those ids out of the tree rather than hashing the bytes a second time.
 #
 #   bin/code-fingerprint.sh            # HEAD, three `name=value` lines
-#   bin/code-fingerprint.sh <ref>      # any commit
+#   bin/code-fingerprint.sh <ref>      # any commit in which every listed path exists
 #   bin/code-fingerprint.sh HEAD key   # just the run key, bare
+#
+# NOT EVERY COMMIT IN THE HISTORY, and that is the price of the refusal below. A ref that is
+# missing one of these paths is refused rather than hashed, so in this repository the script
+# answers for `fc75a58` onwards - it refuses `fc39f72` and everything before it, which predate
+# `.github/sprint-gate-groups.txt`. The D17 measurement that started this (`a811891` and
+# `349e2b0`, one word of CHANGELOG apart, the same code fingerprint) was taken with the first
+# version of this script, which hashed those paths without requiring them; it cannot be
+# re-derived with this one, and `analysis/56` records that.
 #
 # tests/unit/CodeFingerprintTest.php pins the CODE list against the release workflow's
 # staging step, so a new shipped file that this script does not hash makes the unit tier

@@ -452,13 +452,17 @@ jobs:
         run: npx --yes @wordpress/env stop || true
 
   seal:
-    # THE ONE THING THAT MAKES A REUSE HONEST. This job uploads an artifact whose NAME is
-    # the run key, and it can only run when every tier above was green - `needs` without
-    # `always()` refuses to start otherwise, and a skipped dependency skips it too. So
-    # "an unexpired artifact called wpmcp-green-<key> exists" and "a green lint, unit
-    # matrix, current-core integration leg and floor leg exist for this exact code and this
-    # exact suite" are the same statement, and that is the statement `decide` and
-    # release.yml look up.
+    # HALF OF WHAT MAKES A REUSE HONEST, and only half. This job uploads an artifact whose
+    # NAME is the run key, and it can only run when every tier above was green - `needs`
+    # without `always()` refuses to start otherwise, and a skipped dependency skips it too.
+    # So the artifact's existence is NECESSARY for "a green lint, unit matrix, current-core
+    # integration leg and floor leg exist for this exact code and this exact suite".
+    #
+    # IT IS NOT SUFFICIENT, because a name is not a proof: this repository is public and a
+    # pull request runs its own copy of this file. The artifact is a POINTER, and
+    # bin/reusable-green-run.sh is what turns it into a statement - it checks the run behind
+    # the name (same repository, this workflow, conclusion success, inside the age cap, and a
+    # head commit whose own fingerprint is this key) before either workflow reuses anything.
     #
     # It does not run on a reused verdict (reuse == 'true'), because the seal it would
     # write is the seal it just read: a run that executed no WordPress tier must not be

@@ -52,9 +52,39 @@ cutoff=$(( $(date -u +%s) - max_age_days * 86400 ))
 
 note() { echo "reusable-green-run: $*" >&2; }
 
+# FAILING CLOSED HAS TO BE A DECISION, NOT A COINCIDENCE. `gh api` writes the JSON error body
+# to STDOUT on an HTTP error, so an earlier version of this script - which discarded stderr and
+# appended `|| true` - fed `{"message": "Bad credentials", ...}` into the candidate loop and
+# rejected each line on the workflow-path check. The outcome was right (no seal, full gate) and
+# the reason was wrong: the safety rested on error JSON failing a string comparison, and the log
+# said "rejected: it is unknown, not .github/workflows/ci.yml" about a call that never happened.
+# The next refactor of the parsing would have removed the property in silence. So every call
+# captures its exit status explicitly, and a call that failed is reported as a call that failed
+# (analysis/58 R2.2).
+gh_err=$(mktemp)
+trap 'rm -f "$gh_err"' EXIT
+
+# Runs `gh api` with the given arguments, putting stdout in $gh_out. Returns gh's exit status.
+gh_try() {
+    local status=0
+    set +e
+    gh_out=$(gh api "$@" 2>"$gh_err")
+    status=$?
+    set -e
+    return $status
+}
+
+# The first line of whatever gh said about it - enough to tell a 401 from a 403 from no network.
+gh_why() {
+    local why
+    why=$(head -2 "$gh_err" | tr '\n' ' ' | tr -s ' ')
+    [ -n "${why// /}" ] || why="(it said nothing)"
+    echo "$why"
+}
+
 # Newest first. More than one run can seal the same key - the same code on two branches, or
 # a re-run - and any of them is a valid verdict, so each is checked until one passes.
-candidates=$(gh api -X GET "repos/${repo}/actions/artifacts" \
+if ! gh_try -X GET "repos/${repo}/actions/artifacts" \
     -f "name=${seal}" -f per_page=100 \
     --jq '[.artifacts[]
            | select(.expired == false)
@@ -64,8 +94,14 @@ candidates=$(gh api -X GET "repos/${repo}/actions/artifacts" \
               repo_id: .workflow_run.repository_id,
               head_repo_id: .workflow_run.head_repository_id}]
           | sort_by(.created) | reverse | .[]
-          | [.run, .created, .head, (.repo_id|tostring), (.head_repo_id|tostring)] | @tsv' \
-    2>/dev/null || true)
+          | [.run, .created, .head, (.repo_id|tostring), (.head_repo_id|tostring)] | @tsv'
+then
+    note "the artifact listing for ${seal} FAILED, so nothing is known: $(gh_why)"
+    note "a call that failed is not an answer - no seal is being reused, and the full gate runs"
+    exit 0
+fi
+
+candidates="$gh_out"
 
 if [ -z "${candidates:-}" ]; then
     note "no unexpired artifact named ${seal}"
@@ -86,9 +122,13 @@ while IFS=$'\t' read -r run created head repo_id head_repo_id; do
         continue
     fi
 
-    meta=$(gh api "repos/${repo}/actions/runs/${run}" --jq '[.path, .conclusion] | @tsv' 2>/dev/null || true)
-    path=$(printf '%s' "$meta" | cut -f1)
-    conclusion=$(printf '%s' "$meta" | cut -f2)
+    if ! gh_try "repos/${repo}/actions/runs/${run}" --jq '[.path, .conclusion] | @tsv'; then
+        note "run ${run} rejected: asking about it FAILED, so its workflow and its conclusion are unknown: $(gh_why)"
+        continue
+    fi
+
+    path=$(printf '%s' "$gh_out" | cut -f1)
+    conclusion=$(printf '%s' "$gh_out" | cut -f2)
 
     if [ "$path" != ".github/workflows/ci.yml" ]; then
         note "run ${run} rejected: it is ${path:-unknown}, not .github/workflows/ci.yml"

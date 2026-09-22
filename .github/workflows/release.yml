@@ -9,9 +9,9 @@ name: Release
 # push/pull_request and does not run on a tag push - so there was "no run to depend on".
 # That reasoning was about the COMMIT. It is the CODE that a test can see: `decide` below
 # computes the same fingerprint ci.yml computes and looks for the artifact a green ci.yml
-# run seals it with. When one exists, the gate jobs are skipped and this workflow goes
-# straight to building and verifying the zip; when none exists, all four gate jobs run
-# exactly as they always did.
+# run seals it with. When one exists, the two WordPress tiers are skipped and this workflow
+# goes straight to building and verifying the zip; when none exists, all four gate jobs run
+# exactly as they always did. Lint and the unit tier run either way - see below.
 #
 # WHAT A REUSE MAY AND MAY NOT BUY. It may stand in for the two WordPress tiers, which are
 # about the shipped PHP and nothing else. It may NOT stand in for lint or the unit tier:
@@ -20,10 +20,12 @@ name: Release
 #
 # THE SAFETY PROPERTY IS UNCHANGED IN STRENGTH AND DIFFERENT IN WORDS: it was "we ran the
 # suite twice on this code"; it is now "lint and the unit tier are green on THIS commit, and
-# a green full run exists for this code and this suite". The `release` job's `if:` is the whole proof and it is written out longhand for
-# that reason - either the reuse is real and every gate job was deliberately skipped, or
-# there is no reuse and every gate job succeeded. There is no third branch, and `always()`
-# is confined to that one expression so a cancelled or failed job can never read as green.
+# a green full run exists for this code and this suite". The `release` job's `if:` is the whole
+# proof and it is written out longhand for that reason. Lint and the unit tier must have
+# SUCCEEDED, in both cases, outside the branch; the branch is over the two WordPress tiers
+# alone - either the reuse is real and both were deliberately skipped, or there is no reuse and
+# both succeeded. There is no third branch, and `always()` is confined to that one expression
+# so a cancelled or failed job can never read as green.
 #
 # A TAG THAT IS NOT A RELEASE. The trigger also accepts `citest-*`, and the publish step -
 # only the publish step - requires a `v` tag. That is how the two refusals D16 asks for are

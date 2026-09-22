@@ -128,7 +128,7 @@ rather than about the number of times somebody pressed a button. `release.yml` u
 re-run the whole gate on every tag with the reasoning that `ci.yml` does not run on a tag
 push, so there was no run to depend on - which is true of the COMMIT and not of the CODE.
 
-**The code fingerprint.** `bin/code-fingerprint.sh` prints three numbers for any commit:
+**The code fingerprint.** `bin/code-fingerprint.sh` prints three numbers for a commit:
 
 | | What it hashes | What a change to it means |
 |---|---|---|
@@ -140,8 +140,16 @@ Run it yourself before pushing if you want to know what CI will do:
 
 ```bash
 bin/code-fingerprint.sh          # HEAD
-bin/code-fingerprint.sh <ref>    # any commit
+bin/code-fingerprint.sh <ref>    # any commit in which every listed path exists
 ```
+
+It **refuses** a ref that is missing one of the paths in the table above, rather than hashing
+what is left: `git ls-tree` prints nothing and exits 0 for a path that is not there, so a
+renamed path would otherwise drop out of the hash in silence and the fingerprint would quietly
+stop covering it. The cost is that it does not answer for old history - in this repository it
+answers from `fc75a58` on, and refuses `fc39f72` and earlier, which predate
+`.github/sprint-gate-groups.txt`. If you need a number for an older commit, use the version of
+the script that shipped with that commit.
 
 **How a verdict is stored, and what makes it trustworthy.** A `ci.yml` run in which lint, the
 unit matrix, the current-core integration leg and the floor leg were ALL green uploads an
