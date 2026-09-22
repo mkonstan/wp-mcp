@@ -1,0 +1,94 @@
+# PER-CLASS WEIGHTS, in seconds, used ONLY to balance the integration shards.
+#
+# Nothing here decides what runs. The authority on which classes exist is
+# `phpunit --list-tests-xml`, read at plan time by bin/ci-shards.php; this file only decides
+# WHICH SHARD each class lands on. A class missing from this file still runs - it is given the
+# mean weight and named in the plan, so drift is visible rather than silent.
+#
+# THE NUMBERS ARE A MODEL, NOT A MEASUREMENT, and the model matters because the obvious
+# measurement is wrong. PHPUnit's JUnit log attributes only the time spent INSIDE test methods:
+# on run 35773988569 the per-class times summed to 1114 s inside a step that took 4162 s, so
+# 73% of the tier's wall clock is fixture building in setUpBeforeClass, which the log does not
+# attribute to anything. Balancing on the log alone would balance a quarter of the cost.
+#
+# So: weight = the class's JUnit time + a flat 69 s for every INTEGRATION class, that constant
+# being (4162 - 1114) / 44 integration classes from that run. Unit classes get no constant:
+# they build no fixtures and the whole unit tier is under a second. It is a crude model of a
+# cost that is not uniform - a class that seeds ten posts pays more than one that seeds a user -
+# and the honest check on it is the OBSERVED spread between shards, which the round-4 report
+# records.
+#
+# TO REFRESH: take `junit-all.xml` and `junit-map.xml` from a green full (unsharded) run's
+# `integration-log-*` artifact and the wall time of its "Both suites, once" step, then recompute
+# the same way. Refreshing changes this file, which is inside the fingerprint's environment half,
+# so it forces a full run - correctly, since it changes what each shard does.
+#
+# Generated from run 35773988569 (commit 0735840), step 4162 s, 68 classes.
+WpMcp\Tests\Integration\MenuToolsTest	214
+WpMcp\Tests\Integration\PostMetaToolsTest	187
+WpMcp\Tests\Integration\DevTokensKilledRunTest	184
+WpMcp\Tests\Integration\NonFixtureTokenRowsTest	161
+WpMcp\Tests\Integration\UpdatePostTruthTest	141
+WpMcp\Tests\Integration\DevTokensScriptTest	122
+WpMcp\Tests\Integration\RoundTripTest	121
+WpMcp\Tests\Integration\SqlSelectTest	112
+WpMcp\Tests\Integration\RevisionToolsTest	112
+WpMcp\Tests\Integration\TokenLifetimeMigrationTest	100
+WpMcp\Tests\Integration\BoundIpDropMigrationTest	98
+WpMcp\Tests\Integration\PostFieldWritesTest	96
+WpMcp\Tests\Integration\StaleBackupSweepMigrationTest	96
+WpMcp\Tests\Integration\UpdatePostContractTest	96
+WpMcp\Tests\Integration\OpcacheInvalidationTest	93
+WpMcp\Tests\Integration\LocalWindowSiteTest	92
+WpMcp\Tests\Integration\CodeVersionToolsTest	91
+WpMcp\Tests\Integration\TokenLifecycleTest	91
+WpMcp\Tests\Integration\CodeHistoryRestoreTest	91
+WpMcp\Tests\Integration\JsonRpcFramingTest	83
+WpMcp\Tests\Integration\InventoryToolsTest	83
+WpMcp\Tests\Integration\ErrorBoundaryTest	82
+WpMcp\Tests\Integration\TokenUserIdMigrationTest	81
+WpMcp\Tests\Integration\FileVersionStoreTest	80
+WpMcp\Tests\Integration\AuthEventsTest	77
+WpMcp\Tests\Integration\WriteToolCapabilityTest	77
+WpMcp\Tests\Integration\BuildIdentityTest	77
+WpMcp\Tests\Integration\ToolContractTest	76
+WpMcp\Tests\Integration\PostFilterReadsTest	76
+WpMcp\Tests\Integration\CommentPipelineTest	76
+WpMcp\Tests\Integration\TransportGatesTest	75
+WpMcp\Tests\Integration\ToolRegistryTest	75
+WpMcp\Tests\Integration\ConnectorAddressPoolTest	74
+WpMcp\Tests\Integration\SlashedWritesTest	73
+WpMcp\Tests\Integration\OneUnauthorizedTest	72
+WpMcp\Tests\Integration\AdminTokenTableTest	71
+WpMcp\Tests\Integration\DeletedTokenUserTest	71
+WpMcp\Tests\Integration\ThemeNameAgreementTest	70
+WpMcp\Tests\Integration\CapabilityScopedReadsTest	70
+WpMcp\Tests\Integration\ListEnvelopeTest	70
+WpMcp\Tests\Integration\HandshakeTest	70
+WpMcp\Tests\Integration\HeaderOnlyCredentialTest	69
+WpMcp\Tests\Integration\RestNamespaceTest	69
+WpMcp\Tests\Integration\InfraTrustTest	69
+WpMcp\Tests\Unit\SurfaceSweepTest	0
+WpMcp\Tests\Unit\UninstallTest	0
+WpMcp\Tests\Unit\ToolContractTest	0
+WpMcp\Tests\Unit\OpcacheForceArgumentTest	0
+WpMcp\Tests\Unit\CodePathCanonicalTest	0
+WpMcp\Tests\Unit\AuthEventTest	0
+WpMcp\Tests\Unit\FloorConsistencyTest	0
+WpMcp\Tests\Unit\SqlSelectRunTest	0
+WpMcp\Tests\Unit\NoDisclosureTest	0
+WpMcp\Tests\Unit\CiGroupCountsTest	0
+WpMcp\Tests\Unit\SchemaValidatorTest	0
+WpMcp\Tests\Unit\DescriptionContractTest	0
+WpMcp\Tests\Unit\BuildStampTest	0
+WpMcp\Tests\Unit\DebrisVerdictTest	0
+WpMcp\Tests\Unit\LocalWindowTest	0
+WpMcp\Tests\Unit\TokenLifetimeTest	0
+WpMcp\Tests\Unit\WireSerializationTest	0
+WpMcp\Tests\Unit\CodeFingerprintTest	0
+WpMcp\Tests\Unit\VersionConsistencyTest	0
+WpMcp\Tests\Unit\TokenRenewTest	0
+WpMcp\Tests\Unit\MintIdentityTest	0
+WpMcp\Tests\Unit\NoAddressBindingTest	0
+WpMcp\Tests\Unit\ProtocolVersionTest	0
+WpMcp\Tests\Unit\HeaderCredentialTest	0

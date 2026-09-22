@@ -212,17 +212,257 @@ jobs:
         # WPMCP_TEST_URL is deliberately absent: this job must pass with no site.
         run: composer test:unit
 
-  integration:
-    # Black-box HTTP against a real WordPress. rest_do_request() would skip TLS,
-    # Origin, Content-Type and the path-URL route, which is precisely where the
-    # transport work lives - so this tier uses a real container over real HTTP.
+  shard:
+    # ONE MACHINE PER SLICE OF THE SUITE (analysis/53-open-decisions.md, D18). The tier used to
+    # run on one runner for about seventy minutes; it now runs on six, each with its own wp-env
+    # container, each on a disjoint set of test CLASSES, each writing its own JUnit log. Billed
+    # minutes go up - six containers instead of one - and waiting time comes down. That trade is
+    # only worth making on a public repository, where the minutes are free.
     #
-    # ONE RUN, NOT TWO. Until this sprint this job ran the suite and then re-ran PHPUnit
-    # once per closed sprint group to prove no gate had silently skipped: measured on run
-    # 35514259397 that was 1 h 35 m 23 s followed by 1 h 38 m 28 s of re-executing the same
-    # tests in the same container minutes later. The gates are now read out of the one run's
-    # JUnit log - see bin/ci-group-counts.php for how, and why a group map is needed at all.
-    name: PHPUnit integration (wp-env)
+    # THE PARTITION IS THE WHOLE RISK. Every class must be in exactly one shard: a class in none
+    # never runs, every shard is green, and the gate has a hole the width of whatever was lost.
+    # Three things stand in the way of that, deliberately overlapping:
+    #   - bin/ci-shards.php takes its class list from `phpunit --list-tests-xml`, PHPUnit's own
+    #     answer to "what exists", never from the weights file;
+    #   - tests/unit/CiShardsTest.php proves the plan is a partition, in milliseconds, on every
+    #     commit;
+    #   - the `integration` job below merges the logs and runs the EXISTING per-group check over
+    #     the whole picture, which counts the map's rows against the log's and so notices anything
+    #     the first two missed.
+    #
+    # BALANCED BY COST, NOT BY COUNT. Shard 4 carries thirty-one classes and shard 1 carries
+    # seven, because the twenty-four unit classes together cost less than one integration class
+    # does. See tests/class-timings.txt for the weights and for why they are a model.
+    name: Integration shard ${{ matrix.shard }} of 6 (wp-env)
+    runs-on: ubuntu-latest
+    needs: decide
+    if: needs.decide.outputs.reuse != 'true'
+    strategy:
+      # NEVER fail-fast. A red shard must not cancel its siblings: their logs are what tell you
+      # whether the failure is one class or the whole container, and a cancelled shard produces
+      # no log at all, which the merge then reports as a missing shard rather than as the
+      # failure it actually was.
+      fail-fast: false
+      matrix:
+        # Keep this list and WPMCP_SHARDS in step - tests/unit/CiShardsTest.php fails if they
+        # drift, and the merge below would fail anyway because the filenames carry the count.
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Set up Node (for @wordpress/env)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Start WordPress (Docker, plugin mapped in and activated)
+        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it, and pins
+        # nothing: `"core": null` is wp-env's "latest stable WordPress", so THESE shards are the
+        # current-core leg and integration-floor below is the declared-floor leg.
+        #
+        # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
+        # plain HTTP on port 8888, and the endpoint refuses every non-HTTPS request
+        # before it reads the token. Without the constant the whole integration tier
+        # would answer 403 and every identity and transport test would fail for a reason
+        # that has nothing to do with the code.
+        #
+        # Which is also why the HTTPS gate's own two properties are NOT in this tier:
+        # a host with no TLS and the gate switched off cannot be asked about either.
+        # They live in the infra-trust suite, which fails rather than skips on such a
+        # host and is run by hand against production - see phpunit.xml.dist.
+        #
+        # EACH SHARD GETS ITS OWN CONTAINER, so the fixtures cannot collide between shards at
+        # all - they are not merely prefixed apart, they are on different databases.
+        run: npx --yes @wordpress/env start --debug
+
+      - name: Enable pretty permalinks
+        # /wp-json/ is a rewrite rule. With WordPress's default "plain" permalinks
+        # the REST index is only reachable as /?rest_route=/, and the integration
+        # tests (like every real MCP client) request /wp-json/.
+        run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
+
+      - name: Confirm the plugin is active, and say which WordPress this is
+        run: |
+          npx --yes @wordpress/env run cli wp plugin list --status=active
+          npx --yes @wordpress/env run cli wp core version
+
+      - name: Work out what this shard runs
+        id: plan
+        env:
+          WPMCP_SHARDS: '6'
+        run: |
+          set -euo pipefail
+          vendor/bin/phpunit --list-tests-xml junit-map.xml
+
+          # The plan is printed by shard 1 only - it is the same on every shard by construction
+          # (ties broken by name), and six copies of it buries everything else in the log.
+          if [ "${{ matrix.shard }}" = "1" ]; then
+            echo "::group::the whole plan"
+            php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
+              --shards="$WPMCP_SHARDS" --plan
+            echo "::endgroup::"
+          fi
+
+          filter=$(php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
+            --shards="$WPMCP_SHARDS" --shard=${{ matrix.shard }})
+          echo "filter: $filter"
+          echo "filter=$filter" >> "$GITHUB_OUTPUT"
+          echo "log=junit-shard-${{ matrix.shard }}-of-${WPMCP_SHARDS}.xml" >> "$GITHUB_OUTPUT"
+
+      - name: This shard's slice of both suites
+        env:
+          # @wordpress/env publishes the development instance on port 8888 by
+          # default; it is plain HTTP, so TLS verification stays off.
+          WPMCP_TEST_URL: http://localhost:8888
+          # WordPress is inside a Docker container, so a host-side wp-cli.phar
+          # --path= cannot see its filesystem. This routes the fixture harness
+          # through `npx @wordpress/env run cli wp` instead. Without it every
+          # fixture-bearing test skips - and a skip is green.
+          WPMCP_WP_ENV: '1'
+        # BOTH suites, not just the integration one: the per-group check has to cover exactly
+        # what the old per-group re-runs covered, and several gate groups (sprint-6 among them)
+        # live entirely in the unit tier. The planner puts all of them on one shard, since
+        # together they cost about a second.
+        #
+        # A filter that matched nothing makes PHPUnit exit non-zero ("No tests executed"), which
+        # is the right answer for a shard with no work: it means the plan and the suite disagree.
+        run: vendor/bin/phpunit --filter "${{ steps.plan.outputs.filter }}" --log-junit "${{ steps.plan.outputs.log }}"
+
+      - name: Upload this shard's log
+        # NOT `if: always()`. A shard that failed has a log that is missing whatever it never got
+        # to, and the merge must see a MISSING shard rather than a short one - the first is an
+        # error it reports, the second is a smaller suite that looks complete.
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-log-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ steps.plan.outputs.log }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: WordPress logs (on failure)
+        if: failure()
+        # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
+        # so without --watch=false this step never exits: a failed run once sat here for over
+        # two hours until it was cancelled. The timeout is the backstop.
+        timeout-minutes: 5
+        run: npx --yes @wordpress/env logs all --watch=false || true
+
+      - name: Stop WordPress
+        if: always()
+        run: npx --yes @wordpress/env stop || true
+
+  integration:
+    # THE JOB ID IS UNCHANGED ON PURPOSE. `seal` needs it, release.yml gates on the same id in
+    # its own copy, and the whole D17 machinery is keyed on "integration was green". What changed
+    # is what the job DOES: it no longer runs WordPress at all. It collects the shards' logs,
+    # merges them into the single log the gate has always read, and runs the existing per-group
+    # check over that. It needs no container and finishes in seconds.
+    #
+    # `needs: [decide, shard]` WITHOUT `always()` is the load-bearing line: a shard that failed,
+    # was cancelled, or never started skips this job, which skips `seal`, and the run is red. A
+    # dead shard cannot produce a smaller green picture, because there is no picture at all.
+    name: PHPUnit integration (merged shards)
+    runs-on: ubuntu-latest
+    needs: [decide, shard]
+    if: needs.decide.outputs.reuse != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Ask PHPUnit which group every test is in
+        # JUnit XML carries no group attribute, and `--group X --list-tests` is refused
+        # outright by PHPUnit 10.5 ("the --group and --list-tests options cannot be
+        # combined, --group is ignored"). `--list-tests-xml` is the one form that emits
+        # `groups=`, one row per data set, and it executes nothing - which is why this job
+        # can ask the question without a WordPress anywhere near it.
+        run: vendor/bin/phpunit --list-tests-xml junit-map.xml
+
+      - name: Collect every shard's log
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-log-${{ github.run_attempt }}-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge the shards into the one log the gate reads
+        env:
+          WPMCP_SHARDS: '6'
+        run: |
+          set -euo pipefail
+          ls -l shards/
+          php bin/ci-merge-junit.php --out=junit-all.xml --expect="$WPMCP_SHARDS" \
+            shards/junit-shard-*-of-"$WPMCP_SHARDS".xml
+
+      - name: Sprint gates actually executed - read from the merged log
+        run: |
+          set -euo pipefail
+          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt \
+            | tr -d '\r' | grep -v '^[[:space:]]*$' | paste -sd, -)
+          echo "gate groups: $groups"
+          php bin/ci-group-counts.php \
+            --map=junit-map.xml --log=junit-all.xml \
+            --groups="$groups" --out=counts-from-log.txt
+
+      - name: Per-class wall clock, from the merged log
+        # Free measurement, and the input to the next refresh of tests/class-timings.txt. Read it
+        # knowing what it does NOT include: PHPUnit attributes only the time inside test methods,
+        # so class fixture building - about three quarters of this tier - is missing from every
+        # row. The weights file adds a modelled constant for that.
+        if: always()
+        run: |
+          php -r '
+            $x = simplexml_load_file("junit-all.xml");
+            $rows = [];
+            foreach ($x->xpath("//testcase") as $c) {
+              $rows[(string) $c["class"]] = ($rows[(string) $c["class"]] ?? 0) + (float) $c["time"];
+            }
+            arsort($rows);
+            $total = array_sum($rows);
+            printf("%-58s %9s\n", "class", "seconds");
+            foreach ($rows as $n => $t) { printf("%-58s %9.1f\n", $n, $t); }
+            printf("%-58s %9.1f\n", "TOTAL (inside test methods only)", $total);
+          ' || true
+
+      - name: Upload the merged log and the counts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-log-${{ github.run_attempt }}
+          path: |
+            junit-all.xml
+            junit-map.xml
+            counts-from-log.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  acceptance-single:
+    # ======================================================================
+    # ACCEPTANCE 1 OF D18, AND IT IS TEMPORARY. "The merged per-group counts must EQUAL the
+    # single-run counts for every group, on the same commit." This job is the single run, and
+    # `acceptance-agree` below diffs the two. Both are deleted once they have agreed on a real
+    # run - keeping them would keep the seventy minutes the sharding exists to remove, which is
+    # exactly what happened to the per-group re-run in round 1.
+    # ======================================================================
+    name: ACCEPTANCE - the whole suite on one machine, for comparison
     runs-on: ubuntu-latest
     needs: decide
     if: needs.decide.outputs.reuse != 'true'
@@ -245,110 +485,66 @@ jobs:
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Start WordPress (Docker, plugin mapped in and activated)
-        # .wp-env.json maps the checkout as the wp-mcp plugin and activates it, and pins
-        # nothing: `"core": null` is wp-env's "latest stable WordPress", so THIS leg is the
-        # current-core leg and integration-floor below is the declared-floor leg.
-        # ubuntu-latest runners ship Docker, so nothing else is needed.
-        #
-        # That file also sets WPMCP_ALLOW_INSECURE, and it has to: wp-env publishes
-        # plain HTTP on port 8888, and the endpoint refuses every non-HTTPS request
-        # before it reads the token. Without the constant the whole integration tier
-        # would answer 403 and every identity and transport test would fail for a reason
-        # that has nothing to do with the code.
-        #
-        # Which is also why the HTTPS gate's own two properties are NOT in this tier:
-        # a host with no TLS and the gate switched off cannot be asked about either.
-        # They live in the infra-trust suite, which fails rather than skips on such a
-        # host and is run by hand against production - see phpunit.xml.dist.
         run: npx --yes @wordpress/env start --debug
 
       - name: Enable pretty permalinks
-        # /wp-json/ is a rewrite rule. With WordPress's default "plain" permalinks
-        # the REST index is only reachable as /?rest_route=/, and the integration
-        # tests (like every real MCP client) request /wp-json/.
         run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
 
-      - name: Confirm the plugin is active, and say which WordPress this is
-        run: |
-          npx --yes @wordpress/env run cli wp plugin list --status=active
-          npx --yes @wordpress/env run cli wp core version
-
-      - name: Both suites, once, with the log the gates are read from
+      - name: Both suites, once, on one machine
         env:
-          # @wordpress/env publishes the development instance on port 8888 by
-          # default; it is plain HTTP, so TLS verification stays off.
           WPMCP_TEST_URL: http://localhost:8888
-          # WordPress is inside a Docker container, so a host-side wp-cli.phar
-          # --path= cannot see its filesystem. This routes the fixture harness
-          # through `npx @wordpress/env run cli wp` instead. Without it every
-          # fixture-bearing test skips - and a skip is green.
           WPMCP_WP_ENV: '1'
-        # BOTH suites, not just `composer test:integration`, and that is not an accident:
-        # the per-group check below has to cover exactly what the old per-group re-runs
-        # covered, and those ran `phpunit --group sprint-N` over the whole configuration.
-        # Several gate groups (sprint-6 among them) live entirely in the unit tier. The unit
-        # suite adds about a second here.
-        run: vendor/bin/phpunit --log-junit junit-all.xml
+        run: vendor/bin/phpunit --log-junit junit-single.xml
 
       - name: Ask PHPUnit which group every test is in
-        # JUnit XML carries no group attribute, and `--group X --list-tests` is refused
-        # outright by PHPUnit 10.5 ("the --group and --list-tests options cannot be
-        # combined, --group is ignored"). `--list-tests-xml` is the one form that emits
-        # `groups=`, one row per data set, and it executes nothing.
         run: vendor/bin/phpunit --list-tests-xml junit-map.xml
 
-      - name: Sprint gates actually executed - read from that one run
+      - name: The same per-group check, over the single run
         run: |
           set -euo pipefail
-          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt \
-            | tr -d '\r' | grep -v '^[[:space:]]*$' | paste -sd, -)
-          echo "gate groups: $groups"
-          php bin/ci-group-counts.php \
-            --map=junit-map.xml --log=junit-all.xml \
-            --groups="$groups" --out=counts-from-log.txt
+          groups=$(grep -v '^[[:space:]]*#' .github/sprint-gate-groups.txt             | tr -d '\r' | grep -v '^[[:space:]]*$' | paste -sd, -)
+          php bin/ci-group-counts.php             --map=junit-map.xml --log=junit-single.xml             --groups="$groups" --out=counts-from-single.txt
 
-      - name: Per-group wall clock, from the same log
-        # Free measurement, and the input to the next question anybody will ask: is it
-        # worth sharding this job into a matrix of groups? That answer needs per-group
-        # durations, which the log already has and nobody had ever read.
-        if: always()
-        run: |
-          php -r '
-            $x = simplexml_load_file("junit-all.xml");
-            $rows = [];
-            foreach ($x->xpath("//testsuite[@file]") as $s) {
-              $rows[(string) $s["name"]] = (float) $s["time"];
-            }
-            arsort($rows);
-            $total = array_sum($rows);
-            printf("%-58s %9s\n", "class", "seconds");
-            foreach ($rows as $n => $t) { printf("%-58s %9.1f\n", $n, $t); }
-            printf("%-58s %9.1f\n", "TOTAL", $total);
-          ' || true
-
-      - name: Upload the run log and the counts
+      - name: Upload the single run's counts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-log-${{ github.run_attempt }}
-          path: |
-            junit-all.xml
-            junit-map.xml
-            counts-from-log.txt
+          name: counts-single-${{ github.run_attempt }}
+          path: counts-from-single.txt
           retention-days: 14
           if-no-files-found: warn
-
-      - name: WordPress logs (on failure)
-        if: failure()
-        # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
-        # so without --watch=false this step never exits: a failed run once sat here for over
-        # two hours until it was cancelled. The timeout is the backstop.
-        timeout-minutes: 5
-        run: npx --yes @wordpress/env logs all --watch=false || true
 
       - name: Stop WordPress
         if: always()
         run: npx --yes @wordpress/env stop || true
+
+  acceptance-agree:
+    # ACCEPTANCE 1, machine-checked. A diff, not two tables for a human to read down: the whole
+    # risk of sharding is that the merged picture is subtly smaller than the single one, and an
+    # eye is a poor instrument for eighteen lines of three numbers.
+    name: ACCEPTANCE - sharded and single must agree, group for group
+    runs-on: ubuntu-latest
+    needs: [integration, acceptance-single]
+    steps:
+      - name: Collect both count files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-${{ github.run_attempt }}'
+          path: counts
+          merge-multiple: true
+
+      - name: They must be identical
+        run: |
+          set -euo pipefail
+          ls -l counts/
+          echo "::group::from the merged shards"; cat counts/counts-from-log.txt; echo "::endgroup::"
+          echo "::group::from one machine";       cat counts/counts-from-single.txt; echo "::endgroup::"
+          if diff -u counts/counts-from-single.txt counts/counts-from-log.txt; then
+            echo "Sharded and single agree on every group."
+          else
+            echo "::error::The merged shards and the single run disagree. Sharding is not safe to adopt."
+            exit 1
+          fi
 
   integration-floor:
     # THE DECLARED FLOOR, EXECUTED (analysis/53-open-decisions.md, D2; analysis/52 §10).
