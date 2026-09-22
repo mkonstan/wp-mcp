@@ -39,8 +39,8 @@ which is worse. Everything else the plugin calls is older, the nearest being
 **And 6.4 is executed, not asserted.** `Requires at least` is a gate, not a hint: core's
 `validate_plugin_requirements()` refuses to ACTIVATE a plugin below the version it declares,
 so a number nobody runs is a promise nobody has checked. CI runs the integration suite twice
-on every change - once against the current WordPress release and once against **WordPress
-6.4 on PHP 8.2**, which is the pairing this floor is actually tested at. 6.4 shipped the same
+on every change to the plugin's code - once against the current WordPress release and once
+against **WordPress 6.4 on PHP 8.2**, which is the pairing this floor is actually tested at. 6.4 shipped the same
 month as PHP 8.3, so 8.2 is the newest PHP that combination has ever been sensible on; the
 `Requires PHP: 8.1` floor is proven separately by the unit tier, which runs on 8.1, 8.2, 8.3
 and 8.4. Declaring a combination nobody can execute is exactly the mistake the previous
