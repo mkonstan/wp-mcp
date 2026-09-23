@@ -726,10 +726,19 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
      * reports a fixture key left in the option. The window in which the option is live is
      * a few seconds and every key in it carries this run's prefix.
      *
-     * The two switches in the same form are written back with the values they already
-     * hold, so wpmcp_save_settings() is exercised in full without changing either.
+     * THE SAVE IS NOW `update_option()` ITSELF (1.1.1, the Settings API swap). There is no
+     * wpmcp_save_settings() any more: `register_setting('wpmcp', ...)` hangs the normaliser on
+     * `sanitize_option_wpmcp_meta_keys`, which `update_option()` runs on EVERY path - so this
+     * test got STRONGER by the swap rather than weaker. It now proves the thing the old code
+     * could not do at all: a raw textarea string written straight to the option, by anything at
+     * all, comes back normalised. Before the swap the same call stored the string verbatim and
+     * only wpmcp_meta_keys()'s read-side normalisation hid it.
+     *
+     * The two switches in the same group are written back with the values they already hold, so
+     * nothing about the operator's site moves.
      *
      * @group sprint-11
+     * @group sprint-14d
      */
     public function testTheSettingsSaveRoundTripsTheTextareaAndAToolReadsIt(): void
     {
@@ -751,13 +760,16 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
                 '$code = get_option("wpmcp_code_enabled");'
                 . ' $sql = get_option("wpmcp_sql_enabled");'
                 . ' $deny = get_option("wpmcp_code_denylist", array());'
-                . ' wpmcp_save_settings(array('
-                . '  "meta_keys" => %s,'
-                . '  "denylist" => implode("\n", (array) $deny),'
-                . '  "code_enabled" => $code ? 1 : 0,'
-                . '  "sql_enabled" => $sql ? 1 : 0,'
-                . ' ));'
+                // THE RAW TEXTAREA STRING, STRAIGHT INTO update_option(). No form, no admin
+                // request, no plugin function: this is the `wp option update` path, and the
+                // sanitiser has to be on it or a key WordPress calls protected reaches the row.
+                . ' update_option("wpmcp_meta_keys", %s);'
+                . ' update_option("wpmcp_code_denylist", implode("\n", (array) $deny));'
+                . ' update_option("wpmcp_code_enabled", $code ? 1 : 0);'
+                . ' update_option("wpmcp_sql_enabled", $sql ? 1 : 0);'
                 . ' echo wp_json_encode(array('
+                . '  "deny_was" => array_values((array) $deny),'
+                . '  "deny" => array_values((array) get_option("wpmcp_code_denylist", array())),'
                 . '  "stored" => array_values((array) get_option("wpmcp_meta_keys", array())),'
                 . '  "read" => wpmcp_meta_keys(),'
                 . '  "enabled" => wpmcp_meta_enabled() ? 1 : 0,'
@@ -778,6 +790,16 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
                 . ' space trimmed, blank lines dropped, the duplicate dropped, _secret'
                 . ' dropped because WordPress calls it protected, the backslash key dropped'
                 . ' because the meta API would unslash it into one, and the order kept.'
+                . ' THIS RAN THROUGH update_option() AND NOTHING ELSE, so the normaliser is'
+                . ' where register_setting() put it - on sanitize_option_wpmcp_meta_keys, which'
+                . ' every write path goes through, `wp option update` included.'
+            );
+            self::assertSame(
+                (array) $report['deny_was'],
+                (array) $report['deny'],
+                'The denylist did not survive a round trip through its own sanitiser as an'
+                . ' array: the textarea sends one entry per line and everything else sends an'
+                . ' array, so wpmcp_sanitise_denylist() has to answer the same list for both.'
             );
             self::assertSame($report['stored'], $report['read'], 'wpmcp_meta_keys() disagrees with the option.');
             self::assertSame(1, $report['enabled'], 'A non-empty list did not switch the tools on.');

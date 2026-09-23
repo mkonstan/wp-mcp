@@ -1912,7 +1912,8 @@ final class Fixtures
      * which is the precise claim (round 2, review S2): SqlSelectTest arms the switch with a
      * `pre_option_` filter in a mu-plugin, gated on a per-request header, and asserts the
      * stored option is unchanged afterwards; PostMetaToolsTest's settings round trip DOES
-     * write it, through wpmcp_save_settings(), and writes back the value it read a moment
+     * write it, through update_option() (1.1.1: the Settings API swap put the normaliser on
+     * sanitize_option_*, so there is no wpmcp_save_settings() left), and writes back the value it read a moment
      * earlier in the same `wp eval` - a killed run cannot fall between the two. So when the
      * option is ON, an operator switched it on - both local test sites keep SQL reads on
      * for their dev MCP servers - and calling that debris turned every clean run red. It is
