@@ -13,10 +13,14 @@
  * claude_code_memory/fail-loud-explicit-scope.md.
  *
  * THIS IS THE ONLY FILE ALLOWED TO INTROSPECT A THROWABLE. getMessage, getFile, getLine,
- * getTraceAsString, __toString, a (string) cast - all of them put the filesystem layout
- * and often the arguments somewhere, and every one of them is banned from endpoint.php,
+ * getTrace, getTraceAsString, __toString, a (string) cast - all of them put the filesystem
+ * layout and often the arguments somewhere, and every one of them is banned from endpoint.php,
  * tools.php and wp-mcp.php by tests/unit/NoDisclosureTest.php. The single thing that may
  * cross back out to a caller is wpmcp_throwable_line(), below, and it is one integer.
+ *
+ * AND THIS FILE DOES NOT USE getTraceAsString() EITHER, since 1.1.1: PHP's own formatter prints
+ * the first fifteen characters of every string argument, which is a value. wpmcp_trace_stack()
+ * builds the stack from getTrace() and writes each argument's SHAPE instead - see there.
  *
  * WHY THE FILE NAME IS RANDOM. The first version wrote wp-content/wpmcp/trace.log behind
  * an .htaccess and checked over HTTP whether that worked. It did not: .htaccess is an
