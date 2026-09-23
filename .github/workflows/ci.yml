@@ -352,10 +352,18 @@ jobs:
         # error it reports, the second is a smaller suite that looks complete.
         uses: actions/upload-artifact@v4
         with:
-          name: shard-log-${{ github.run_attempt }}-${{ matrix.shard }}
+          # NO `run_attempt` IN THE NAME, and `overwrite` instead - which is the difference
+          # between "re-run the failed jobs" working and not working. Artifacts belong to the RUN,
+          # not to the attempt: with the attempt in the name, a re-run of one failed shard uploads
+          # `shard-log-2-8` while the seven that passed are still called `shard-log-1-*`, the merge
+          # finds one log where it wants eight, and refuses. Correct, and useless: a single flaky
+          # container would cost a whole fresh run of the tier. Found the hard way on run
+          # 35798691643, where shard 8's `wp-env start` simply failed.
+          name: shard-log-${{ matrix.shard }}
           path: ${{ steps.plan.outputs.log }}
           retention-days: 14
           if-no-files-found: error
+          overwrite: true
 
       - name: WordPress logs (on failure)
         if: failure()
@@ -407,7 +415,10 @@ jobs:
       - name: Collect every shard's log
         uses: actions/download-artifact@v4
         with:
-          pattern: shard-log-${{ github.run_attempt }}-*
+          # Every attempt's shards, because that is what makes a partial re-run whole: the seven
+          # that passed on attempt 1 are still here, and the one that was re-run has overwritten
+          # its own name.
+          pattern: shard-log-*
           path: shards
           merge-multiple: true
 
