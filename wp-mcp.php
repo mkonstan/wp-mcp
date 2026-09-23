@@ -389,7 +389,13 @@ function wpmcp_max_window() {
 //       every INSERT would fail, and all three code writers would fail closed. A schema
 //       change ships with a bump - the same rule the note above this list states, and the
 //       reason the activation hook alone is not enough.
-define('WPMCP_DB_VER', 5);
+//   6 = who is connected. Adds client_name and client_version to the token table, filled
+//       from the `clientInfo` every client already sends in `initialize` and shown on the
+//       settings screen beside last_used_at and use_count. This is the operator visibility
+//       the REJECTED session feature would have bought: "Claude Desktop 1.4, last seen 3
+//       minutes ago, 412 calls" answers "which client is this token, and is it still
+//       there?" without the plugin holding any session state at all.
+define('WPMCP_DB_VER', 6);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
 /* ============================================================
@@ -458,6 +464,8 @@ function wpmcp_install() {
   window_secs int(10) unsigned NOT NULL DEFAULT 0,
   expires_at datetime NOT NULL,
   last_used_at datetime DEFAULT NULL,
+  client_name varchar(191) NOT NULL DEFAULT '',
+  client_version varchar(64) NOT NULL DEFAULT '',
   use_count bigint(20) unsigned NOT NULL DEFAULT 0,
   created_by bigint(20) unsigned NOT NULL DEFAULT 0,
   user_id bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -519,6 +527,16 @@ function wpmcp_install() {
     if (!wpmcp_token_column_exists('user_id')) { return false; }
     if (!wpmcp_token_column_exists('active_until')) { return false; }
     if (!wpmcp_token_column_exists('window_secs')) { return false; }
+    // REVISION 6, AND IT GATES FOR THE REVISION-5 REASON rather than for correctness: a
+    // column added under a revision that has already been stamped reaches nobody, because
+    // wpmcp_maybe_upgrade() only runs the installer when the stamp is BEHIND. The plugin is
+    // perfectly usable without these two - see wpmcp_record_client_info(), which simply does
+    // nothing when the row has no such field - so the cost of failing closed here is one
+    // retried dbDelta per request on a host whose ALTER did not work, and the cost of NOT
+    // failing closed is a column that never arrives and a feature that is silently absent
+    // for the life of the site.
+    if (!wpmcp_token_column_exists('client_name')) { return false; }
+    if (!wpmcp_token_column_exists('client_version')) { return false; }
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
     if (wpmcp_migrate_token_lifetimes() === false) { return false; }
 
@@ -1589,6 +1607,60 @@ function wpmcp_validate($raw, $ip) {
         array('%s','%d'), array('%d')
     );
     return $row;
+}
+
+/**
+ * Record WHICH CLIENT is using this token, from `initialize`'s own `clientInfo`.
+ *
+ * WHY THIS IS THE WHOLE FEATURE. Operators asked the question the rejected session feature
+ * was going to answer - "what is actually connected to this site, and is it still there?" -
+ * and every MCP client already answers it, unprompted, in the first message of every
+ * connection: `initialize.params.clientInfo` is `{name, version}` and is REQUIRED by the
+ * specification. Storing the two strings beside last_used_at and use_count turns the token
+ * table into the answer, and the server stays stateless (see the BACKLOG entry for why
+ * sessions are dead).
+ *
+ * THE VALUES ARE THE CLIENT'S, SO THEY ARE TREATED AS INPUT. `sanitize_text_field()` strips
+ * tags, newlines and control characters, and the two lengths are the columns' own (191 and
+ * 64); the admin screen escapes them again on the way out. A client is free to call itself
+ * anything, so the field is evidence about what connected, never an identity check.
+ *
+ * WRITTEN ONLY WHEN IT CHANGED, and skipped entirely when the row has no such field: the
+ * session is a `SELECT *` row, so the property exists exactly when the column does, and a
+ * site whose revision-6 ALTER has not yet succeeded gets no error and no write. One UPDATE
+ * per reconnection rather than one per initialize.
+ *
+ * `initialize` IS THE ONLY CALLER because it is the only message that carries clientInfo. A
+ * client that never negotiates - the plugin does not require it - is simply not recorded.
+ */
+function wpmcp_record_client_info($params) {
+    global $wpdb;
+
+    $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
+    if (!$session || !property_exists($session, 'client_name')) { return; }
+
+    $info = (isset($params['clientInfo']) && is_array($params['clientInfo']))
+        ? $params['clientInfo']
+        : array();
+
+    $name = isset($info['name']) && is_scalar($info['name'])
+        ? substr(sanitize_text_field((string) $info['name']), 0, 191) : '';
+    $version = isset($info['version']) && is_scalar($info['version'])
+        ? substr(sanitize_text_field((string) $info['version']), 0, 64) : '';
+
+    if ($name === '' && $version === '') { return; }
+    if ($name === (string) $session->client_name
+        && $version === (string) $session->client_version) {
+        return;
+    }
+
+    $wpdb->update(
+        wpmcp_table(),
+        array('client_name' => $name, 'client_version' => $version),
+        array('id' => (int) $session->id),
+        array('%s', '%s'),
+        array('%d')
+    );
 }
 
 /**

@@ -171,6 +171,27 @@ if (!function_exists('apply_filters')) {
     }
 }
 
+if (!function_exists('wp_is_file_mod_allowed')) {
+    /**
+     * ADDED FOR 1.1.1, the file-mod swap. wpmcp_code_constants_forbid() now asks the platform
+     * instead of reading DISALLOW_FILE_MODS itself, so the listing follows a hardening
+     * plugin's `file_mod_allowed` filter.
+     *
+     * CORE'S OWN BODY, one line: the constant, passed through the filter
+     * (wp-includes/load.php:1838). Written out rather than hard-coded to true so that a unit
+     * test can still exercise BOTH branches - through the constant, as it always could, and
+     * through the filter, which is the new half - with the stubbed apply_filters above.
+     */
+    function wp_is_file_mod_allowed($context)
+    {
+        return apply_filters(
+            'file_mod_allowed',
+            !defined('DISALLOW_FILE_MODS') || !DISALLOW_FILE_MODS,
+            $context
+        );
+    }
+}
+
 if (!function_exists('wp_get_environment_type')) {
     /**
      * ADDED FOR SPRINT 14B. The window cap depends on it. Real WordPress caches its

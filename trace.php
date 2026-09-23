@@ -263,6 +263,9 @@ function wpmcp_trace_wp_error($error, $method = '', $tool = '') {
  * the stack is the only thing allowed more than one line, and every one of its lines is
  * indented four spaces so the "an event starts at column 0" rule holds.
  *
+ * THE STACK CARRIES ARGUMENT SHAPES AND NOT ARGUMENT VALUES (1.1.1) - see
+ * wpmcp_trace_stack(), which replaced getTraceAsString() for exactly that reason.
+ *
  * NEVER THE RAW TOKEN. The token is identified by its ROW ID, which is what the admin table
  * already shows, exactly as the auth events do.
  *
@@ -295,7 +298,7 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     $line  = implode(' ', $fields);
     $stack = '';
 
-    foreach (explode("\n", $e->getTraceAsString()) as $frame) {
+    foreach (wpmcp_trace_stack($e) as $frame) {
         $stack .= '    ' . $frame . "\n";
     }
 
@@ -317,6 +320,96 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     }
 
     return $id;
+}
+
+/**
+ * The stack, one line per frame, with each argument reduced to its SHAPE.
+ *
+ * WHY NOT getTraceAsString(), WHICH THIS REPLACES (1.1.1). PHP's own formatter prints the
+ * first 15 characters of every string argument and `Array` for every array - VERIFIED on the
+ * PHP this project runs (8.2.29, `zend.exception_ignore_args=0`):
+ * `#0 file(3): f('SECRETSECRETSEC...', Array, Object(stdClass))`. Fifteen characters is
+ * plenty to be a value: the start of a `source_url`, of a post title, of an SQL statement, of
+ * whatever a caller passed. The trace log is private and unguessable, and it is still not the
+ * place for caller data - what an operator needs from a frame is which call it was and what
+ * SORT of thing it was given, and that is all this writes.
+ *
+ * AN ARRAY'S KEYS ARE THE ONE EXCEPTION, and they are what makes a frame readable: the tool
+ * closure's frame is `{closure}(array{source_url,filename,title})`, which names the arguments
+ * the caller actually sent without printing one of them. Keys are bounded in number, and
+ * anything outside word characters is dropped, because a key can be caller-supplied too (a
+ * meta key, a taxonomy name).
+ *
+ * The frame numbering, the `{main}` sentinel and the `[internal function]` marker are PHP's
+ * own spellings, kept so that a log a reader has seen before still reads the same.
+ *
+ * @return list<string>
+ */
+function wpmcp_trace_stack(Throwable $e) {
+    $lines  = array();
+    $frames = $e->getTrace();
+
+    foreach ($frames as $i => $frame) {
+        $where = isset($frame['file'])
+            ? $frame['file'] . '(' . (isset($frame['line']) ? (int) $frame['line'] : 0) . ')'
+            : '[internal function]';
+
+        $call = (isset($frame['class']) ? (string) $frame['class'] . (isset($frame['type']) ? (string) $frame['type'] : '::') : '')
+            . (isset($frame['function']) ? (string) $frame['function'] : '{closure}');
+
+        // `args` is ABSENT, not empty, on a host with zend.exception_ignore_args=1 (PHP's own
+        // production default), so "no arguments" and "arguments withheld by php.ini" are two
+        // different frames and the log says which.
+        if (!array_key_exists('args', $frame)) {
+            $args = '...';
+        } else {
+            $shapes = array();
+            foreach ((array) $frame['args'] as $arg) { $shapes[] = wpmcp_trace_arg_shape($arg); }
+            $args = implode(', ', $shapes);
+        }
+
+        $lines[] = '#' . (int) $i . ' ' . $where . ': ' . $call . '(' . $args . ')';
+    }
+
+    $lines[] = '#' . count($frames) . ' {main}';
+
+    return $lines;
+}
+
+/**
+ * One argument, as its shape and never as its value.
+ *
+ * A scalar becomes its type - a string also its length, which is the one number worth having
+ * when a payload turns out to be a megabyte. An array becomes its KEYS, at most eight of them,
+ * each stripped to word characters and 40 characters; a list's integer keys say nothing, so a
+ * list is reported by its size instead. An object becomes its class name, which is code rather
+ * than data.
+ */
+function wpmcp_trace_arg_shape($arg) {
+    if (is_array($arg)) {
+        if ($arg !== array() && array_keys($arg) === range(0, count($arg) - 1)) {
+            return 'list(' . count($arg) . ')';
+        }
+
+        $keys = array();
+
+        foreach (array_keys($arg) as $key) {
+            if (count($keys) >= 8) { $keys[] = '...'; break; }
+            $keys[] = substr(preg_replace('/[^A-Za-z0-9_-]/', '', (string) $key), 0, 40);
+        }
+
+        return 'array{' . implode(',', $keys) . '}';
+    }
+
+    if (is_object($arg))   { return get_class($arg); }
+    if ($arg === null)     { return 'null'; }
+    if (is_bool($arg))     { return 'bool'; }
+    if (is_int($arg))      { return 'int'; }
+    if (is_float($arg))    { return 'float'; }
+    if (is_string($arg))   { return 'string(' . strlen($arg) . ')'; }
+    if (is_resource($arg)) { return 'resource'; }
+
+    return gettype($arg);
 }
 
 /** One field: newlines flattened, bounded, empty written as "" so the shape stays parseable. */

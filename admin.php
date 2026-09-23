@@ -160,31 +160,119 @@ function wpmcp_format_duration($seconds) {
 }
 
 /**
- * Write the one settings form's four values. $post is the UNSLASHED $_POST.
+ * "Claude Desktop 1.4", or "-" when nothing has ever negotiated with this token.
  *
- * SPLIT OUT OF THE PAGE, and not for tidiness: the page body is 200 lines of HTML that
- * cannot be run outside an admin request, so while the save lived inside it the only way
- * to test that the textarea round-trips was to test the normaliser and hope. This is the
- * code the form actually posts to, and a test can call it.
- *
- * THE NONCE IS NOT IN HERE. check_admin_referer() is a statement about the REQUEST, and
- * it stays at the call site where a request exists; this function is the write.
+ * The name alone when there is no version, and the version alone when a client sent one
+ * without a name - which the specification does not allow but a client can still do.
  */
-function wpmcp_save_settings($post) {
-    update_option('wpmcp_code_enabled', !empty($post['code_enabled']) ? 1 : 0);
-    update_option('wpmcp_sql_enabled', !empty($post['sql_enabled']) ? 1 : 0);
+function wpmcp_client_label($row) {
+    $name    = isset($row->client_name) ? trim((string) $row->client_name) : '';
+    $version = isset($row->client_version) ? trim((string) $row->client_version) : '';
 
-    $lines = isset($post['denylist']) ? (string) $post['denylist'] : '';
-    $list  = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $lines))));
-    update_option('wpmcp_code_denylist', $list);
+    if ($name === '' && $version === '') { return '-'; }
 
-    // NORMALISED HERE AND AGAIN ON EVERY READ. wpmcp_meta_keys_normalise() drops blanks,
-    // duplicates and any key WordPress calls protected - so a `_secret` typed into the
-    // box is gone the moment Save is pressed, and wpmcp_meta_key_allowed() refuses it at
-    // call time as well, because this option is an ordinary row that wp-cli or a restored
-    // backup can write without ever passing through this form.
-    $keys = isset($post['meta_keys']) ? (string) $post['meta_keys'] : '';
-    update_option('wpmcp_meta_keys', wpmcp_meta_keys_normalise($keys));
+    return trim($name . ' ' . $version);
+}
+
+/**
+ * "2026-09-23 08:41 UTC (3 minutes ago)", or "-" for a token nothing has used.
+ *
+ * BOTH, AND NOT ONE. The stamp is what a log line or another screen can be compared with;
+ * the relative part is what answers the question an operator actually has, which is whether
+ * the thing on the other end is still there. `human_time_diff()` is core's own phrasing, so
+ * it is translated and reads the way the rest of wp-admin reads.
+ */
+function wpmcp_last_used_label($row) {
+    $stamp = isset($row->last_used_at) ? (string) $row->last_used_at : '';
+
+    if ($stamp === '' || str_starts_with($stamp, '0000-00-00')) { return '-'; }
+
+    $when = strtotime($stamp . ' UTC');
+
+    return $when === false
+        ? $stamp
+        : $stamp . ' (' . human_time_diff($when, time()) . ' ago)';
+}
+
+/**
+ * THE FOUR OPERATOR SWITCHES, ON THE SETTINGS API (1.1.1).
+ *
+ * WHAT THIS REPLACES: a hand-written `code_settings` POST branch in wpmcp_render_admin(), its
+ * own `check_admin_referer()`, four `update_option()` calls in a wpmcp_save_settings()
+ * function, a hand-rolled "settings saved" notice string, and the form's own action. All of
+ * it is core's: `settings_fields('wpmcp')` prints the nonce and the group, `options.php`
+ * checks the nonce and the capability (`manage_options`, through the
+ * `option_page_capability_wpmcp` filter) and writes only options registered in this group,
+ * and because this page is an add_options_page() child, `wp-admin/options-head.php` prints
+ * core's own "Settings saved." after the redirect (admin-header.php:322-324).
+ *
+ * THE REAL WIN IS WHERE THE SANITISER LIVES, not the 25 lines. `register_setting`'s
+ * `sanitize_callback` is hooked on `sanitize_option_{$option}`, which `update_option()` runs
+ * on EVERY path - the form, `wp option update`, a plugin, a restored backup being re-saved -
+ * so a `_secret` typed into the meta box is dropped whoever writes it. The old code could
+ * only sanitise what the form posted, which is why wpmcp_meta_keys() re-normalises on read.
+ *
+ * THE READ-SIDE NORMALISATION STAYS ANYWAY. `sanitize_option` does not run for a row written
+ * straight through `$wpdb`, or for one that was in the table before this version, so
+ * wpmcp_meta_keys() and wpmcp_code_denylist() keep shaping what they read. Two independent
+ * answers, and a call site that forgets one cannot reopen the hole.
+ *
+ * REGISTERED ON `init` AND NOT ON `admin_init`, which is the difference between "the form is
+ * sanitised" and "the option is". `wp option update` never reaches an admin hook.
+ *
+ * NO `default` IS DECLARED, deliberately: `register_setting`'s default becomes a
+ * `default_option_*` filter, and wpmcp_code_denylist() reads `get_option(..., null)` and
+ * treats a non-array as "use the built-in denylist". A registered default would answer that
+ * read before the absent-row test ever saw it.
+ */
+add_action('init', 'wpmcp_register_settings');
+function wpmcp_register_settings() {
+    register_setting('wpmcp', 'wpmcp_code_enabled', array(
+        'type'              => 'boolean',
+        'show_in_rest'      => false,
+        'sanitize_callback' => 'wpmcp_sanitise_switch',
+    ));
+    register_setting('wpmcp', 'wpmcp_sql_enabled', array(
+        'type'              => 'boolean',
+        'show_in_rest'      => false,
+        'sanitize_callback' => 'wpmcp_sanitise_switch',
+    ));
+    register_setting('wpmcp', 'wpmcp_code_denylist', array(
+        'type'              => 'array',
+        'show_in_rest'      => false,
+        'sanitize_callback' => 'wpmcp_sanitise_denylist',
+    ));
+    register_setting('wpmcp', 'wpmcp_meta_keys', array(
+        'type'              => 'array',
+        'show_in_rest'      => false,
+        'sanitize_callback' => 'wpmcp_meta_keys_normalise',
+    ));
+}
+
+/**
+ * A checkbox, as 1 or 0.
+ *
+ * NULL IS THE UNCHECKED CASE AND IT IS NOT AN EDGE. `options.php` walks every option
+ * registered in the group and writes `null` for any the form did not post
+ * (options.php:337-345), which is exactly how an unchecked checkbox arrives - so this has to
+ * answer 0 for it rather than leave the old value standing.
+ */
+function wpmcp_sanitise_switch($value) {
+    return empty($value) ? 0 : 1;
+}
+
+/** The denylist: one entry per line from the textarea, or an array from anywhere else. */
+function wpmcp_sanitise_denylist($value) {
+    $items = is_array($value) ? $value : preg_split('/\r\n|\r|\n/', (string) $value);
+    $list  = array();
+
+    foreach ((array) $items as $item) {
+        if (!is_scalar($item)) { continue; }
+        $entry = trim((string) $item);
+        if ($entry !== '') { $list[] = $entry; }
+    }
+
+    return $list;
 }
 
 function wpmcp_render_admin() {
@@ -233,20 +321,6 @@ function wpmcp_render_admin() {
             ? 'Could not renew: ' . $renewed->get_error_message()
             : 'Token renewed - its active window runs again until ' . $renewed . ' UTC.'
               . ' The token itself did not change, so the client needs no edit.';
-    }
-
-    // Handle the code-editing + SQL + meta settings save.
-    //
-    // ONE FORM, ONE NONCE, and the SQL switch and the meta allow-list ride in it rather
-    // than getting forms of their own. Every one of them turns on a surface that an
-    // admin-scope token can reach and none is on by default, so an operator decides about
-    // them in one place and one submit; a second form would be a second nonce and a
-    // second way for a checkbox to be silently left at its old value because the other
-    // form was the one that posted.
-    if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'code_settings') {
-        check_admin_referer('wpmcp_code');
-        wpmcp_save_settings(wp_unslash($_POST));
-        $notice = 'Code-editing, SQL and post-meta settings saved.';
     }
 
     global $wpdb;
@@ -408,11 +482,11 @@ function wpmcp_render_admin() {
         <thead><tr>
           <th>Label</th><th>Owner</th><th>Scope</th><th>Status</th>
           <th>Active until (UTC)</th><th>Lifetime ends (UTC)</th>
-          <th>Last used</th><th>Uses</th><th></th>
+          <th>Client</th><th>Last used</th><th>Uses</th><th></th>
         </tr></thead>
         <tbody>
         <?php if (!$rows): ?>
-          <tr><td colspan="9"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
+          <tr><td colspan="10"><em>No tokens. The endpoint is dormant until one is minted.</em></td></tr>
         <?php else: foreach ($rows as $r):
             $status = wpmcp_token_status($r);
             // A deleted user leaves the id behind; say so rather than printing a bare
@@ -441,7 +515,12 @@ function wpmcp_render_admin() {
                     }
                 ?>)</span></td>
             <td><?php echo esc_html($r->expires_at); ?></td>
-            <td><?php echo esc_html($r->last_used_at ? $r->last_used_at : '-'); ?></td>
+            <?php // WHAT IS ON THE OTHER END, from initialize's clientInfo - see
+                  // wpmcp_record_client_info(). The client chose these two strings, so they
+                  // are escaped like any other input and are evidence, not identity. A dash
+                  // means nothing has negotiated with this token yet. ?>
+            <td><?php echo esc_html(wpmcp_client_label($r)); ?></td>
+            <td><?php echo esc_html(wpmcp_last_used_label($r)); ?></td>
             <td><?php echo (int) $r->use_count; ?></td>
             <td style="white-space:nowrap">
               <?php // RENEW IS OFFERED ONLY WHERE IT CAN WORK. A dead row has nothing
@@ -471,14 +550,26 @@ function wpmcp_render_admin() {
       </table>
 
       <h2>Code editing, SQL reads and post meta</h2>
-      <form method="post">
-        <?php wp_nonce_field('wpmcp_code'); ?>
-        <input type="hidden" name="wpmcp_action" value="code_settings">
+      <?php
+      // ONE FORM, ONE GROUP, and the SQL switch and the meta allow-list ride in it rather
+      // than getting forms of their own. Every one of them turns on a surface that an
+      // admin-scope token can reach and none is on by default, so an operator decides about
+      // them in one place and one submit; a second form would be a second group and a
+      // second way for a checkbox to be silently left at its old value because the other
+      // form was the one that posted.
+      //
+      // ACTION options.php, NOT THIS PAGE: settings_fields() prints the group, the nonce and
+      // the referer, and core writes, sanitises, redirects and prints "Settings saved.".
+      // See wpmcp_register_settings(). The mint / renew / revoke forms above are ACTIONS
+      // rather than settings and keep posting to this page with their own nonces.
+      ?>
+      <form method="post" action="<?php echo esc_url(admin_url('options.php')); ?>">
+        <?php settings_fields('wpmcp'); ?>
         <table class="form-table" role="presentation">
           <tr>
             <th scope="row">Enable code-edit tools</th>
             <td>
-              <label><input type="checkbox" name="code_enabled" value="1" <?php checked(wpmcp_code_enabled()); ?>>
+              <label><input type="checkbox" name="wpmcp_code_enabled" value="1" <?php checked(wpmcp_code_enabled()); ?>>
                 Allow admin-scope tokens to read/write files in the active theme</label>
               <p class="description">Off by default. While off, the code tools are not exposed at all, even to admin tokens.</p>
             </td>
@@ -491,14 +582,14 @@ function wpmcp_render_admin() {
           <tr>
             <th scope="row"><label for="wpmcp-denylist">Denylist</label></th>
             <td>
-              <textarea name="denylist" id="wpmcp-denylist" rows="6" class="large-text code"><?php echo esc_textarea(implode("\n", wpmcp_code_denylist())); ?></textarea>
+              <textarea name="wpmcp_code_denylist" id="wpmcp-denylist" rows="6" class="large-text code"><?php echo esc_textarea(implode("\n", wpmcp_code_denylist())); ?></textarea>
               <p class="description">One per line, never read or written. Bare name (functions.php) blocks that file anywhere; trailing slash (inc/) blocks a folder.</p>
             </td>
           </tr>
           <tr>
             <th scope="row">Allow SQL reads (sql-select)</th>
             <td>
-              <label><input type="checkbox" name="sql_enabled" value="1" <?php checked(wpmcp_sql_enabled()); ?>>
+              <label><input type="checkbox" name="wpmcp_sql_enabled" value="1" <?php checked(wpmcp_sql_enabled()); ?>>
                 Allow admin-scope tokens to run one read-only SQL SELECT at a time</label>
               <p class="description">Off by default. It reads every table the WordPress
                 database user can read &mdash; including <code><?php echo esc_html($wpdb->users); ?></code>
@@ -512,7 +603,7 @@ function wpmcp_render_admin() {
           <tr>
             <th scope="row"><label for="wpmcp-meta-keys">Post meta keys</label></th>
             <td>
-              <textarea name="meta_keys" id="wpmcp-meta-keys" rows="6" class="large-text code"><?php echo esc_textarea(implode("\n", wpmcp_meta_keys())); ?></textarea>
+              <textarea name="wpmcp_meta_keys" id="wpmcp-meta-keys" rows="6" class="large-text code"><?php echo esc_textarea(implode("\n", wpmcp_meta_keys())); ?></textarea>
               <p class="description">Post meta keys the tools may read and write, one per
                 line. Empty by default, and while it is empty <code>get-post-meta</code>
                 and <code>set-post-meta</code> are not exposed at all. Exact key names, not

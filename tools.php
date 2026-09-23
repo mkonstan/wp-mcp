@@ -98,7 +98,9 @@ function wpmcp_code_enabled() {
  * they turn the capability off for everyone, administrators included, and an operator
  * who sets them means it. (Core does this in map_meta_cap, so current_user_can alone
  * would already answer false - the explicit check is here so the refusal says which
- * of the three it was, and so it holds if that mapping ever moves.)
+ * of the three it was, and so it holds if that mapping ever moves.) The MODS half goes
+ * through `wp_is_file_mod_allowed()`, so a hardening plugin's `file_mod_allowed` filter
+ * counts as well - see wpmcp_code_constants_forbid().
  */
 function wpmcp_code_forbidden() {
     $constant = wpmcp_code_constants_forbid();
@@ -133,9 +135,29 @@ function wpmcp_code_forbidden() {
  * between the scope gate and the capability checks inside each tool.
  */
 function wpmcp_code_constants_forbid() {
-    if (defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS) {
-        return new WP_Error('wpmcp_forbidden', 'File modification is disabled on this site (DISALLOW_FILE_MODS).');
+    // THE FILE-MOD HALF IS THE PLATFORM'S ANSWER, NOT A CONSTANT READ (1.1.1).
+    // `wp_is_file_mod_allowed('capability_edit_themes')` (wp-includes/load.php:1829, since
+    // 4.8) is `! DISALLOW_FILE_MODS` passed through the `file_mod_allowed` filter, and it is
+    // the exact call `map_meta_cap` makes for `edit_themes` (capabilities.php:607-611) - so a
+    // hardening plugin that switches file editing off through that filter now switches the
+    // LISTING off too. Before this, such a site advertised all six code tools and refused
+    // every call, which is the same "advertised and refused" defect the constants split fixed
+    // for DISALLOW_FILE_EDIT, measured on seosemia.net (see the docblock above).
+    //
+    // The context string is core's own for this capability, so a filter that answers
+    // per-context - which is why the parameter exists - gets asked the same question core
+    // asks it.
+    if (!wp_is_file_mod_allowed('capability_edit_themes')) {
+        return new WP_Error(
+            'wpmcp_forbidden',
+            defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS
+                ? 'File modification is disabled on this site (DISALLOW_FILE_MODS).'
+                : 'File modification is disabled on this site (the file_mod_allowed filter).'
+        );
     }
+    // DISALLOW_FILE_EDIT STAYS A DIRECT CONSTANT READ, because core's is too: map_meta_cap
+    // tests the constant itself and has no filter in front of it, so there is nothing to
+    // delegate to and a filter of our own would disagree with `current_user_can`.
     if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
         return new WP_Error('wpmcp_forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
     }
@@ -438,6 +460,418 @@ function wpmcp_opcache_invalidate($abs) {
 }
 
 /**
+ * download_url()'s failure, as something the caller can act on - or the error untouched.
+ *
+ * MEASURED 2026-09-21. upload-media on a Wikimedia thumbnail URL answered a bare
+ * `Internal error`, and the trace log held the whole story:
+ * `class=WP_Error:http_404 message=Bad Request data={"code":400,...}` - the CDN had refused
+ * WordPress's user agent. Core's download_url() turns EVERY non-2xx into
+ * `WP_Error('http_404', <reason phrase>, array('code' => <status>, 'body' => <1 KB sample>))`
+ * (wp-admin/includes/file.php:1193-1219), whatever the status actually was, and `http_404` is
+ * not on wpmcp_relayable_core_error_codes() - so the boundary correctly hid it, and the caller
+ * was left with nothing to act on for a failure that was not this site's fault at all.
+ *
+ * THE STATUS AND THE REASON, AND NOT THE BODY. The status is the one fact that tells an agent
+ * what to do next: 401/403 means this site is not allowed to fetch that URL and a different
+ * one is needed, 404 means the URL is wrong, 429/5xx means wait. The `body` core attaches is a
+ * kilobyte of whatever the remote server sent - in the measured case a full HTML error page,
+ * in another case somebody else's session-bearing redirect - and it is not ours to forward.
+ * The reason phrase comes from the remote server too, so it is bounded and stripped of
+ * control characters before it goes anywhere near a client.
+ *
+ * ANY OTHER CODE IS RETURNED UNTOUCHED, which means `http_request_failed` (no connection at
+ * all) stays generic: its message is the transport's, and cURL's names the host it could not
+ * reach, which on a site with WP_PROXY_HOST set is the operator's internal proxy. That one
+ * comes back as `Internal error (trace <id>)` and the sentence is in the private log.
+ */
+function wpmcp_fetch_error($error) {
+    if ((string) $error->get_error_code() !== 'http_404') { return $error; }
+
+    $data   = $error->get_error_data();
+    $status = (is_array($data) && isset($data['code'])) ? (int) $data['code'] : 0;
+
+    // No status means this is not the shape this function was written for - a filter, or a
+    // transport that answered without a code. Nothing to relay, so nothing is.
+    if ($status < 100 || $status > 599) { return $error; }
+
+    // The remote server chose this string. Control characters out, 80 characters at most.
+    $reason = preg_replace('/[^\x20-\x7E]/', ' ', (string) $error->get_error_message());
+    $reason = trim((string) $reason);
+    if (strlen($reason) > 80) { $reason = substr($reason, 0, 80) . '...'; }
+
+    return new WP_Error(
+        'wpmcp_fetch_failed',
+        'The server at source_url answered HTTP ' . $status
+        . ($reason !== '' ? ' ' . $reason : '')
+        . ' instead of the file. This site fetched the URL itself, so the remote server has to'
+        . ' be willing to serve it to this site - a URL that works in your browser may still be'
+        . ' refused here. The response body is not relayed.'
+    );
+}
+
+/**
+ * ONE DECLARATION, TWO OUTPUTS: a tool's `outputSchema` AND the result it returns.
+ *
+ * THE PILOT, AND WHY IT IS SHAPED THIS WAY (1.1.1, decision D19). `outputSchema` and
+ * `structuredContent` are normative in every revision this server speaks, and a client cannot
+ * tell us whether it wants the structured half - so a tool that declares one sends its data
+ * TWICE, because the specification says to keep the text block for compatibility. That cost
+ * is paid on four small-payload read tools only: site-info, get-post, get-media and get-user.
+ *
+ * THE POINT IS NOT THE WIRE FORMAT, IT IS THAT THERE IS ONE SOURCE. Sprint 14d existed
+ * largely because results had drifted: three list tools with three envelopes, dates in three
+ * formats, site-info gluing a name and a version together. A schema written out beside a
+ * result builder would be a fourth thing to keep in step - so it is not written out. A tool
+ * declares its fields ONCE, each with its JSON type and the closure that produces it, and
+ * wpmcp_result_schema() and wpmcp_result_build() read the same declaration. A field that is
+ * added, removed, renamed or re-typed moves in both at once, and a field with no `get` is a
+ * PHP error rather than a schema that promises something nobody sends.
+ *
+ * A DECLARATION IS AN ORDERED MAP of field name => {
+ *   type         string|list<string>  the JSON type(s). Required.
+ *   nullable     bool                 adds 'null' to the type and nothing else.
+ *   description  string               goes into the schema; this is where the field list that
+ *                                     used to eat the tool's 1,000 description characters
+ *                                     belongs (D19: the budget is the scarce thing).
+ *   get          callable($ctx)       the value. Required.
+ *   fields       array                a NESTED declaration: `get` then returns the inner
+ *                                     context (or null for a nullable object), and the
+ *                                     builder recurses. That is what keeps an object's
+ *                                     insides single-source too.
+ *   items        array                a JSON Schema node for an array's elements.
+ *   when         callable($ctx)       false = this field is absent from the result AND
+ *                                     optional in the schema. get-user's capability-gated
+ *                                     half is the case.
+ * }
+ *
+ * EVERY FIELD IS `required` UNLESS `when` SAYS OTHERWISE, because a read tool that sometimes
+ * omits a key is the drift this is meant to prevent; nullable says "present and empty".
+ *
+ * @param array $shape the declaration
+ * @return array a JSON Schema object node
+ */
+function wpmcp_result_schema($shape) {
+    $properties = array();
+    $required   = array();
+
+    foreach ($shape as $name => $field) {
+        $types = (array) $field['type'];
+        if (!empty($field['nullable'])) { $types[] = 'null'; }
+
+        $node = array('type' => count($types) === 1 ? reset($types) : array_values($types));
+
+        if (isset($field['description'])) { $node['description'] = (string) $field['description']; }
+
+        if (isset($field['fields'])) {
+            $inner               = wpmcp_result_schema($field['fields']);
+            $node['properties']  = $inner['properties'];
+            $node['required']    = $inner['required'];
+        }
+
+        if (isset($field['items'])) { $node['items'] = $field['items']; }
+
+        $properties[(string) $name] = $node;
+
+        if (!isset($field['when'])) { $required[] = (string) $name; }
+    }
+
+    return array('type' => 'object', 'properties' => $properties, 'required' => $required);
+}
+
+/**
+ * The result the declaration above describes, in the order it declares.
+ *
+ * @param array $shape the same declaration wpmcp_result_schema() was given
+ * @param mixed $ctx   whatever the tool's `get` closures need - a WP_Post, an id, anything
+ * @return array
+ */
+function wpmcp_result_build($shape, $ctx = null) {
+    $out = array();
+
+    foreach ($shape as $name => $field) {
+        if (isset($field['when']) && !call_user_func($field['when'], $ctx)) { continue; }
+
+        $value = call_user_func($field['get'], $ctx);
+
+        // A nested declaration: `get` handed back the inner context, not the inner value.
+        if (isset($field['fields'])) {
+            $value = $value === null ? null : wpmcp_result_build($field['fields'], $value);
+        }
+
+        $out[(string) $name] = $value;
+    }
+
+    return $out;
+}
+
+/**
+ * site-info's fields. The context is wpmcp_theme_header()'s reading of the active theme's
+ * style.css, or null when there is no theme - which is why the two theme fields are nullable.
+ */
+function wpmcp_site_info_shape() {
+    return array(
+        'name' => array(
+            'type' => 'string',
+            'description' => 'The site title, as stored (the blogname option, not a rendering of it).',
+            'get'  => function ($header) { return get_bloginfo('name'); },
+        ),
+        'url' => array(
+            'type' => 'string',
+            'description' => 'The site home URL. https whenever the request reached WordPress over TLS.',
+            'get'  => function ($header) { return home_url(); },
+        ),
+        'wp_version' => array(
+            'type' => 'string',
+            'description' => 'The WordPress version this site runs.',
+            'get'  => function ($header) { return get_bloginfo('version'); },
+        ),
+        'active_theme' => array(
+            'type'        => 'string',
+            'nullable'    => true,
+            'description' => 'The active theme\'s name, exactly as list-themes gives it. Never glued to its version.',
+            'get'         => function ($header) { return $header ? $header['name'] : null; },
+        ),
+        'active_theme_version' => array(
+            'type'        => 'string',
+            'nullable'    => true,
+            'description' => 'The active theme\'s Version header, or an empty string when it has none.',
+            'get'         => function ($header) { return $header ? $header['version'] : null; },
+        ),
+        'active_plugins' => array(
+            'type'        => 'integer',
+            'description' => 'How many plugins are active. A count, never the list: a plugin inventory is not a read tool\'s to hand out.',
+            'get'         => function ($header) { return count((array) get_option('active_plugins', array())); },
+        ),
+        // NESTED, and not `wpmcp_version` beside `wp_version`. Two keys one character apart,
+        // one meaning WordPress and the other meaning this plugin, is a misreading waiting to
+        // happen in exactly the situation this field exists for: somebody trying to work out
+        // which of two builds a site is running.
+        'wp_mcp' => array(
+            'type'        => 'object',
+            'description' => 'This plugin, not WordPress.',
+            'get'         => function ($header) { return true; },
+            'fields'      => array(
+                'version' => array(
+                    'type' => 'string',
+                    'description' => 'The plugin version from its header.',
+                    'get'  => function ($ctx) { return WPMCP_VER; },
+                ),
+                'build' => array(
+                    'type' => 'string',
+                    'description' => 'The commit a zip was built from, or "source" when the site runs it from a checkout.',
+                    'get'  => function ($ctx) { return wpmcp_build_label(); },
+                ),
+            ),
+        ),
+    );
+}
+
+/**
+ * get-post's fields. The context is {post, author, revisions} - the author userdata and the
+ * revision count are read by the tool, because both are capability decisions rather than
+ * columns and belong where the refusals are.
+ */
+function wpmcp_get_post_shape() {
+    return array(
+        'id' => array(
+            'type' => 'integer',
+            'description' => 'Post ID.',
+            'get'  => function ($c) { return (int) $c['post']->ID; },
+        ),
+        'title' => array(
+            'type' => 'string',
+            'description' => 'The stored post_title column, not the display rendering.',
+            'get'  => function ($c) { return wpmcp_raw_title($c['post']); },
+        ),
+        'type' => array(
+            'type' => 'string',
+            'description' => 'Post type slug.',
+            'get'  => function ($c) { return (string) $c['post']->post_type; },
+        ),
+        'status' => array(
+            'type' => 'string',
+            'description' => 'Post status slug, a plugin\'s custom status included.',
+            'get'  => function ($c) { return (string) $c['post']->post_status; },
+        ),
+        'slug' => array(
+            'type' => 'string',
+            'description' => 'The post_name column. Empty for a draft that has never had one.',
+            'get'  => function ($c) { return (string) $c['post']->post_name; },
+        ),
+        'link' => array(
+            'type'        => 'string',
+            'description' => 'The RENDERED permalink - the plain ?p=ID form while the post is draft, pending, future or trashed, whatever the permalink structure. There is no column to write it back to.',
+            'get'         => function ($c) { return get_permalink($c['post']); },
+        ),
+        'content' => array(
+            'type' => 'string',
+            'description' => 'The stored post_content column, unfiltered: no shortcodes run, no blocks rendered, no wpautop.',
+            'get'  => function ($c) { return (string) $c['post']->post_content; },
+        ),
+        'excerpt' => array(
+            'type' => 'string',
+            'description' => 'The stored post_excerpt column. Empty when the post has none; never generated from the content.',
+            'get'  => function ($c) { return (string) $c['post']->post_excerpt; },
+        ),
+        'author' => array(
+            'type'        => 'object',
+            'description' => 'Who wrote it. An id and a display name and nothing else - not the login, which is half of a credential.',
+            'get'         => function ($c) { return $c; },
+            'fields'      => array(
+                'id' => array(
+                    'type' => 'integer',
+                    'description' => 'The author\'s user id.',
+                    'get'  => function ($c) { return (int) $c['post']->post_author; },
+                ),
+                'name' => array(
+                    'type'     => 'string',
+                    'nullable' => true,
+                    'description' => 'The author\'s display name, or null when the user has been deleted.',
+                    'get'      => function ($c) { return $c['author'] ? (string) $c['author']->display_name : null; },
+                ),
+            ),
+        ),
+        'date' => array(
+            'type' => 'string', 'nullable' => true,
+            'description' => 'ISO 8601, site-local, no offset - what post_date holds. Null when the column holds no date.',
+            'get'  => function ($c) { return wpmcp_iso_date($c['post']->post_date); },
+        ),
+        'date_gmt' => array(
+            'type' => 'string', 'nullable' => true,
+            'description' => 'The same instant in UTC. Null for a draft nobody dated: WordPress stores 0000-00-00 there for a date-floating status.',
+            'get'  => function ($c) { return wpmcp_iso_date($c['post']->post_date_gmt); },
+        ),
+        'modified' => array(
+            'type' => 'string', 'nullable' => true,
+            'description' => 'ISO 8601, site-local, no offset.',
+            'get'  => function ($c) { return wpmcp_iso_date($c['post']->post_modified); },
+        ),
+        'modified_gmt' => array(
+            'type' => 'string', 'nullable' => true,
+            'description' => 'The same instant in UTC, or null - see date_gmt.',
+            'get'  => function ($c) { return wpmcp_iso_date($c['post']->post_modified_gmt); },
+        ),
+        'featured_image' => array(
+            'type'        => 'object',
+            'nullable'    => true,
+            'description' => 'The featured image, or null when the post has none.',
+            'get'         => function ($c) {
+                $id = (int) get_post_thumbnail_id($c['post']);
+
+                return $id ? $id : null;
+            },
+            'fields' => array(
+                'id' => array(
+                    'type' => 'integer',
+                    'description' => 'The attachment id. upload-media and update-post both take it.',
+                    'get'  => function ($id) { return (int) $id; },
+                ),
+                'url' => array(
+                    'type'     => 'string',
+                    'nullable' => true,
+                    'description' => 'The rendered file URL, or null when the file is gone.',
+                    'get'      => function ($id) {
+                        $url = wp_get_attachment_url((int) $id);
+
+                        return $url === false ? null : $url;
+                    },
+                ),
+            ),
+        ),
+        'terms' => array(
+            'type'        => 'object',
+            'description' => 'Terms keyed by taxonomy, for every viewable taxonomy on this post type. Each entry is {id, name, slug}, the name as a person would type it. update-post accepts exactly these objects back.',
+            'get'         => function ($c) { return wpmcp_post_terms($c['post']); },
+        ),
+        'revisions' => array(
+            'type'        => 'integer',
+            'nullable'    => true,
+            'description' => 'How many revisions are stored, or null when the caller cannot edit the post - revisions are editorial data and follow the editorial capability, as wp-admin does. Null rather than 0, because 0 would be a claim.',
+            'get'         => function ($c) { return $c['revisions']; },
+        ),
+    );
+}
+
+/**
+ * get-media's fields. The context is the attachment WP_Post.
+ *
+ * `url` IS NULLABLE AND THAT IS A FIX (1.1.1). It used to be whatever
+ * `wp_get_attachment_url()` returned, which is `false` when the attachment has no file - so
+ * the field was a string on every row but one, and a client reading it as text got the JSON
+ * literal `false`. Declaring the type is what found it; get-post's featured_image.url had
+ * already been normalised to null in sprint 14d and this is the same shape.
+ */
+function wpmcp_get_media_shape() {
+    return array(
+        'id' => array(
+            'type' => 'integer',
+            'description' => 'Attachment ID.',
+            'get'  => function ($p) { return (int) $p->ID; },
+        ),
+        'title' => array(
+            'type' => 'string',
+            'description' => 'The stored post_title column, not the display rendering.',
+            'get'  => function ($p) { return wpmcp_raw_title($p); },
+        ),
+        'mime' => array(
+            'type' => 'string',
+            'description' => 'The stored MIME type, e.g. image/jpeg.',
+            'get'  => function ($p) { return (string) $p->post_mime_type; },
+        ),
+        'url' => array(
+            'type'        => 'string',
+            'nullable'    => true,
+            'description' => 'The rendered file URL, or null when the attachment has no file. There is no column to write it back to.',
+            'get'         => function ($p) {
+                $url = wp_get_attachment_url((int) $p->ID);
+
+                return $url === false ? null : $url;
+            },
+        ),
+        'alt' => array(
+            'type'        => 'string',
+            'description' => 'The alt text, from _wp_attachment_image_alt. Plain text: upload-media strips tags and encodes < on the way in. Empty when unset.',
+            'get'         => function ($p) { return (string) get_post_meta((int) $p->ID, '_wp_attachment_image_alt', true); },
+        ),
+        'caption' => array(
+            'type'        => 'string',
+            'description' => 'The caption - WordPress stores it in post_excerpt. Empty when unset.',
+            'get'         => function ($p) { return (string) $p->post_excerpt; },
+        ),
+        'filesize' => array(
+            'type'        => 'integer',
+            'nullable'    => true,
+            'description' => 'Size in bytes, or null when the file is missing from disk.',
+            'get'         => function ($p) {
+                $file = get_attached_file((int) $p->ID);
+
+                return ($file && file_exists($file)) ? filesize($file) : null;
+            },
+        ),
+        'width' => array(
+            'type'        => 'integer',
+            'nullable'    => true,
+            'description' => 'Pixels, or null for anything that is not an image.',
+            'get'         => function ($p) {
+                $meta = wp_get_attachment_metadata((int) $p->ID);
+
+                return isset($meta['width']) ? (int) $meta['width'] : null;
+            },
+        ),
+        'height' => array(
+            'type'        => 'integer',
+            'nullable'    => true,
+            'description' => 'Pixels, or null for anything that is not an image.',
+            'get'         => function ($p) {
+                $meta = wp_get_attachment_metadata((int) $p->ID);
+
+                return isset($meta['height']) ? (int) $meta['height'] : null;
+            },
+        ),
+    );
+}
+
+/**
  * Limit the post tools to real, viewable content types. Excludes internal types
  * (revisions, nav_menu_item, wp_template, wp_global_styles, etc.) and attachments
  * (those have their own media tools). Public CPTs are allowed automatically.
@@ -460,24 +894,48 @@ function wpmcp_post_type_ok($type) {
  * listed every author's private and draft posts - id, title, status, slug, link - to
  * any token. Deciding the statuses here, from capabilities, is what actually closes it.
  *
- * Narrower than 'any' by one deliberate margin: a site with CUSTOM post statuses will
- * not see them listed, because this returns only the five core ones.
+ * CUSTOM STATUSES ARE INCLUDED, AND THE PLATFORM DECIDES WHICH (1.1.1). The five core
+ * statuses used to be written out here, so a workflow plugin's `archived` or `expired` was
+ * invisible to list-posts however public it was. `get_post_stati(array('internal' => false),
+ * 'objects')` is the registry (since 3.0) and each status object's `public` / `private` /
+ * `protected` flags are the SAME flags WP_Query itself consults to decide who may see a
+ * status (class-wp-query.php:3538-3553: protected -> the edit capability, private -> the read
+ * capability, public -> everybody, and a status with none of the three -> nobody). Reading
+ * the flags instead of a list means a status registered after this code was written is
+ * scoped by the rule its own author declared.
+ *
+ * THE MAPPING, AND IT IS THE ONE THIS FUNCTION ALREADY HAD:
+ *
+ *   public     -> everyone. It is on the front end already.
+ *   protected  -> $pto->cap->edit_others_posts. This is where draft, pending and future are;
+ *                 seeing other people's unpublished work is an editorial capability.
+ *   private    -> $pto->cap->read_private_posts. This is where `private` is.
+ *   none of the three -> NOBODY, not even the author, because that is core's own answer
+ *                 (class-wp-query.php:3557 empties the result) and a status with no flag has
+ *                 declared no audience.
+ *
+ * `internal => false` keeps `trash` and `auto-draft` out, exactly as the old list did by
+ * omission - and `inherit`, which attachments use, since it is not internal but also not
+ * public, protected or private, so no flag admits it.
+ *
+ * WIDER THAN BEFORE, AND THE CAPABILITY IS WHAT BOUNDS IT. A plugin that registers an
+ * internal workflow state as `public => true` makes it listable here - but it has also put it
+ * on the front end, which is what that flag means.
  */
 function wpmcp_listable_statuses($post_type) {
-    $pto      = get_post_type_object($post_type);
-    $statuses = array('publish');
-    if (!$pto) { return $statuses; }
+    $pto = get_post_type_object($post_type);
+    if (!$pto) { return array('publish'); }
 
-    if (current_user_can($pto->cap->read_private_posts)) {
-        $statuses[] = 'private';
+    $statuses = array();
+
+    foreach (get_post_stati(array('internal' => false), 'objects') as $name => $status) {
+        if (!empty($status->public)
+            || (!empty($status->protected) && current_user_can($pto->cap->edit_others_posts))
+            || (!empty($status->private) && current_user_can($pto->cap->read_private_posts))) {
+            $statuses[] = (string) $name;
+        }
     }
-    // Unpublished work is other people's drafts. Seeing it is an editorial
-    // capability, and edit_others_posts is the one WordPress uses for that.
-    if (current_user_can($pto->cap->edit_others_posts)) {
-        $statuses[] = 'draft';
-        $statuses[] = 'pending';
-        $statuses[] = 'future';
-    }
+
     return $statuses;
 }
 
@@ -495,15 +953,25 @@ function wpmcp_listable_statuses($post_type) {
  * Empty for anyone who cannot author posts at all, and empty for an Editor or an
  * Administrator - they already see every status, so they run one query exactly as
  * before.
+ *
+ * THE COMPLEMENT IS TAKEN OVER THE SAME REGISTRY (1.1.1), not over the five core statuses,
+ * so an author sees their OWN posts in a plugin's custom status on the same rule: a status
+ * whose flags say somebody else's copy is withheld is still the author's own to see. A
+ * status with NO flag at all is in neither list, because core shows it to nobody.
  */
 function wpmcp_own_listable_statuses($post_type) {
     $pto = get_post_type_object($post_type);
     if (!$pto || !current_user_can($pto->cap->edit_posts)) { return array(); }
 
-    return array_values(array_diff(
-        array('private', 'draft', 'pending', 'future'),
-        wpmcp_listable_statuses($post_type)
-    ));
+    $scoped = array();
+
+    foreach (get_post_stati(array('internal' => false), 'objects') as $name => $status) {
+        if (empty($status->public) && (!empty($status->protected) || !empty($status->private))) {
+            $scoped[] = (string) $name;
+        }
+    }
+
+    return array_values(array_diff($scoped, wpmcp_listable_statuses($post_type)));
 }
 /**
  * ISO 8601 for one WordPress datetime column, or null when the column holds no date.
@@ -999,6 +1467,53 @@ function wpmcp_raw_title($post) {
 }
 
 /**
+ * THE TITLE CONTRACT - what this plugin does to a title, and why it is now nothing.
+ *
+ * Documentation only: there is no code left to put in a function, which is the point. The
+ * rule is ARCHITECTURE's "the tool layer is the browser and the form" (decision D5), and
+ * for a title it comes out as: HAND CORE THE TITLE AS TYPED AND LET title_save_pre RUN.
+ *
+ * WHAT WAS THERE BEFORE. create-post and update-post ran `wp_strip_all_tags()` on the title,
+ * so a title typed `x<y z` was stored as `x` - text destroyed, silently, on a write the
+ * caller thought it understood. Neither wp-admin nor WP_REST_Posts_Controller does that.
+ *
+ * WHAT CORE DOES INSTEAD, read on WP 7.1.1 and measured on sample.local 2026-09-21:
+ *
+ *   - `title_save_pre` carries only `trim` by default (default-filters.php:328).
+ *   - `wp_filter_kses` is added to it ONLY for a user without `unfiltered_html`
+ *     (kses.php:2548, through kses_init/kses_init_filters), and `DISALLOW_UNFILTERED_HTML`
+ *     forces that path for everyone, administrators included.
+ *   - So the SAME wire value stores different bytes depending on the token user: an
+ *     administrator's `x<y z` is stored `x<y z`, and an author's is stored `x&lt;y z`.
+ *     That is the accepted cost of the contract, and it is what wp-admin does.
+ *   - kses is a FIXED POINT: `wp_filter_kses('x<y z')` is `x&lt;y z`, and a second and third
+ *     pass change nothing. `esc_attr()` does not double-encode, so the stored `x&lt;y z`
+ *     reaches the browser as `x&lt;y z` and wp-admin's field shows the user `x<y z`. The two
+ *     are inverses, which is why wp-admin never compounds an encoding.
+ *
+ * THE SLASHING IS THE TRAP, AND IT IS ALREADY HANDLED - by one call, on purpose.
+ * `wp_filter_kses` is `addslashes(wp_kses(stripslashes($data)))`, so it expects SLASHED input
+ * exactly as `wp_insert_post()` does (it unslashes at post.php:4981, after the save_pre
+ * filters have run at :4632). Both write tools slash the whole postarr once, at the boundary
+ * (`wp_insert_post(wp_slash($postarr))`, `wp_update_post(wp_slash($upd))`), so kses's
+ * stripslashes/addslashes pair cancels out and `Tom's "quoted" A\B` survives byte for byte for
+ * an administrator and as `Tom's "quoted" A\B` for an author too - kses touches none of those
+ * three characters. Hand kses an UNSLASHED title and the backslash is eaten instead
+ * (`A\B` -> `AB`), which is the failure this note exists to stop a future field from
+ * repeating: slash the array, never the field.
+ *
+ * THE READ SIDE IS NOT PART OF THIS CHANGE, and the asymmetry is named rather than hidden:
+ * get-post returns the stored column (wpmcp_raw_title()), so an author's `x<y z` reads back
+ * as `x&lt;y z` while wp-admin's field would show `x<y z`. Writing what was read back is
+ * still exact, because an unchanged field is not written at all (see the no-op rule above).
+ * Decoding a title on read is a separate decision - it would change what five read tools
+ * return and would let an administrator's write-back rewrite an author's stored bytes - and
+ * it is recorded as an open item in ARCHITECTURE.
+ *
+ * @see wpmcp_decode_specialchars() for the fields where the read half IS applied.
+ */
+
+/**
  * A stored name with the HTML escaping WordPress put on it taken off again - the text a
  * person typed, and the text a client should send to name the same thing.
  *
@@ -1284,18 +1799,36 @@ function wpmcp_apply_terms($post_id, $terms) {
  * instant is fixed by the caller and the site's zone only decides how it is written down.
  * Both branches end at the same place: one instant, expressed twice.
  *
- * WHY NOT strtotime(), AND WHY NOT wpmcp_parse_iso_datetime(). strtotime() accepts 'next
- * tuesday', '@1700000000' and '2026-13-45' (which it rolls into 2027), so it cannot tell a
- * caller their date is malformed - the exact failure this plugin's `after`/`before` filter
- * already refuses to have. wpmcp_parse_iso_datetime() is that refusal, but it rejects an
- * offset outright, which is right for a date FILTER (a window on stored local columns) and
- * wrong for a date a caller is SETTING. Two shapes, two parsers, and neither loosened.
+ * THE CONVERSION IS CORE'S, AND ONLY THE GRAMMAR IS OURS. `rest_get_date_with_gmt()`
+ * (wp-includes/rest-api.php:1401, since 4.4) returns exactly this pair and is what
+ * WP_REST_Posts_Controller pairs with `edit_date => true` - the same pattern
+ * wpmcp_post_fields() already uses - so the local/GMT conversion is a platform API we do not
+ * maintain. What is left here is a GRAMMAR SHIM and a GUARD, and both earn their lines:
  *
- * THE CONVERSION IS get_gmt_from_date()'S OWN - `wp_timezone()` to UTC - done once on the
- * parsed instant rather than by formatting to local and re-parsing that. A round trip
- * through a local string is lossy exactly where it matters: in the repeated hour of a DST
- * fall-back, two different instants share one local spelling, so re-parsing picks one of
- * them and an offset-bearing input can land an hour away from the instant it named.
+ * THE SHIM, because core's grammar is narrower than the one this tool documents.
+ * `rest_parse_date()` (:1358) demands `YYYY-MM-DDTHH:MM:SS` with a colon in any offset, so
+ * `2026-03-04`, `2026-03-04T09:30` and `2026-03-04T09:30:00-0500` - all three documented by
+ * create-post and update-post since 1.0 - would simply be refused. The regex matches our
+ * shape, then the parts are padded into core's.
+ *
+ * THE GUARD, because core's parser ends in `strtotime()` (:1364), which does not validate:
+ * `2026-02-30T00:00:00` matches core's regex and rolls silently to 2 March, and `+25:00`
+ * matches and means nothing. A caller whose date is impossible is told so, which is the whole
+ * reason this project has its own date parsing at all - see wpmcp_parse_iso_datetime(), the
+ * filter-side parser, whose docblock refuses the same failure for the same reason.
+ *
+ * WHY NOT strtotime(), AND WHY NOT wpmcp_parse_iso_datetime(). strtotime() accepts 'next
+ * tuesday', '@1700000000' and '2026-13-45' (which it rolls into 2027). wpmcp_parse_iso_datetime()
+ * is the refusal of exactly that, but it rejects an offset outright, which is right for a date
+ * FILTER (a window on stored local columns) and wrong for a date a caller is SETTING. Two
+ * shapes, two parsers, and neither loosened.
+ *
+ * BOTH OF CORE'S BRANCHES ARE THE ONES WE WANT. With no offset it runs `strtotime()` under
+ * WordPress's UTC default timezone and formats straight back, so the wall-clock string is
+ * unchanged and `get_gmt_from_date()` does the local->UTC step; with an offset the instant is
+ * fixed by the caller and `get_date_from_gmt()` writes it down locally. The DST objection the
+ * previous implementation was built around applies only to a round trip through a local
+ * string, which neither branch makes.
  *
  * @return array{local: string, gmt: string}|null
  */
@@ -1317,33 +1850,26 @@ function wpmcp_parse_post_date($value) {
 
     if ($hour > 23 || $minute > 59 || $second > 59) { return null; }
 
-    $stamp  = sprintf('%s-%s-%s %02d:%02d:%02d', $m[1], $m[2], $m[3], $hour, $minute, $second);
+    // ALWAYS +HH:MM OR ABSENT, because core's regex accepts neither `z` nor `-0500`.
     $offset = isset($m[7]) ? $m[7] : '';
 
-    if ($offset !== '') {
-        if ($offset === 'Z' || $offset === 'z') {
-            $offset = '+00:00';
-        } elseif (strlen($offset) === 5) {
-            $offset = substr($offset, 0, 3) . ':' . substr($offset, 3);
-        }
-        // +25:00 parses in PHP and means nothing. The real range is -12:00..+14:00.
-        if ((int) substr($offset, 1, 2) > 14 || (int) substr($offset, 4, 2) > 59) { return null; }
-
-        $stamp .= $offset;
+    if ($offset === 'Z' || $offset === 'z') {
+        $offset = '+00:00';
+    } elseif (strlen($offset) === 5) {
+        $offset = substr($offset, 0, 3) . ':' . substr($offset, 3);
     }
-
-    try {
-        // The second argument is consulted ONLY when the string carries no offset of its
-        // own, which is precisely the site-local branch.
-        $dt = new DateTimeImmutable($stamp, wp_timezone());
-    } catch (Exception $e) {
+    // +25:00 parses in PHP and means nothing. The real range is -12:00..+14:00.
+    if ($offset !== ''
+        && ((int) substr($offset, 1, 2) > 14 || (int) substr($offset, 4, 2) > 59)) {
         return null;
     }
 
-    return array(
-        'local' => $dt->setTimezone(wp_timezone())->format('Y-m-d H:i:s'),
-        'gmt'   => $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s'),
-    );
+    $pair = rest_get_date_with_gmt(sprintf(
+        '%s-%s-%sT%02d:%02d:%02d%s',
+        $m[1], $m[2], $m[3], $hour, $minute, $second, $offset
+    ));
+
+    return is_array($pair) ? array('local' => $pair[0], 'gmt' => $pair[1]) : null;
 }
 
 /**
@@ -1393,7 +1919,8 @@ function wpmcp_parse_post_date($value) {
  * re-gated. That is the round-trip rule: a caller that reads a post and writes a field back
  * unchanged must store the same bytes, and re-shaping is exactly what broke that. Measured
  * on both sites: a title stored by wp-admin as `x<y z` read back as `x<y z`, and writing it
- * back ran wp_strip_all_tags() and stored `x`; a floating draft's `date` written back fixed
+ * back ran wp_strip_all_tags() and stored `x` (dropped in 1.1.1, see
+ * wpmcp_title_contract()); a floating draft's `date` written back fixed
  * its GMT column, so a draft nobody dated became a dated one. An unchanged `author` or
  * `featured_image` is not a change of author or image, so it does not need the capability a
  * change needs - an Author writing back their own post's author id was refused. A `date`
@@ -1819,41 +2346,29 @@ function wpmcp_core_tools() {
                 'openWorldHint' => false,
             ),
             // The first sentence still ends by character 50, which is all a client shows
-            // until a tool is loaded. The second says what wp_mcp is for, because "which
-            // build is this site running" is a question an agent has to be able to
-            // answer without leaving the tool surface - see wpmcp_build_label().
-            'description' => 'Get name, URL, WP version, theme, plugin count. Returns name, url,'
-                . ' wp_version, active_theme (the theme\'s name, as list-themes gives it),'
-                . ' active_theme_version (\'\' when its header has none), active_plugins (a'
-                . ' count) and wp_mcp: this plugin\'s own version, and the build - the commit a'
-                . ' zip was built from, or "source" when the site runs it from a checkout.',
+            // until a tool is loaded. WHAT IT RETURNS IS NO LONGER SPELLED OUT HERE: this
+            // tool declares an outputSchema, and the field list lives in it with a
+            // description per field (the pilot, D19 - see wpmcp_site_info_shape()).
+            'description' => 'Get name, URL, WP version, theme, plugin count. Also wp_mcp:'
+                . ' this plugin\'s own version and build, because "which build is this site'
+                . ' running" is a question an agent has to be able to answer without leaving'
+                . ' the tool surface. Every returned field is described in outputSchema.',
             // array() and not new stdClass(): endpoint.php's wpmcp_objectify_schema()
             // makes an empty `properties` serialize as `{}` wherever it appears, at any
             // depth, so the inline cast this used to carry is no longer the thing
             // keeping the listing valid - and a second way of saying it would drift.
-            'inputSchema' => array('type' => 'object', 'properties' => array()),
+            'inputSchema'  => array('type' => 'object', 'properties' => array()),
+            'outputSchema' => wpmcp_result_schema(wpmcp_site_info_shape()),
             'run' => function ($args) {
-                $theme  = wp_get_theme();
-                // THE NAME ALONE, read and shaped by list-themes' own function: "Name
-                // Version" glued together was `"JDA "` for a theme with no Version header,
-                // while list-themes said `"JDA"` (sprint 14d). The version is its own key.
-                $header = $theme ? wpmcp_theme_header($theme->get_stylesheet_directory() . '/style.css') : null;
-                return array(
-                    'name'           => get_bloginfo('name'),
-                    'url'            => home_url(),
-                    'wp_version'     => get_bloginfo('version'),
-                    'active_theme'   => $header ? $header['name'] : null,
-                    'active_theme_version' => $header ? $header['version'] : null,
-                    'active_plugins' => count((array) get_option('active_plugins', array())),
-                    // NESTED, and not `wpmcp_version` beside `wp_version`. Two keys one
-                    // character apart, one meaning WordPress and the other meaning this
-                    // plugin, is a misreading waiting to happen in exactly the situation
-                    // this field exists for: somebody trying to work out which of two
-                    // builds a site is running.
-                    'wp_mcp'         => array(
-                        'version' => WPMCP_VER,
-                        'build'   => wpmcp_build_label(),
-                    ),
+                $theme = wp_get_theme();
+
+                return wpmcp_result_build(
+                    wpmcp_site_info_shape(),
+                    // THE NAME ALONE, read and shaped by list-themes' own function: "Name
+                    // Version" glued together was `"JDA "` for a theme with no Version
+                    // header, while list-themes said `"JDA"` (sprint 14d). The version is
+                    // its own key.
+                    $theme ? wpmcp_theme_header($theme->get_stylesheet_directory() . '/style.css') : null
                 );
             },
         ),
@@ -2028,24 +2543,19 @@ function wpmcp_core_tools() {
                 'idempotentHint' => true,
                 'openWorldHint' => false,
             ),
-            'description' => 'Read one post or page in full. Args: id'
-                . ' (required). Returns id, title, type, status, slug, link, content,'
-                . ' excerpt, author {id, name}, date, date_gmt, modified and'
-                . ' modified_gmt as ISO 8601, or null where the column holds no date -'
-                . ' a draft nobody dated. featured_image {id, url} or null, terms'
-                . ' keyed by taxonomy for every viewable taxonomy on the post type, each'
-                . ' entry {id, name, slug}, the name as typed (see list-terms), and revisions -'
-                . ' the number of stored revisions, or null when the caller cannot edit'
-                . ' it. title, content and excerpt are the stored columns, not the display'
+            // THE FIELD LIST MOVED INTO outputSchema (1.1.1, the pilot - D19). What is left
+            // here is what a schema cannot say: the rules, the refusals and the warnings.
+            'description' => 'Read one post or page in full. Args: id (required).'
+                . ' title, content and excerpt are the stored columns, not the display'
                 . ' rendering: quotes, apostrophes, ampersands and backslashes are as'
-                . ' stored. Writing one back is not guaranteed unchanged: update-post strips'
-                . ' tags from a title, and without unfiltered_html core encodes some'
-                . ' characters. link is the rendered permalink, or ?p=ID while the post is'
-                . ' draft, pending, future or trashed. A post the caller may not read, one that is not there and an'
-                . ' id of the wrong kind all answer identically.',
+                . ' stored. Writing one back unchanged stores the same bytes: an equal field is'
+                . ' not written at all. A post the caller may not read, one that is not there and an'
+                . ' id of the wrong kind all answer identically. Every returned field is'
+                . ' described in outputSchema.',
             'inputSchema' => array('type' => 'object',
                 'properties' => array('id' => array('type' => 'integer', 'description' => 'Post ID.')),
                 'required' => array('id')),
+            'outputSchema' => wpmcp_result_schema(wpmcp_get_post_shape()),
             'run' => function ($args) {
                 $id = isset($args['id']) ? (int) $args['id'] : 0;
                 $p = $id ? get_post($id) : null;
@@ -2086,28 +2596,11 @@ function wpmcp_core_tools() {
                     $revisions = count(wp_get_post_revisions($p->ID, array('fields' => 'ids')));
                 }
 
-                $thumbnail = (int) get_post_thumbnail_id($p);
-                $thumbnailUrl = $thumbnail ? wp_get_attachment_url($thumbnail) : false;
-
-                return array(
-                    'id' => $p->ID, 'title' => wpmcp_raw_title($p), 'type' => $p->post_type,
-                    'status' => $p->post_status, 'slug' => $p->post_name, 'link' => get_permalink($p),
-                    'content' => $p->post_content,
-                    'excerpt' => $p->post_excerpt,
-                    'author' => array(
-                        'id'   => (int) $p->post_author,
-                        'name' => $author ? $author->display_name : null,
-                    ),
-                    'date'         => wpmcp_iso_date($p->post_date),
-                    'date_gmt'     => wpmcp_iso_date($p->post_date_gmt),
-                    'modified'     => wpmcp_iso_date($p->post_modified),
-                    'modified_gmt' => wpmcp_iso_date($p->post_modified_gmt),
-                    'featured_image' => $thumbnail
-                        ? array('id' => $thumbnail, 'url' => $thumbnailUrl === false ? null : $thumbnailUrl)
-                        : null,
-                    'terms'     => wpmcp_post_terms($p),
+                return wpmcp_result_build(wpmcp_get_post_shape(), array(
+                    'post'      => $p,
+                    'author'    => $author,
                     'revisions' => $revisions,
-                );
+                ));
             },
         ),
     );
@@ -2136,7 +2629,7 @@ function wpmcp_content_tools() {
             . ' so read `status` and `date` in the result for what actually happened.'
             . ' `author` is a user id or login and needs the capability to edit others\''
             . ' posts. `featured_image` is an image attachment id you may edit, or 0 for'
-            . ' none. Tags are stripped from the title. Returns id, link, status, changed (the'
+            . ' none. Title and content are stored as typed. Returns id, link, status, changed (the'
             . ' fields this call set), date and date_gmt when date was sent, and terms_refused'
             . ' or terms_failed when a term could not be assigned. link is the plain ?p=ID'
             . ' form while the post is draft, pending, future or trashed, whatever the'
@@ -2156,7 +2649,9 @@ function wpmcp_content_tools() {
         )),
         'run' => function ($a) {
             $postarr = array(
-                'post_title'   => isset($a['title']) ? wp_strip_all_tags((string) $a['title']) : '',
+                // THE TITLE AS TYPED - no stripping of ours (1.1.1). See
+                // wpmcp_title_contract() for the whole rule and its measurements.
+                'post_title'   => isset($a['title']) ? (string) $a['title'] : '',
                 'post_content' => isset($a['content']) ? (string) $a['content'] : '',
                 'post_type'    => isset($a['post_type']) ? sanitize_key($a['post_type']) : 'post',
                 'post_status'  => isset($a['status']) ? sanitize_key($a['status']) : 'draft',
@@ -2247,7 +2742,7 @@ function wpmcp_content_tools() {
             . ' content, status, excerpt, slug, terms, date, author and'
             . ' featured_image. A field sent REPLACES what was there;'
             . ' one equal to what is stored is not written, and an update that changes'
-            . ' nothing writes nothing. Tags are stripped from a changed title. Returns id,'
+            . ' nothing writes nothing. A changed title is stored as typed. Returns id,'
             . ' link, status and changed: every field whose'
             . ' stored value now differs, core\'s moves included - it re-dates an undated'
             . ' draft, and on a status change re-slugs: leaving draft or pending, a slug-less'
@@ -2287,11 +2782,12 @@ function wpmcp_content_tools() {
             if ($locked) { return $locked; }
             // A FIELD SENT WITH THE VALUE IT ALREADY HAS IS NOT WRITTEN (sprint 14d) - the
             // round-trip rule; see wpmcp_post_fields(). The comparison is with what the
-            // caller SENT, before any shaping: wp_strip_all_tags() on a title wp-admin stored
-            // as `x<y z` gives `x`, so shaping first would turn "unchanged" into a loss.
+            // caller SENT and the column as it stands, which since 1.1.1 is the whole of it:
+            // nothing of ours shapes a title on the way in any more, so "sent equals stored"
+            // means exactly "nothing to do". See wpmcp_title_contract().
             $upd = array('ID' => $id);
             if (isset($a['title']) && (string) $a['title'] !== (string) $p0->post_title) {
-                $upd['post_title'] = wp_strip_all_tags((string) $a['title']);
+                $upd['post_title'] = (string) $a['title'];
             }
             if (isset($a['content']) && (string) $a['content'] !== (string) $p0->post_content) {
                 $upd['post_content'] = (string) $a['content'];
@@ -3290,6 +3786,56 @@ function wpmcp_taxonomy_tools() {
     );
 }
 
+/**
+ * `Walker` with the HTML taken out: it collects instead of printing.
+ *
+ * `Walker::walk()` needs three things from a subclass - which field is the id, which is the
+ * parent, and what to do with each element - and nothing else. `start_el()` is called once
+ * per element, in the order core shows them, with the depth core shows them at, so the
+ * parent an item is DISPLAYED under is the entry one level up the stack. That is the whole
+ * subclass; every ordering decision stays in core.
+ *
+ * `$db_fields` names the two properties wpmcp_menu_walk() decorates its objects with. They
+ * are core's own names for them (`db_id`, `menu_item_parent`) so that anybody reading this
+ * beside `wp_nav_menu()` sees the same two fields, but the VALUES are ours, read from the
+ * row and the meta rather than from `wp_setup_nav_menu_item()`.
+ *
+ * end_el(), start_lvl() and end_lvl() are left as the base class's empty methods: the
+ * nesting is recovered from `depth`, so there is nothing to do at a level boundary.
+ */
+class WpMcp_Menu_Collector extends Walker {
+
+    /** @var array<string, string> */
+    public $db_fields = array('parent' => 'menu_item_parent', 'id' => 'db_id');
+
+    /** @var list<array{id: int, parent: int, depth: int}> */
+    public $flat = array();
+
+    /** @var array<int, int> depth => the id currently open at that depth */
+    private $open = array();
+
+    /**
+     * @param string   $output      unused: nothing is printed
+     * @param object   $data_object one decorated row
+     * @param int      $depth       core's depth for it, 0 at the top level
+     * @param array    $args        unused
+     * @param int      $current_object_id unused
+     */
+    public function start_el(&$output, $data_object, $depth = 0, $args = array(), $current_object_id = 0) {
+        $depth              = (int) $depth;
+        $id                 = (int) $data_object->db_id;
+        $this->open[$depth] = $id;
+
+        $this->flat[] = array(
+            'id'     => $id,
+            // THE DISPLAYED PARENT. 0 at the top level and 0 for an orphan, which core shows
+            // at depth 0 whatever its stored parent says.
+            'parent' => ($depth > 0 && isset($this->open[$depth - 1])) ? $this->open[$depth - 1] : 0,
+            'depth'  => $depth,
+        );
+    }
+}
+
 /* ============================================================
  * Media tools (list-media / get-media / upload-media / delete-media)
  * ========================================================== */
@@ -3367,13 +3913,13 @@ function wpmcp_media_tools() {
             'idempotentHint' => true,
             'openWorldHint' => false,
         ),
-        'description' => 'Get one media item. Args: id (required). Returns id, title, mime,'
-            . ' url, alt, caption, filesize (bytes, or null when the file is missing), width and'
-            . ' height (pixels, or null for a non-image). title, alt and caption are stored'
-            . ' columns or meta, as written; url is the rendered link. Media attached to a post'
-            . ' you may not read answers like a missing id.',
+        'description' => 'Get one media item. Args: id (required). title, alt and caption are'
+            . ' stored columns or meta, as written; url is the rendered link. Media attached to'
+            . ' a post you may not read answers like a missing id. Every returned field is'
+            . ' described in outputSchema.',
         'inputSchema' => array('type' => 'object',
             'properties' => array('id' => array('type' => 'integer')), 'required' => array('id')),
+        'outputSchema' => wpmcp_result_schema(wpmcp_get_media_shape()),
         'run' => function ($a) {
             $id = isset($a['id']) ? (int) $a['id'] : 0;
             $p = wpmcp_get_attachment($id);
@@ -3383,17 +3929,7 @@ function wpmcp_media_tools() {
             if (!current_user_can('read_post', $id)) {
                 return new WP_Error('wpmcp_not_found', 'No attachment with that ID.');
             }
-            $meta = wp_get_attachment_metadata($id);
-            $file = get_attached_file($id);
-            return array(
-                'id' => $id, 'title' => wpmcp_raw_title($p), 'mime' => $p->post_mime_type,
-                'url' => wp_get_attachment_url($id),
-                'alt' => get_post_meta($id, '_wp_attachment_image_alt', true),
-                'caption' => $p->post_excerpt,
-                'filesize' => ($file && file_exists($file)) ? filesize($file) : null,
-                'width' => isset($meta['width']) ? $meta['width'] : null,
-                'height' => isset($meta['height']) ? $meta['height'] : null,
-            );
+            return wpmcp_result_build(wpmcp_get_media_shape(), $p);
         },
     ),
 
@@ -3406,13 +3942,17 @@ function wpmcp_media_tools() {
             'openWorldHint' => true,
         ),
         'description' => 'Upload media by sideloading a URL. This site downloads the file - the only'
-            . ' way in; there is no way to send the file\'s bytes. Args: source_url (required, http or'
+            . ' way in; there is no way to send the file\'s bytes, so the remote server must'
+            . ' serve it to THIS site, which a URL that opens in your browser may not be.'
+            . ' Args: source_url (required, http or'
             . ' https, fetched within 20 seconds), filename (default: the URL\'s own), title'
             . ' (default: from the file name), alt, and post (an id to attach it to, which you'
             . ' must be able to edit). The file must be a type WordPress lets you upload (for most'
             . ' roles: images, audio, video, PDF and office documents) and within the site\'s'
             . ' upload size limit. alt is stored as plain text: tags stripped, < as &lt;.'
-            . ' Returns id, url and mime. Needs permission to upload files.',
+            . ' A refusal by the remote server is reported with its HTTP status; a fetch that never'
+            . ' connected answers "Internal error (trace <id>)" - quote that id to the operator,'
+            . ' who can look the event up. Returns id, url and mime. Needs permission to upload files.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'source_url' => array('type' => 'string'), 'filename' => array('type' => 'string'),
             'title' => array('type' => 'string'), 'alt' => array('type' => 'string'),
@@ -3441,7 +3981,9 @@ function wpmcp_media_tools() {
             require_once ABSPATH . 'wp-admin/includes/media.php';
             require_once ABSPATH . 'wp-admin/includes/image.php';
             $tmp = download_url($url, 20); // 20s timeout, not the 300s default
-            if (is_wp_error($tmp)) { return $tmp; }
+            // The STATUS, never the body - see wpmcp_fetch_error(). A code it does not
+            // recognise comes back untouched and stays generic with a trace id.
+            if (is_wp_error($tmp)) { return wpmcp_fetch_error($tmp); }
             $max = (int) wp_max_upload_size();
             $sz  = @filesize($tmp);
             if ($max > 0 && ($sz === false || $sz > $max)) {
@@ -4892,70 +5434,138 @@ function wpmcp_menu_rows($menu, $withDrafts = true) {
 }
 
 /**
- * The shape of a menu: each item's effective parent, and each parent's children in order.
+ * The stored parent of one menu-item row, with the ONE correction core also makes.
  *
- * A stored parent that is not an item of THIS menu - deleted, in another menu, the item
- * itself - counts as the top level, which is where a theme's walker shows such an item.
+ * `_menu_item_menu_item_parent` is what the database holds. An item that is its own parent
+ * is read as top level, which is exactly what core does with it
+ * (nav-menu.php:584-586, and _wp_reset_invalid_menu_item_parent since 6.2) - a value the
+ * wp-admin form can produce and that nothing downstream could otherwise terminate on.
  *
- * @return array{parents: array<int, int>, children: array<int, list<int>>}
+ * A parent that names no item of this menu is left ALONE, deliberately: it is the definition
+ * of an orphan, and core's walker is what decides where an orphan appears. See
+ * wpmcp_menu_walk().
  */
-function wpmcp_menu_shape($rows) {
-    $inMenu = array();
-    foreach ($rows as $row) { $inMenu[(int) $row->ID] = true; }
+function wpmcp_menu_stored_parent($id) {
+    $parent = (int) get_post_meta((int) $id, '_menu_item_menu_item_parent', true);
 
-    $parents  = array();
-    $children = array(0 => array());
-
-    foreach ($rows as $row) {
-        $id     = (int) $row->ID;
-        $parent = (int) get_post_meta($id, '_menu_item_menu_item_parent', true);
-
-        if ($parent === $id || !isset($inMenu[$parent])) { $parent = 0; }
-
-        $parents[$id]        = $parent;
-        $children[$parent][] = $id;
-    }
-
-    return array('parents' => $parents, 'children' => $children);
+    return $parent === (int) $id ? 0 : $parent;
 }
 
 /**
- * Every item, depth first from the top level - the order wp-admin saves a menu in, and the
- * one its menu_order 1..N stands for. An item the top level cannot reach (only a cycle
- * already in the stored data does that) follows at the end, so none is ever dropped.
+ * Every item of $rows in the order CORE shows them: id, the parent it is shown under, depth.
  *
- * @param array<int, list<int>> $children
- * @param list<int>             $allIds
- * @return list<int>
+ * THIS IS core's `Walker::walk()` AND NOT OUR OWN TRAVERSAL (1.1.1). ~110 lines of
+ * parent-map building, depth-first recursion and orphan handling used to live here
+ * (wpmcp_menu_shape + wpmcp_menu_flatten + the closure inside wpmcp_menu_tree). `Walker` is
+ * the engine every classic theme's `wp_nav_menu()` renders through
+ * (wp-includes/class-wp-walker.php:194, since 2.1), so ordering the same rows through it
+ * makes drift between get-menu's `position` and what a visitor sees impossible by
+ * construction - our own update-menu-item docblock already conceded the two disagreed.
+ *
+ * THE BASE CLASS, NEVER `Walker_Nav_Menu`. `Walker` itself runs no filter at all: `walk()`
+ * only buckets elements by parent and calls the subclass's start_el/end_el.
+ * `Walker_Nav_Menu` emits HTML and runs `nav_menu_item_title`, `nav_menu_css_class` and
+ * more - the display-versus-storage rule refuses it, as it refuses `get_the_title()`.
+ *
+ * AND OUR OWN ROWS, NEVER `wp_get_nav_menu_items()`. That maps every row through
+ * `wp_setup_nav_menu_item()`, which runs `the_title` on a linked post, DROPS an item whose
+ * linked object is trashed or gone, and rewrites menu_order to 1..N in memory - so a
+ * renumbering built on it would skip rows and leave two items on one number. The decorated
+ * objects handed to the walker here carry two fields and nothing else.
+ *
+ * WHAT CHANGED FOR A CALLER, and it is the one thing: AN ORPHAN MOVES. An item whose stored
+ * parent is not an item of this menu used to be shown interleaved at the top level by
+ * menu_order; `Walker::walk()` shows every orphan after every top-level tree, flat
+ * (class-wp-walker.php:253-264), which is where `wp_nav_menu()` puts it. MEASURED 2026-09-21
+ * on both real sites - jaygroup (81 items in 5 menus) and seosemia (44 items) - ZERO items
+ * have a missing parent, so nothing observable changes on either; the CHANGELOG names it for
+ * anybody else's site, because the next write persists the new order through the renumber.
+ *
+ * Two smaller differences of core's, recorded because they are core's and not ours: an
+ * orphan's own children are shown flat rather than nested under it (the walker passes an
+ * empty children array for an orphan, :258-263), and a menu where NO item has parent 0 takes
+ * the first row as the root of the rest (:232-247) where our traversal showed all of them at
+ * the top level. Neither can occur on a menu wp-admin built.
+ *
+ * THE PARENT REPORTED IS THE ONE THE ITEM IS SHOWN UNDER, read off the walker's depth stack
+ * rather than off the row, so an orphan reports parent 0 - as it did before, and as its
+ * position in the output now agrees with.
+ *
+ * @param list<WP_Post> $rows
+ * @return list<array{id: int, parent: int, depth: int}>
  */
-function wpmcp_menu_flatten($children, $allIds) {
-    $out  = array();
-    $seen = array();
+function wpmcp_menu_walk($rows) {
+    $elements = array();
 
-    $walk = function ($parent) use (&$walk, &$out, &$seen, $children) {
-        if (empty($children[$parent])) { return; }
-
-        foreach ($children[$parent] as $id) {
-            if (isset($seen[$id])) { continue; }
-            $seen[$id] = true;
-            $out[]     = $id;
-            $walk($id);
-        }
-    };
-
-    $walk(0);
-
-    foreach ($allIds as $id) {
-        if (isset($seen[$id])) { continue; }
-        $seen[$id] = true;
-        $out[]     = $id;
-        $walk($id);
+    foreach ($rows as $row) {
+        $element                   = new stdClass();
+        $element->db_id            = (int) $row->ID;
+        $element->menu_item_parent = wpmcp_menu_stored_parent($row->ID);
+        $elements[]                = $element;
     }
 
-    return $out;
+    if ($elements === array()) { return array(); }
+
+    $walker = new WpMcp_Menu_Collector();
+    // max_depth 0 is "every level", which is also the only value whose orphan block runs.
+    $walker->walk($elements, 0);
+
+    return $walker->flat;
 }
 
-/** The item ids inside $id, at any depth, as a set. */
+/**
+ * The shape of a menu, as core's walker shows it, plus the shape the DATABASE holds.
+ *
+ * `parents` and `children` are the SHOWN structure - the walker's, so an orphan is a child of
+ * 0 and the children lists are in the order get-menu prints and the renumber writes.
+ *
+ * `stored` is keyed by the parent each row actually names, orphans included, and exists for
+ * exactly one job: the cycle refusal in update-menu-item. A "would this parent put the item
+ * inside itself" question has to be asked of the data, not of the rendering - in the shown
+ * structure an orphan's children hang from 0, so a cycle among unreachable rows would be
+ * invisible and update-menu-item would happily complete it.
+ *
+ * @return array{parents: array<int, int>, children: array<int, list<int>>, stored: array<int, list<int>>}
+ */
+function wpmcp_menu_shape($rows) {
+    $parents  = array();
+    $children = array(0 => array());
+
+    foreach (wpmcp_menu_walk($rows) as $item) {
+        $parents[$item['id']]        = $item['parent'];
+        $children[$item['parent']][] = $item['id'];
+    }
+
+    $stored = array(0 => array());
+
+    foreach ($rows as $row) {
+        $stored[wpmcp_menu_stored_parent($row->ID)][] = (int) $row->ID;
+    }
+
+    return array('parents' => $parents, 'children' => $children, 'stored' => $stored);
+}
+
+/**
+ * The ids of $rows in walk order - what menu_order 1..N stands for.
+ *
+ * @param list<WP_Post> $rows
+ * @return list<int>
+ */
+function wpmcp_menu_order($rows) {
+    $order = array();
+
+    foreach (wpmcp_menu_walk($rows) as $item) { $order[] = $item['id']; }
+
+    return $order;
+}
+
+/**
+ * The item ids inside $id, at any depth, as a set.
+ *
+ * FED THE STORED SHAPE, not the shown one - see wpmcp_menu_shape(). The `$found` set is also
+ * the cycle guard: a menu whose data already contains a loop terminates here rather than
+ * recursing, which is the state this function exists to refuse a caller ADDING to.
+ */
 function wpmcp_menu_descendants($children, $id) {
     $found = array();
     $stack = isset($children[$id]) ? $children[$id] : array();
@@ -5010,24 +5620,41 @@ function wpmcp_menu_renumber($rows, $order) {
  * @return true|WP_Error
  */
 function wpmcp_menu_place($menu, $id, $parent, $position) {
-    $rows     = wpmcp_menu_rows($menu);
-    $shape    = wpmcp_menu_shape($rows);
-    $children = $shape['children'];
+    $rows = wpmcp_menu_rows($menu);
+    $id   = (int) $id;
 
-    foreach ($children as $key => $list) {
-        $children[$key] = array_values(array_diff($list, array($id)));
+    // THE ROW LIST IS WHAT IS REORDERED, and then core's walker decides the rest (1.1.1).
+    // `Walker::walk()` buckets each element into its parent's child list IN THE ORDER THE
+    // ELEMENTS ARRIVE, so "put this item third among its new siblings" is expressible as one
+    // splice in a flat array - and the depth-first order, the orphan placement and the
+    // nesting all come from core rather than from a traversal of ours.
+    $moved = null;
+    $rest  = array();
+
+    foreach ($rows as $row) {
+        if ((int) $row->ID === $id) { $moved = $row; continue; }
+        $rest[] = $row;
     }
 
-    $siblings = isset($children[$parent]) ? $children[$parent] : array();
-    $index    = ($position === null) ? count($siblings) : max(0, min(count($siblings), (int) $position - 1));
+    if ($moved === null) { return new WP_Error('wpmcp_not_found', 'No menu item with that ID.'); }
 
-    array_splice($siblings, $index, 0, array($id));
-    $children[$parent] = $siblings;
+    // Where this item's new siblings sit in the row list. The item's own parent meta has
+    // already been written by the caller, so the walker will agree with this reading.
+    $siblings = array();
 
-    $allIds = array();
-    foreach ($rows as $row) { $allIds[] = (int) $row->ID; }
+    foreach ($rest as $index => $row) {
+        if (wpmcp_menu_stored_parent($row->ID) === (int) $parent) { $siblings[] = $index; }
+    }
 
-    return wpmcp_menu_renumber($rows, wpmcp_menu_flatten($children, $allIds));
+    $slot = ($position === null)
+        ? count($siblings)
+        : max(0, min(count($siblings), (int) $position - 1));
+
+    // Past the last sibling means "last among them", and appending to the row list says that
+    // whatever else is in between: only the order WITHIN one parent's child list matters.
+    array_splice($rest, $slot < count($siblings) ? $siblings[$slot] : count($rest), 0, array($moved));
+
+    return wpmcp_menu_renumber($rows, wpmcp_menu_order($rest));
 }
 
 /**
@@ -5132,21 +5759,25 @@ function wpmcp_menu_item_out($row, $parent, $position) {
     );
 }
 
-/** A menu's items as a tree, each level in order. */
+/**
+ * A menu's items as a tree, each level in order.
+ *
+ * NESTING IS RE-ASSEMBLED FROM THE WALKER'S OWN OUTPUT, not walked again: every item appears
+ * in wpmcp_menu_walk() exactly once, under the parent core shows it under, so the shown
+ * parent map IS the tree and no cycle guard is needed here - an unreachable item is already
+ * a child of 0 by the time this runs. That is what removed the `$seen` bookkeeping and the
+ * second traversal for unreached rows.
+ */
 function wpmcp_menu_tree($rows) {
     $shape = wpmcp_menu_shape($rows);
     $byId  = array();
     foreach ($rows as $row) { $byId[(int) $row->ID] = $row; }
 
-    $seen  = array();
-    $build = function ($parent) use (&$build, &$seen, $shape, $byId) {
+    $build = function ($parent) use (&$build, $shape, $byId) {
         $out      = array();
         $position = 0;
 
         foreach (isset($shape['children'][$parent]) ? $shape['children'][$parent] : array() as $id) {
-            if (isset($seen[$id])) { continue; }
-            $seen[$id] = true;
-
             $item             = wpmcp_menu_item_out($byId[$id], $parent, ++$position);
             $item['children'] = $build($id);
             $out[]            = $item;
@@ -5155,19 +5786,7 @@ function wpmcp_menu_tree($rows) {
         return $out;
     };
 
-    $tree = $build(0);
-
-    // Only a cycle already in the stored data leaves an item unreached; show it, at the end.
-    foreach ($byId as $id => $row) {
-        if (isset($seen[$id])) { continue; }
-        $seen[$id] = true;
-
-        $item             = wpmcp_menu_item_out($row, 0, count($tree) + 1);
-        $item['children'] = $build($id);
-        $tree[]           = $item;
-    }
-
-    return $tree;
+    return $build(0);
 }
 
 /** id, name, slug, count and the theme locations assigned to this menu. */
@@ -5601,7 +6220,7 @@ function wpmcp_menu_tools() {
                 // NO CYCLES. Core catches only the item as its own parent, and silently: it
                 // stores 0 (nav-menu.php:583-586). A descendant it stores as given, and the
                 // two items then hang from each other with no way back to the top.
-                if ($newParent === $id || isset(wpmcp_menu_descendants($shape['children'], $id)[$newParent])) {
+                if ($newParent === $id || isset(wpmcp_menu_descendants($shape['stored'], $id)[$newParent])) {
                     return new WP_Error(
                         'wpmcp_bad_parent',
                         'parent_id cannot be the item itself or an item inside it: item ' . $id
@@ -5662,10 +6281,12 @@ function wpmcp_menu_tools() {
 
             $id     = (int) $found['item']->ID;
             $menu   = $found['menu'];
-            $rows   = wpmcp_menu_rows($menu);
-            $shape  = wpmcp_menu_shape($rows);
+            $shape  = wpmcp_menu_shape(wpmcp_menu_rows($menu));
             $parent = $shape['parents'][$id];
-            $kids   = isset($shape['children'][$id]) ? $shape['children'][$id] : array();
+            // THE ROWS THAT ACTUALLY POINT AT THIS ITEM, which is the stored shape and not
+            // the shown one: an orphan's children hang from 0 in the rendering, and it is
+            // their stored parent that is about to name a row that no longer exists.
+            $kids   = isset($shape['stored'][$id]) ? $shape['stored'][$id] : array();
 
             // wp_delete_post() with force, as wp-admin and the REST controller delete a menu
             // item (nav-menus.php:283, menu-items controller :306). It does not touch the
@@ -5681,23 +6302,13 @@ function wpmcp_menu_tools() {
                 update_post_meta($kid, '_menu_item_menu_item_parent', (string) $parent);
             }
 
-            // ...AND TAKE THE REMOVED ITEM'S PLACE among its siblings, so every other item
-            // keeps the order it had.
-            $children = $shape['children'];
-            $siblings = $children[$parent];
-            array_splice($siblings, (int) array_search($id, $siblings, true), 1, $kids);
-            $children[$parent] = $siblings;
-            unset($children[$id]);
-
-            $remaining = array();
-            $allIds    = array();
-            foreach ($rows as $row) {
-                if ((int) $row->ID === $id) { continue; }
-                $remaining[] = $row;
-                $allIds[]    = (int) $row->ID;
-            }
-
-            $done = wpmcp_menu_renumber($remaining, wpmcp_menu_flatten($children, $allIds));
+            // ...AND TAKE THE REMOVED ITEM'S PLACE among its siblings, which now costs nothing
+            // to arrange: the rows are re-read AFTER the delete and the re-parenting, and the
+            // children kept the menu_order numbers that sat just after the item that is gone,
+            // so core's walker buckets them into the sibling list exactly where it was. The
+            // old code spliced a children map by hand to reach the same answer.
+            $remaining = wpmcp_menu_rows($menu);
+            $done      = wpmcp_menu_renumber($remaining, wpmcp_menu_order($remaining));
             if (is_wp_error($done)) { return $done; }
 
             return array(
@@ -5776,22 +6387,61 @@ function wpmcp_users_can_read() {
  * Named fields only: nothing from the row or its meta rides along.
  */
 function wpmcp_user_out($user, $full) {
-    $out = array(
-        'id'   => (int) $user->ID,
-        'name' => (string) $user->display_name,
+    return wpmcp_result_build(wpmcp_get_user_shape(), array('user' => $user, 'full' => (bool) $full));
+}
+
+/**
+ * get-user's fields. THE FOUR PRIVILEGED ONES ARE ABSENT, NOT NULL, for a reader who may not
+ * have them - which is why they carry `when` and are therefore not `required` in the schema.
+ * "Absent" is the honest shape: a null `email` would say this user has no email address.
+ *
+ * list-users returns the same two public fields through the same declaration, so the two
+ * tools cannot disagree about what a user looks like.
+ */
+function wpmcp_get_user_shape() {
+    $full = function ($ctx) { return !empty($ctx['full']); };
+
+    return array(
+        'id' => array(
+            'type' => 'integer',
+            'description' => 'WordPress user ID.',
+            'get'  => function ($ctx) { return (int) $ctx['user']->ID; },
+        ),
+        'name' => array(
+            'type' => 'string',
+            'description' => 'The display name the user chose - often their login, or an email address.',
+            'get'  => function ($ctx) { return (string) $ctx['user']->display_name; },
+        ),
+        'login' => array(
+            'type' => 'string',
+            'description' => 'The username. Only for a caller with list_users, edit_user on this user, or themselves.',
+            'when' => $full,
+            'get'  => function ($ctx) { return (string) $ctx['user']->user_login; },
+        ),
+        'email' => array(
+            'type' => 'string',
+            'description' => 'The registered email address. Same condition as login.',
+            'when' => $full,
+            'get'  => function ($ctx) { return (string) $ctx['user']->user_email; },
+        ),
+        'roles' => array(
+            'type'  => 'array',
+            'items' => array('type' => 'string'),
+            'description' => 'Role slugs on this site. Same condition as login.',
+            'when'  => $full,
+            'get'   => function ($ctx) { return array_values(array_map('strval', (array) $ctx['user']->roles)); },
+        ),
+        'registered' => array(
+            'type'        => 'string',
+            'nullable'    => true,
+            // user_registered is stored in UTC. Core's REST field is `c`, UTC with +00:00
+            // (:1102); this is the list tools' ONE format instead (sprint 14d) - ISO 8601,
+            // site-local, no offset, as every post, revision, media and comment date here.
+            'description' => 'When the account was created: ISO 8601, site-local, no offset. Same condition as login.',
+            'when'        => $full,
+            'get'         => function ($ctx) { return wpmcp_iso_date_from_gmt($ctx['user']->user_registered); },
+        ),
     );
-
-    if ($full) {
-        $out['login']      = (string) $user->user_login;
-        $out['email']      = (string) $user->user_email;
-        $out['roles']      = array_values(array_map('strval', (array) $user->roles));
-        // user_registered is stored in UTC. Core's REST field is `c`, UTC with +00:00
-        // (:1102); this is the list tools' ONE format instead (sprint 14d) - ISO 8601,
-        // site-local, no offset, as every post, revision, media and comment date here.
-        $out['registered'] = wpmcp_iso_date_from_gmt($user->user_registered);
-    }
-
-    return $out;
 }
 
 /**
@@ -6101,8 +6751,7 @@ function wpmcp_inventory_tools() {
         'write' => false,
         'annotations' => $readHints,
         'description' => 'Read one user you are allowed to see. Args: id (integer, required).'
-            . ' Returns id and name (the display name the user chose, often their login or an'
-            . ' email address), plus login, email, roles and registered (ISO 8601 site-local)'
+            . ' login, email, roles and registered come back only'
             . ' when you have the'
             . ' list_users capability, may edit that user, or it is you. When you can neither list'
             . ' nor edit users, you see a user only if they have posts you may read in a post type'
@@ -6110,10 +6759,12 @@ function wpmcp_inventory_tools() {
             . ' so an Editor also sees a user whose only posts are private, which list-users does'
             . ' not show. This is the WordPress REST API\'s rule. Any other user answers exactly'
             . ' like an id that does not exist. Never returns passwords, keys, sessions or user'
-            . ' meta. Needs list_users or permission to edit posts.',
+            . ' meta. Needs list_users or permission to edit posts. Every returned field is'
+            . ' described in outputSchema.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'id' => array('type' => 'integer', 'description' => 'User ID, from list-users or a post\'s author.'),
         ), 'required' => array('id')),
+        'outputSchema' => wpmcp_result_schema(wpmcp_get_user_shape()),
         'run' => function ($a) {
             if (!wpmcp_users_can_read()) { return wpmcp_cannot('read users'); }
 
