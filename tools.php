@@ -499,13 +499,22 @@ function wpmcp_fetch_error($error) {
     $reason = trim((string) $reason);
     if (strlen($reason) > 80) { $reason = substr($reason, 0, 80) . '...'; }
 
+    // "THE FETCH OF source_url", NEVER "THE SERVER AT source_url" (round 2). download_url()
+    // goes through wp_safe_remote_get(), which follows up to five redirects by default
+    // (class-wp-http.php:191, the http_request_redirection_count filter), so the status can
+    // have come from a URL the caller never named - a CDN, a login page, a country redirect.
+    // Naming source_url as the answerer would then be a false sentence in shipped text, which
+    // is a defect by this project's own triage rule. This wording is true either way, and says
+    // the redirect is possible rather than pretending it is not.
     return new WP_Error(
         'wpmcp_fetch_failed',
-        'The server at source_url answered HTTP ' . $status
+        'The fetch of source_url ended in HTTP ' . $status
         . ($reason !== '' ? ' ' . $reason : '')
-        . ' instead of the file. This site fetched the URL itself, so the remote server has to'
-        . ' be willing to serve it to this site - a URL that works in your browser may still be'
-        . ' refused here. The response body is not relayed.'
+        . ' instead of a file. This site fetched the URL itself and followed any redirects, so'
+        . ' whichever server finally answered has to be willing to serve the file to this site -'
+        . ' a URL that works in your browser may still be refused here, and the status may come'
+        . ' from a redirect target rather than from source_url. The response body is not'
+        . ' relayed.'
     );
 }
 

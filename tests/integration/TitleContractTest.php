@@ -29,6 +29,13 @@
  *                         for BOTH roles. It is the regression test for the fix that is
  *                         already in place, and it has to name these exact characters.
  *
+ * AND ONE CONFIGURATION, NOT A ROLE: `DISALLOW_UNFILTERED_HTML`. The constant takes
+ * `unfiltered_html` from EVERYONE, administrators and super admins included
+ * (`capabilities.php`, the `unfiltered_html` case), so `kses_init()` adds the title filter for
+ * every user on the site. It is the one live setting that changes what this sprint's title work
+ * does, and until round 2 nothing exercised it: both columns of the table above are capability
+ * paths, and this constant collapses them into the right-hand one.
+ *
  * @group sprint-14d
  */
 
@@ -38,9 +45,23 @@ namespace WpMcp\Tests\Integration;
 
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\MuPlugin;
 
 final class TitleContractTest extends FixtureIntegrationTestCase
 {
+    /** The mu-plugin that defines DISALLOW_UNFILTERED_HTML, for one request at a time. */
+    private const CONSTANT_PLUGIN = 'disallow-unfiltered-html';
+
+    /**
+     * The request header that arms it.
+     *
+     * PER REQUEST, AND THAT IS THE WHOLE DESIGN. A constant defined for every request while this
+     * run is armed would take `unfiltered_html` away from the administrator half of this class
+     * too, and from every other class running against the site - so the fixture reads a header
+     * and does nothing without it. wp-cli has no HTTP headers, so the fixture reads and the
+     * assertions are unaffected by it.
+     */
+    private const CONSTANT_HEADER = 'X-Wpmcp-Test-Disallow-Unfiltered-Html';
     /** The stray `<`. Stored as typed with unfiltered_html, kses-encoded without it. */
     private const ANGLE = 'x<y z';
 
@@ -69,6 +90,8 @@ final class TitleContractTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        MuPlugin::drop(self::CONSTANT_PLUGIN, self::constantSource());
+
         self::$adminId  = Fixtures::createUser(Fixtures::name('title-admin'), 'administrator');
         self::$authorId = Fixtures::createUser(Fixtures::name('title-author'), 'author');
 
@@ -85,6 +108,7 @@ final class TitleContractTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        MuPlugin::remove(self::CONSTANT_PLUGIN);
         Fixtures::deleteTokensLabelled(self::label());
         Fixtures::deleteUser(self::$adminId);
         Fixtures::deleteUser(self::$authorId);
@@ -225,13 +249,104 @@ final class TitleContractTest extends FixtureIntegrationTestCase
         }
     }
 
-    /** One post with $title, created through the tool surface as $token's user. */
-    private function createWith(string $token, string $title): int
+    /**
+     * The control for the class's fourth column: the constant really is defined on a request
+     * carrying the header, and really is NOT on one without it.
+     *
+     * Without this, the two assertions below could both pass on a site where the fixture never
+     * loaded - the administrator would simply behave like an administrator, and "kses ran" would
+     * be indistinguishable from "nothing ran".
+     *
+     * @group sprint-14d
+     */
+    public function testTheConstantIsDefinedOnlyForARequestThatAsksForIt(): void
     {
-        $result = $this->mcp($token)->callTool('create-post', [
-            'title'  => $title,
-            'status' => 'draft',
-        ]);
+        self::assertSame(
+            'yes',
+            $this->probeConstant(true),
+            'DISALLOW_UNFILTERED_HTML is not defined on a request carrying the header, so the'
+            . ' fixture mu-plugin never loaded and the test below proves nothing.'
+        );
+        self::assertSame(
+            'no',
+            $this->probeConstant(false),
+            'DISALLOW_UNFILTERED_HTML is defined on a request that did NOT ask for it, so the'
+            . ' fixture is armed for the whole site - which would take unfiltered_html away from'
+            . ' this class\'s administrator half and from every other class running here.'
+        );
+    }
+
+    /**
+     * WITH `DISALLOW_UNFILTERED_HTML`, an ADMINISTRATOR's title is shaped by kses - the constant
+     * collapses the two capability columns into one.
+     *
+     * MEASURED BEFORE THE SWAP, with `wp_strip_all_tags()` reimplemented ahead of the same
+     * slashed `wp_insert_post()` under this constant: `x<y z` stored `x`. So the red half is the
+     * markup being destroyed, and the green half is it being ENCODED, which is what wp-admin does
+     * on a site that sets this constant.
+     *
+     * THE OTHER TWO STRINGS MATTER AS MUCH. The apostrophe/quote/backslash value has to survive
+     * this path too - it is the slashing trap, and the constant puts an administrator ON the
+     * kses branch where the trap lives, so this is the first assertion that exercises the trap
+     * for a user who would otherwise never meet it.
+     *
+     * @group sprint-14d
+     */
+    public function testWithDisallowUnfilteredHtmlEvenAnAdministratorGetsKses(): void
+    {
+        $expected = [
+            self::ANGLE     => 'x&lt;y z',
+            self::SLASHED   => self::SLASHED,
+            self::AMPERSAND => 'Arts &amp; Crafts',
+        ];
+
+        foreach ($expected as $sent => $stored) {
+            $id = $this->createWith(self::$adminToken, (string) $sent, true);
+
+            self::assertSame(
+                $stored,
+                Fixtures::postField($id, 'post_title'),
+                'With DISALLOW_UNFILTERED_HTML set, an administrator\'s title is not stored the'
+                . ' way core stores it for a user without unfiltered_html. Sent: ' . $sent
+            );
+
+            Fixtures::deletePost($id);
+        }
+    }
+
+    /**
+     * Is DISALLOW_UNFILTERED_HTML defined on a request that does, or does not, ask for it?
+     *
+     * Read off the RESPONSE's own header, which the fixture sets on `rest_post_dispatch` for
+     * every request it sees - so the answer is about that request and not about a later one.
+     */
+    private function probeConstant(bool $ask): string
+    {
+        $response = $this->mcp(self::$adminToken)->post(
+            'ping',
+            [],
+            $ask ? [self::CONSTANT_HEADER => '1'] : []
+        );
+
+        self::assertTrue(
+            $response->hasHeader(self::CONSTANT_HEADER),
+            'The fixture mu-plugin reported nothing on this request, so it never loaded.'
+        );
+
+        return $response->getHeaderLine(self::CONSTANT_HEADER);
+    }
+
+    /**
+     * One post with $title, created through the tool surface as $token's user - optionally on a
+     * request that has DISALLOW_UNFILTERED_HTML defined.
+     */
+    private function createWith(string $token, string $title, bool $disallow = false): int
+    {
+        $result = $this->mcp($token)->callTool(
+            'create-post',
+            ['title' => $title, 'status' => 'draft'],
+            $disallow ? [self::CONSTANT_HEADER => '1'] : []
+        );
 
         self::assertFalse($result->isError, 'create-post refused: ' . $result->text);
 
@@ -240,5 +355,36 @@ final class TitleContractTest extends FixtureIntegrationTestCase
         self::assertGreaterThan(0, $id, 'create-post returned no id: ' . $result->text);
 
         return $id;
+    }
+
+    /**
+     * The fixture: `DISALLOW_UNFILTERED_HTML`, for one request, and a header saying so.
+     *
+     * `muplugins_loaded` at priority 0 is early enough - `kses_init()` is on `init` and on
+     * `set_current_user`, and `map_meta_cap` reads the constant at call time - and it is where
+     * MuPlugin::drop() puts every fixture body anyway.
+     */
+    private static function constantSource(): string
+    {
+        $header = 'HTTP_' . strtoupper(str_replace('-', '_', self::CONSTANT_HEADER));
+        $out    = self::CONSTANT_HEADER;
+
+        return <<<PHP
+\$wpmcpDisallow = (isset(\$_SERVER['{$header}']) && \$_SERVER['{$header}'] === '1');
+
+// SAID ON THE WAY OUT, so the control test can see which branch the request took without
+// trusting the fixture's own existence.
+add_filter('rest_post_dispatch', static function (\$response) use (\$wpmcpDisallow) {
+    if (\$response instanceof WP_REST_Response) {
+        \$response->header('{$out}', \$wpmcpDisallow ? 'yes' : 'no');
+    }
+
+    return \$response;
+}, 9999, 1);
+
+if (\$wpmcpDisallow && !defined('DISALLOW_UNFILTERED_HTML')) {
+    define('DISALLOW_UNFILTERED_HTML', true);
+}
+PHP;
     }
 }

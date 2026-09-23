@@ -285,6 +285,132 @@ final class PlatformApiTest extends TestCase
     }
 
     /**
+     * REVISION 6'S TWO OPTIONAL COLUMNS DO NOT GATE THE STAMP, so the upgrade cannot run for
+     * ever on a host whose ALTER fails (round 2).
+     *
+     * THE COST THIS STOPS, and it is the largest real-site cost the review found: a gate here
+     * means `wpmcp_maybe_upgrade()` never records the revision, so EVERY request runs `dbDelta`
+     * twice plus five `SHOW COLUMNS` plus two `UPDATE`s, for ever, on a site where the plugin
+     * otherwise works perfectly - and nothing says why it got slower. A database user without
+     * ALTER is ordinary shared hosting, and the same hazard is written out in this same function
+     * about DROP, which is why gating here contradicted the file's own rule.
+     *
+     * A SOURCE ASSERTION, because the thing that must not come back is two lines of control
+     * flow. The behaviour they caused cannot be reproduced in the unit tier without a real
+     * database that refuses an ALTER, and it cannot be reproduced in the integration tier
+     * either: driving the real upgrade means dropping a column on somebody's live table, which
+     * this suite has refused to do since sprint 1 (see TokenUserIdMigrationTest's docblock).
+     *
+     * @group sprint-14d
+     */
+    public function testTheOptionalClientColumnsDoNotGateTheSchemaStamp(): void
+    {
+        $source = RepoFile::read('wp-mcp.php');
+
+        foreach (['client_name', 'client_version'] as $column) {
+            self::assertStringNotContainsString(
+                "if (!wpmcp_token_column_exists('{$column}')) { return false; }",
+                $source,
+                "The installer fails closed on {$column} again. That column is optional - nothing"
+                . ' but one admin-table cell reads it, and wpmcp_record_client_info() skips its'
+                . ' write when the row has no such field - so a host whose ALTER fails would'
+                . ' re-run the whole upgrade on every request for ever.'
+            );
+        }
+
+        self::assertStringContainsString(
+            'wpmcp_note_client_columns();',
+            $source,
+            'The installer no longer reports the missing columns at all, so their absence is'
+            . ' silent: no log line, no option, no admin notice, and an operator with a "Client"'
+            . ' column that never fills has nothing to go on.'
+        );
+
+        // AND THE REVISION IS STILL STAMPED. Without this the test above would also pass on an
+        // installer that had simply stopped stamping.
+        self::assertStringContainsString(
+            'update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);',
+            $source,
+            'The installer does not record the schema revision, so wpmcp_maybe_upgrade() re-runs'
+            . ' it on every request whatever the columns did.'
+        );
+    }
+
+    /**
+     * And the stamp is what stops the re-run: with the revision recorded, wpmcp_maybe_upgrade()
+     * does nothing at all.
+     *
+     * HOW THIS PROVES IT WITHOUT A DATABASE. `wpmcp_install()` calls `dbDelta()`, which does not
+     * exist in the unit tier - so if the guard let the installer run, this test would die with
+     * "Call to undefined function dbDelta()". Returning normally IS the assertion; the
+     * assertTrue below exists so PHPUnit counts the test rather than calling it risky, and its
+     * message says where the proof actually is.
+     *
+     * @group sprint-14d
+     */
+    public function testAStampedRevisionMakesTheUpgradeANoOp(): void
+    {
+        WordPressRuntime::setOption('wpmcp_db_ver', WPMCP_DB_VER);
+
+        wpmcp_maybe_upgrade();
+
+        self::assertTrue(
+            true,
+            'Reached only because wpmcp_maybe_upgrade() returned without entering the installer.'
+        );
+    }
+
+    /**
+     * What the operator is TOLD, in all four combinations - the decision the review turned over,
+     * as a pure function so a test can drive it.
+     *
+     * @group sprint-14d
+     */
+    public function testTheClientColumnReportNamesExactlyWhatIsMissing(): void
+    {
+        self::assertSame('', wpmcp_client_columns_report(true, true), 'Nothing is missing, so there is nothing to say.');
+        self::assertSame('client_name', wpmcp_client_columns_report(false, true));
+        self::assertSame('client_version', wpmcp_client_columns_report(true, false));
+        self::assertSame(
+            'client_name and client_version',
+            wpmcp_client_columns_report(false, false),
+            'Both missing is the case a failed ALTER actually produces, and the message names'
+            . ' both - an operator granting a privilege needs to know what did not arrive.'
+        );
+    }
+
+    /**
+     * The relayed fetch sentence is true whether or not a redirect happened (round 2).
+     *
+     * `download_url()` goes through `wp_safe_remote_get()`, which follows up to five redirects by
+     * default (`class-wp-http.php:191`), so the status can have come from a URL the caller never
+     * named. "The server at source_url answered HTTP 403" was therefore a sentence that could be
+     * false in shipped text, which is a defect by this project's own triage rule.
+     *
+     * @group sprint-14d
+     */
+    public function testTheFetchSentenceDoesNotClaimSourceUrlAnswered(): void
+    {
+        $message = wpmcp_fetch_error(new \WP_Error('http_404', 'Forbidden', ['code' => 403]))
+            ->get_error_message();
+
+        self::assertStringNotContainsString(
+            'The server at source_url answered',
+            $message,
+            'The message claims source_url answered. download_url() follows redirects, so the'
+            . ' status can be a redirect target\'s.'
+        );
+        self::assertStringContainsString('The fetch of source_url ended in HTTP 403', $message);
+        self::assertStringContainsString(
+            'followed any redirects',
+            $message,
+            'The message does not say a redirect may have happened, so a caller reading "HTTP'
+            . ' 403" still has no way to know which server it came from.'
+        );
+        self::assertStringContainsString('redirect target', $message);
+    }
+
+    /**
      * `structuredContent` is DECODED FROM the text block, so the two halves cannot differ -
      * and it is attached only where a tool declared a schema for it.
      *

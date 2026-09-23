@@ -39,6 +39,16 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
     /** And one that IS public, so the front end shows it and so does every token. */
     private const PUBLIC_STATUS = 'wpmcp-test-listed';
 
+    /**
+     * And one flagged `private`, which is the THIRD of the three flags WP_Query consults and the
+     * one the first round of this class left untested. It is not the same rule as `protected`:
+     * core scopes a private status by the READ capability (`read_private_posts`, via
+     * class-wp-query.php:3553) and a protected one by the EDIT capability, and an Editor holds
+     * both while an Author holds neither - so a test that only used `protected` could not tell
+     * the two branches apart at all.
+     */
+    private const PRIVATE_STATUS = 'wpmcp-test-sealed';
+
     private static int $editorId = 0;
     private static int $authorId = 0;
     private static string $editorToken = '';
@@ -46,6 +56,8 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
     private static int $othersArchived = 0;
     private static int $ownArchived = 0;
     private static int $publicPost = 0;
+    private static int $othersSealed = 0;
+    private static int $ownSealed = 0;
 
     private static function label(): string { return Fixtures::name('platform-swap'); }
 
@@ -97,6 +109,21 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
             'post_author' => self::$editorId,
             'post_type'   => 'post',
         ]);
+
+        // The same pair again in the `private`-flagged status, because the capability that
+        // admits it is a different one.
+        self::$othersSealed = Fixtures::createPostExact([
+            'post_title'  => Fixtures::name('swap-others-sealed'),
+            'post_status' => self::PRIVATE_STATUS,
+            'post_author' => self::$editorId,
+            'post_type'   => 'post',
+        ]);
+        self::$ownSealed = Fixtures::createPostExact([
+            'post_title'  => Fixtures::name('swap-own-sealed'),
+            'post_status' => self::PRIVATE_STATUS,
+            'post_author' => self::$authorId,
+            'post_type'   => 'post',
+        ]);
     }
 
     public static function tearDownAfterClass(): void
@@ -108,7 +135,10 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
-        foreach ([self::$othersArchived, self::$ownArchived, self::$publicPost] as $id) {
+        foreach ([
+            self::$othersArchived, self::$ownArchived, self::$publicPost,
+            self::$othersSealed, self::$ownSealed,
+        ] as $id) {
             Fixtures::deletePost($id);
         }
 
@@ -133,7 +163,8 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
     {
         $flags = json_decode(trim(WpCli::evaluate(
             '$o = array();'
-            . ' foreach (array("' . self::PROTECTED_STATUS . '", "' . self::PUBLIC_STATUS . '") as $s) {'
+            . ' foreach (array("' . self::PROTECTED_STATUS . '", "' . self::PUBLIC_STATUS . '",'
+            . '  "' . self::PRIVATE_STATUS . '") as $s) {'
             . '  $obj = get_post_status_object($s);'
             . '  $o[$s] = $obj ? array("public" => (bool) $obj->public, "protected" => (bool) $obj->protected,'
             . '   "private" => (bool) $obj->private, "internal" => (bool) $obj->internal) : null; }'
@@ -149,6 +180,13 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
             ['public' => true, 'protected' => false, 'private' => false, 'internal' => false],
             $flags[self::PUBLIC_STATUS] ?? null,
             'The public fixture status is not registered the way this class reasons about it.'
+        );
+        self::assertSame(
+            ['public' => false, 'protected' => false, 'private' => true, 'internal' => false],
+            $flags[self::PRIVATE_STATUS] ?? null,
+            'The private fixture status is not registered the way this class reasons about it -'
+            . ' and `private` alone is the point: with `protected` set too it would be admitted by'
+            . ' the edit capability and this class could not tell the two branches apart.'
         );
     }
 
@@ -202,6 +240,65 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
             $authorIds,
             'An author cannot see their OWN post in a custom status, so the own-status'
             . ' complement is not taken over the same registry as the main list.'
+        );
+    }
+
+    /**
+     * A `private`-flagged custom status follows the READ capability, which is a different
+     * capability from the protected one - and an Author sees their own post in it either way.
+     *
+     * WHY THIS IS NOT THE SAME TEST TWICE. `read_private_posts` and `edit_others_posts` are held
+     * by the same role here (an Editor holds both), so passing this proves nothing on its own -
+     * what proves it is the AUTHOR half, plus the control test above showing the status carries
+     * `private` and NOT `protected`. If the swap had read the wrong flag, an Author would either
+     * see the Editor's sealed post or lose their own.
+     *
+     * MEASURED BEFORE THE SWAP, with the old five-status list reimplemented against these same
+     * registered statuses: this status was listable by NOBODY, of any role, because the list was
+     * written out in our code. That is the red half.
+     *
+     * @group sprint-14d
+     */
+    public function testAPrivateCustomStatusFollowsTheReadCapability(): void
+    {
+        $asEditor = $this->mcp(self::$editorToken)->callTool('list-posts', [
+            'status' => self::PRIVATE_STATUS,
+            'limit'  => 100,
+        ]);
+        self::assertFalse($asEditor->isError, $asEditor->text);
+
+        $editorIds = array_map('intval', $asEditor->column('id'));
+
+        self::assertContains(
+            self::$othersSealed,
+            $editorIds,
+            'An editor cannot list somebody else\'s post in a `private`-flagged custom status.'
+            . ' read_private_posts is the capability core scopes that flag by'
+            . ' (class-wp-query.php:3553), and an Editor holds it.'
+        );
+        self::assertContains(self::$ownSealed, $editorIds, 'The editor cannot see the author\'s sealed post.');
+
+        $asAuthor = $this->mcp(self::$authorToken)->callTool('list-posts', [
+            'status' => self::PRIVATE_STATUS,
+            'limit'  => 100,
+        ]);
+        self::assertFalse($asAuthor->isError, $asAuthor->text);
+
+        $authorIds = array_map('intval', $asAuthor->column('id'));
+
+        self::assertNotContains(
+            self::$othersSealed,
+            $authorIds,
+            'AN AUTHOR CAN SEE SOMEBODY ELSE\'S POST IN A PRIVATE CUSTOM STATUS. An Author holds'
+            . ' neither read_private_posts nor edit_others_posts, so no flag admits it - this is'
+            . ' the widening going wrong on the branch the first round of this class never'
+            . ' exercised.'
+        );
+        self::assertContains(
+            self::$ownSealed,
+            $authorIds,
+            'An author cannot see their OWN post in a private custom status, so the own-status'
+            . ' complement is not taking `private` over the same registry as the main list.'
         );
     }
 
@@ -539,6 +636,7 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
     {
         $protected = self::PROTECTED_STATUS;
         $public    = self::PUBLIC_STATUS;
+        $sealed    = self::PRIVATE_STATUS;
         $transient = Fixtures::PREFIX . 'tool-calls';
 
         return <<<PHP
@@ -551,6 +649,14 @@ add_action('init', static function () {
     register_post_status('{$public}', array(
         'label'    => 'wpmcp test listed',
         'public'   => true,
+        'internal' => false,
+    ));
+    // `private` ALONE, and not `protected` too: the two flags are scoped by different
+    // capabilities, so a status carrying both would be admitted by either and the test could
+    // not say which branch answered.
+    register_post_status('{$sealed}', array(
+        'label'    => 'wpmcp test sealed',
+        'private'  => true,
         'internal' => false,
     ));
 });
