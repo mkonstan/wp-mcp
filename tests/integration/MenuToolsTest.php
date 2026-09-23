@@ -450,7 +450,7 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
         // premise failed. It had never failed on a single full run, where thirty other classes
         // have pushed the two counters far apart before this one starts - which is a hidden
         // dependency on what ran BEFORE, and exactly the class of defect running the suite on
-        // six empty databases was always going to surface.
+        // eight empty databases was always going to surface.
         //
         // So the candidates are CHOSEN rather than assumed: each keeps its kind and moves to a
         // fresh id of the same kind if its integer happens to name a menu. A term id cannot
