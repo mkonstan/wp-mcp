@@ -361,6 +361,99 @@ final class PlatformApiTest extends TestCase
     }
 
     /**
+     * THE INSTALLER ITSELF, on a host whose ALTER was refused: the revision is stamped anyway,
+     * and the two missing columns are recorded rather than swallowed.
+     *
+     * THIS IS THE TEST THE ROUND-2 PAIR DID NOT WRITE, and the review was right that it was
+     * missing: the source assertion pins the control flow and the no-op test pins the UNCHANGED
+     * guard, but neither executed the new path - the stamp being written while both column probes
+     * answer false. An inverted failure mode with no running test of it.
+     *
+     * HOW THE HOST IS SIMULATED, and every piece of it is honest about what it stands for:
+     *
+     *   dbDelta()                 a no-op, which is exactly what a refused ALTER looks like from
+     *                             the installer's side - dbDelta never throws and returns a
+     *                             report rather than a status, so the real one is indistinguishable.
+     *   SHOW COLUMNS ... client_% empty, so wpmcp_token_column_exists() answers false for both.
+     *   every other column        present, so the three REQUIRED gates above still pass and the
+     *                             installer reaches the part under test.
+     *   SHOW TABLES               answers the versions table's own name, so that precondition passes.
+     *
+     * @group sprint-14d
+     */
+    public function testTheInstallerStampsTheRevisionWhenTheClientColumnsCouldNotBeAdded(): void
+    {
+        $wpdb = WordPressRuntime::install();
+
+        // Present for everything the installer requires, empty for the two it must not gate on.
+        $wpdb->defaultCol = ['a-column'];
+        $wpdb->cols       = [
+            "LIKE 'client_name'"    => [],
+            "LIKE 'client_version'" => [],
+        ];
+        // wpmcp_versions_table_exists() compares get_var() with the table name it asked for.
+        $wpdb->defaultVar = $wpdb->prefix . 'wpmcp_file_versions';
+
+        self::assertTrue(
+            wpmcp_install(),
+            'The installer reported failure on a host that refused only the two OPTIONAL columns,'
+            . ' so wpmcp_maybe_upgrade() will run the whole thing again on the next request, and'
+            . ' the next, for ever.'
+        );
+
+        self::assertSame(
+            WPMCP_DB_VER,
+            WordPressRuntime::optionWrite(WPMCP_DB_VER_OPTION),
+            'The schema revision was not recorded. That is the forever-loop: the stamp stays'
+            . ' behind, so every request re-runs two dbDelta calls, five SHOW COLUMNS and two'
+            . ' UPDATEs on a site where nothing else is wrong.'
+        );
+
+        self::assertSame(
+            'client_name and client_version',
+            WordPressRuntime::optionWrite(WPMCP_CLIENT_COLUMNS_OPTION),
+            'The missing columns were not recorded, so the absence is silent: no admin notice, and'
+            . ' an operator whose "Client" column never fills has nothing to go on.'
+        );
+    }
+
+    /**
+     * And when both columns ARE there, the same run records the revision and takes the warning
+     * back down - so a site that fixes its privileges and reactivates stops being warned without
+     * anybody deleting a row.
+     *
+     * @group sprint-14d
+     */
+    public function testTheInstallerClearsTheWarningOnceTheColumnsArrive(): void
+    {
+        $wpdb = WordPressRuntime::install();
+
+        $wpdb->defaultCol = ['a-column'];
+        $wpdb->defaultVar = $wpdb->prefix . 'wpmcp_file_versions';
+
+        // The state the previous run left behind.
+        WordPressRuntime::setOption(WPMCP_CLIENT_COLUMNS_OPTION, 'client_name and client_version');
+
+        self::assertTrue(wpmcp_install());
+
+        self::assertSame(
+            WPMCP_DB_VER,
+            WordPressRuntime::optionWrite(WPMCP_DB_VER_OPTION),
+            'The revision was not recorded on the happy path either.'
+        );
+        self::assertNull(
+            WordPressRuntime::optionWrite(WPMCP_CLIENT_COLUMNS_OPTION),
+            'The installer rewrote the warning option on a site that has both columns.'
+        );
+        self::assertContains(
+            WPMCP_CLIENT_COLUMNS_OPTION,
+            $GLOBALS['wpmcp_test_wp']['option_deletes'] ?? [],
+            'The warning option was not deleted, so the admin notice outlives the problem and an'
+            . ' operator who fixed their privileges is still being told they did not.'
+        );
+    }
+
+    /**
      * What the operator is TOLD, in all four combinations - the decision the review turned over,
      * as a pure function so a test can drive it.
      *

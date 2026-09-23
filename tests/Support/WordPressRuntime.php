@@ -35,6 +35,9 @@ final class WordPressRuntime
             'stylesheet'      => '',
             'environment'     => 'production',
             'filters'         => [],
+            'option_writes'   => [],
+            'option_deletes'  => [],
+            'dbdelta'         => [],
         ];
 
         $wpdb = new FakeWpdb();
@@ -100,6 +103,28 @@ final class WordPressRuntime
     public static function allowCap(string $capability): void
     {
         $GLOBALS['wpmcp_test_wp']['caps'][] = $capability;
+    }
+
+    /**
+     * Every update_option() since install(): [['option' => ..., 'value' => ...], ...].
+     *
+     * @return list<array{option: string, value: mixed}>
+     */
+    public static function optionWrites(): array
+    {
+        return $GLOBALS['wpmcp_test_wp']['option_writes'] ?? [];
+    }
+
+    /** The value the last update_option() wrote for $option, or null when it never did. */
+    public static function optionWrite(string $option)
+    {
+        $found = null;
+
+        foreach (self::optionWrites() as $write) {
+            if ($write['option'] === $option) { $found = $write['value']; }
+        }
+
+        return $found;
     }
 
     /**

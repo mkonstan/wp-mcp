@@ -34,6 +34,24 @@ final class TraceLog
         return WpCli::evaluate('echo wpmcp_trace_file_name();');
     }
 
+    /**
+     * The log's size in bytes, or 0 when it is not there yet.
+     *
+     * FOR "DID THE LOG GROW", WHICH IS THE ONLY QUESTION contents() WAS EVER ASKED FOR THAT DOES
+     * NOT NEED THE BYTES (round 3). This log is append-only and never rotated, so on a machine
+     * that has run the suite for weeks it is over a megabyte - and a growth check written as
+     * `assertNotSame($before, contents())` then ships two megabyte-long strings through a wp-cli
+     * subprocess AND hands one of them to a PHPUnit constraint. The queen's full-suite run died
+     * inside PHPUnit's own failure formatting at exactly that assertion, on both sites, with the
+     * real outcome invisible underneath a TypeError. An integer cannot do that.
+     */
+    public static function size(): int
+    {
+        return (int) trim(WpCli::evaluate(
+            '$f = wpmcp_trace_path(); echo is_file($f) ? (int) filesize($f) : 0;'
+        ));
+    }
+
     /** Whole log, or '' when the file does not exist yet. */
     public static function contents(): string
     {

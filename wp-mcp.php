@@ -514,7 +514,16 @@ function wpmcp_install() {
   KEY path_saved_at (path(191),saved_at)
 ) $charset;";
 
-    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    // GUARDED, the same way the opcache call in tools.php is guarded: on a request where
+    // something has already loaded wp-admin/includes/file.php's sibling, the require is a no-op,
+    // and asking whether the function is there first is cheaper than asking the filesystem. It is
+    // also what makes wpmcp_install() reachable from the unit tier at all, which is where the
+    // "stamp the revision even when the optional columns are missing" claim is now proved
+    // (tests/unit/PlatformApiTest.php).
+    if (!function_exists('dbDelta')) {
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    }
+
     dbDelta($sql);
     dbDelta($versions);
 
@@ -644,8 +653,15 @@ function wpmcp_note_client_columns() {
  * PURE, AND SPLIT OUT FOR THAT REASON. The decision this encodes is the one the review found
  * wrong, so it is the part a test has to be able to drive: all four combinations, with no
  * $wpdb, no options and no log. wpmcp_note_client_columns() is then only the reading and the
- * writing around it, which is what the site under test proves (both columns there, nothing
- * recorded - tests/integration/ClientColumnsMigrationTest.php).
+ * writing around it.
+ *
+ * WHAT PROVES THE WHOLE PATH is tests/unit/PlatformApiTest.php's
+ * testTheInstallerStampsTheRevisionWhenTheClientColumnsCouldNotBeAdded: the installer run under
+ * the runtime stubs with a $wpdb double whose SHOW COLUMNS answers EMPTY for these two and
+ * present for every required one, which is a host whose ALTER was refused. It asserts the stamp
+ * is written anyway, the option records the names, and the option is deleted again once both
+ * columns are there. (An earlier version of this docblock cited an integration test that was
+ * never written - the review caught it.)
  *
  * @param bool $hasName    is client_name on the table?
  * @param bool $hasVersion is client_version on the table?

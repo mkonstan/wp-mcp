@@ -171,6 +171,51 @@ if (!function_exists('apply_filters')) {
     }
 }
 
+if (!function_exists('update_option')) {
+    /**
+     * RECORDS, and also answers a later get_option() - which the get_option stub above
+     * deliberately does not do on its own.
+     *
+     * ADDED IN 1.1.1 ROUND 3, for the one test that runs the INSTALLER: the claim is that the
+     * schema revision is recorded even when the two optional columns are missing, and that claim
+     * is a write. The stub above says a store that pretended to persist would make a test of the
+     * real option pass without one; this one is the same store, but a test has to opt into it by
+     * asserting on WordPressRuntime::optionWrites(), so nothing passes by accident.
+     */
+    function update_option($option, $value, $autoload = null)
+    {
+        $GLOBALS['wpmcp_test_wp']['option_writes'][] = array('option' => $option, 'value' => $value);
+        $GLOBALS['wpmcp_test_wp']['options'][$option] = $value;
+
+        return true;
+    }
+}
+
+if (!function_exists('delete_option')) {
+    function delete_option($option)
+    {
+        $GLOBALS['wpmcp_test_wp']['option_deletes'][] = $option;
+        unset($GLOBALS['wpmcp_test_wp']['options'][$option]);
+
+        return true;
+    }
+}
+
+if (!function_exists('dbDelta')) {
+    /**
+     * A NO-OP, AND THAT IS THE POINT: it is exactly what a host whose ALTER is refused does.
+     * dbDelta never throws and returns a report rather than a status, so the installer cannot
+     * tell the difference either - which is why the column probes exist and why what they gate
+     * matters.
+     */
+    function dbDelta($queries = '', $execute = true)
+    {
+        $GLOBALS['wpmcp_test_wp']['dbdelta'][] = $queries;
+
+        return array();
+    }
+}
+
 if (!function_exists('wp_is_file_mod_allowed')) {
     /**
      * ADDED FOR 1.1.1, the file-mod swap. wpmcp_code_constants_forbid() now asks the platform

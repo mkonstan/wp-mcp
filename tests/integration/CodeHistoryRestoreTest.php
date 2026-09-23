@@ -627,11 +627,18 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
 
         // The control FIRST, and it is what makes the rest mean anything: with the switch
         // on and no constant, the tools are there.
+        //
+        // AND IT SAYS WHY WHEN IT FAILS (round 3). This premise went red in a full-suite run and
+        // its message could only say "not listed", which is four different faults wearing one
+        // sentence: the switch off, DISALLOW_FILE_MODS, DISALLOW_FILE_EDIT, or a
+        // `file_mod_allowed` filter answering false - the last of which became a way to fail in
+        // 1.1.1, when the registry started asking wp_is_file_mod_allowed(). A premise that cannot
+        // name its own cause costs a round of bisection.
         self::assertNotSame(
             [],
             self::codeToolsIn($mcp),
             'The code tools are not listed even with the switch on, so the assertion below'
-            . ' would pass for the wrong reason.'
+            . ' would pass for the wrong reason. The site says: ' . self::codeGateState()
         );
 
         MuPlugin::drop(self::NO_EDIT, self::noEditSource());
@@ -668,6 +675,26 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
      *
      * @return list<string>
      */
+    /**
+     * Every input to the code-tool listing gate, read from the site, as one line.
+     *
+     * The four ways the listing can be empty are indistinguishable from the tools/list answer
+     * alone, and three of them are site state rather than anything this class did. Read at the
+     * moment of the failure and printed in its message.
+     */
+    private static function codeGateState(): string
+    {
+        return trim(WpCli::evaluate(
+            'printf("code_enabled=%s DISALLOW_FILE_MODS=%s DISALLOW_FILE_EDIT=%s'
+            . ' wp_is_file_mod_allowed=%s forbid=%s",'
+            . ' var_export((bool) get_option("wpmcp_code_enabled"), true),'
+            . ' defined("DISALLOW_FILE_MODS") ? var_export(DISALLOW_FILE_MODS, true) : "undefined",'
+            . ' defined("DISALLOW_FILE_EDIT") ? var_export(DISALLOW_FILE_EDIT, true) : "undefined",'
+            . ' var_export(wp_is_file_mod_allowed("capability_edit_themes"), true),'
+            . ' is_wp_error($e = wpmcp_code_constants_forbid()) ? $e->get_error_message() : "none");'
+        ));
+    }
+
     private static function codeToolsIn(\WpMcp\Tests\Support\McpClient $mcp): array
     {
         $body = json_decode((string) $mcp->post('tools/list')->getBody(), true);

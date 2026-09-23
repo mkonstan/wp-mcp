@@ -317,7 +317,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     public function testTheServerRefusesEveryWriteDisguisedAsASelect(): void
     {
         $target = self::$orderedIds[0];
-        $before = TraceLog::contents();
+        // THE SIZE, NOT THE BYTES - see TraceLog::size(). The claim is that the log grew.
+        $before = TraceLog::size();
 
         $cases = [
             'a locking read'      => ["SELECT ID FROM \$posts WHERE ID = {$target} FOR UPDATE", 1792],
@@ -372,11 +373,27 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
             }
         }
 
-        self::assertNotSame(
+        // THE CLAIM IS "THE LOG GREW", AND IT IS ASSERTED ON THE LENGTH (round 3).
+        //
+        // `assertNotSame($before, TraceLog::contents())` was the same claim and it could not be
+        // REPORTED: PHPUnit builds a constraint description containing the expected value, and
+        // this site's trace log is over a megabyte, so `LogicalNot::negate()` runs `preg_replace`
+        // over a megabyte-long subject, gets null back when PCRE gives up, and dies with
+        // "Return value must be of type string, null returned". The queen's full-suite run hit
+        // exactly that on both sites - an ERROR at this line, with the real outcome invisible
+        // underneath it - while the class passed alone, because alone the log is smaller.
+        //
+        // The log is APPEND-ONLY and never rotated, so its size is a property of how much has
+        // run on the site, which is why this fired only in a full run and only after this sprint
+        // added entries and 33 tests. Comparing lengths is the identical claim - four refusals
+        // each write an entry, so the file cannot be the same size - and it can be printed.
+        $after = TraceLog::size();
+
+        self::assertGreaterThan(
             $before,
-            TraceLog::contents(),
-            'Four refused statements wrote nothing to the private log, so the trace ids'
-            . ' the client was given point at nothing.'
+            $after,
+            'Four refused statements wrote nothing to the private log, so the trace ids the'
+            . " client was given point at nothing. Log was {$before} bytes and is now {$after}."
         );
 
         // AND THE ROW IS STILL THERE. A refusal that had already written would be a
