@@ -364,19 +364,37 @@ final class PlatformSwapTest extends FixtureIntegrationTestCase
         );
         self::assertSame(['title'], $second['arg_keys'] ?? null);
 
-        $recorded = (string) json_encode($fired);
+        // THE CONTEXT'S OWN KEY SET IS THE ASSERTION THAT NO VALUE CAN REACH A LISTENER, and it
+        // is a claim about the plugin rather than about this fixture: the array the action
+        // delivers holds these five members and no `arguments`. An earlier version of this test
+        // searched the recorded JSON for the post id instead, which is unsound - on a bare site
+        // the fixture post's id is a single digit and matches the `user_id` this same array
+        // carries on purpose (CI, wp-env, run 35880571459 shard 5).
+        foreach ($fired as $entry) {
+            self::assertSame(
+                ['arg_keys', 'token_id', 'user_id', 'scope', 'duration_ms'],
+                $entry['ctx_keys'] ?? null,
+                'The action delivered a context this server does not document. Every member is'
+                . ' either a name or a number about the CALL; an argument value has no member to'
+                . ' arrive in, and a listener is an ordinary plugin callback.'
+            );
+            foreach ((array) ($entry['arg_keys'] ?? []) as $key) {
+                self::assertMatchesRegularExpression(
+                    '/^[a-z_]+$/',
+                    (string) $key,
+                    'An arg_keys entry is not a bare argument name: ' . $key
+                );
+            }
+        }
 
+        // And the one argument value this test CAN search for without a collision: a fixture
+        // string long enough to be unique on any site.
         self::assertStringNotContainsString(
             'wpmcp-test-refused',
-            $recorded,
+            (string) json_encode($fired),
             'AN ARGUMENT VALUE REACHED THE ACTION. A listener is an ordinary plugin callback and'
             . ' this is somebody\'s content; the keys say which arguments a call used, which is'
             . ' what a usage question is about.'
-        );
-        self::assertStringNotContainsString(
-            (string) self::$othersArchived,
-            $recorded,
-            'An argument value (the post id) reached the action.'
         );
     }
 
@@ -543,6 +561,9 @@ add_action('wpmcp_tool_call', static function (\$tool, \$ok, \$context) {
     \$log[] = array(
         'tool'     => \$tool,
         'ok'       => (bool) \$ok,
+        // THE CONTEXT'S KEYS, so the test can assert that no member exists for a value to
+        // arrive in - see testEveryToolCallFiresTheObservationActionWithKeysAndNotValues.
+        'ctx_keys' => is_array(\$context) ? array_keys(\$context) : null,
         'arg_keys' => isset(\$context['arg_keys']) ? \$context['arg_keys'] : null,
         'user_id'  => isset(\$context['user_id']) ? (int) \$context['user_id'] : 0,
         'scope'    => isset(\$context['scope']) ? \$context['scope'] : '',
