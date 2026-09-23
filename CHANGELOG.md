@@ -4,33 +4,159 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.1
 
-**Unreleased.** Open for the next cycle. One change a user can see, and a lot of change in
-how this plugin is tested.
+**Unreleased.** Open for the next cycle. The platform-swap release: less code of ours doing
+what WordPress already does, a failure that says what failed, and the WordPress floor moved to
+where the ecosystem is.
 
-### Changed: the declared WordPress floor is 6.4, and CI executes it
+### Fixed: a failure now says what failed
 
-- **`Requires at least` is now `6.4`, not `5.5`.** The old number was a claim nobody had
-  ever run, and it was wrong. `restore-revision` hooks `_wp_put_post_revision` and filters
-  on its second argument, `$post_id`, which core records as `@since 6.4.0`. Below 6.4 the
-  action fires with one argument, the filter never matches, and the tool answers
-  `pre_restore_revision_id: null` and `new_revision_id: null` on **every** call - two fields
-  the README documents. Not an error and not a wrong answer: a silently empty one, which is
-  worse. Nothing between 6.4 and today's release buys the plugin anything, so nothing is
-  lost by saying the true number.
-- **`Requires at least` is a GATE, not a hint**, which is why the header had to move rather
-  than the README explaining itself: core's `validate_plugin_requirements()` refuses to
-  ACTIVATE a plugin below the version it declares. A header of 6.9 with prose promising
-  "6.4 to 6.8 works" would have been false for exactly the sites it was addressed to.
-- **The README opens with a requirements table and the version each feature needs.** Today
-  that table has one row, because with the Abilities bridge parked there is no feature gap:
-  everything documented works at 6.4. A later release that gates a feature on a newer
-  WordPress adds its own row, and says so in that feature's own tool description.
-- **A new CI job runs the whole integration suite on WordPress 6.4 with PHP 8.2**, beside the
-  existing leg on current WordPress, and a red floor blocks a release. Until now
-  `.wp-env.json` pinned `"core": null` - "whatever is current today" - so no declared floor
-  had ever executed. The pair is stated in the README because 6.4 shipped the same month as
-  PHP 8.3: claiming a combination nobody can run is the mistake the old "5.5 with PHP 8.1"
-  pair made.
+- **`upload-media` reports the remote server's HTTP STATUS instead of "Internal error".**
+  Measured: a Wikimedia thumbnail URL answered a bare `Internal error` while the private log
+  held `class=WP_Error:http_404 message=Bad Request data={"code":400,...}` - the CDN had
+  refused WordPress's user agent. Core's `download_url()` turns EVERY non-2xx into
+  `WP_Error('http_404', ...)` whatever the status was, and that code is not relayable, so the
+  boundary correctly hid a failure that was not the site's fault and that no agent could act
+  on. The status and the reason phrase now come back - `The server at source_url answered HTTP
+  403 Forbidden instead of the file.` - and the response body NEVER does. Core attaches up to a
+  kilobyte of it; in the measured case it was a whole HTML error page.
+- **The trace id is in the error MESSAGE, not only in `error.data`.** A cold client rendered
+  `error.message` and nothing else, so the one identifier that could find the log line was
+  invisible. Every generic failure now reads `Internal error (trace 1f53b972)`, and the same id
+  stays in `data.trace_id` for anything already parsing it.
+- **A fetch that never CONNECTED is now generic**, where it used to relay the transport's own
+  sentence. `http_request_failed` came off the relayable list because cURL's message names the
+  host it could not reach, which on a proxied site is the operator's internal
+  `WP_PROXY_HOST`. The sentence is in the private log; the caller gets the trace id.
+- **`upload-media`'s description** says the remote server has to be willing to serve the file
+  to THIS site - a URL that opens in your browser may still be refused - and what the two
+  failures look like.
+- **The trace log records argument SHAPES, never argument values.** PHP's own
+  `getTraceAsString()` prints the first fifteen characters of every string argument (verified
+  on PHP 8.2.29 with `zend.exception_ignore_args=0`), which is the start of a URL, a title or
+  anything else a caller sent. A frame now reads
+  `{closure}(array{source_url,filename}, string(41), stdClass)`: an array's keys, a string's
+  length, an object's class.
+
+### Changed: titles are stored the way wp-admin stores them
+
+- **`create-post` and `update-post` no longer strip tags from a title.** A title typed
+  `x<y z` used to be stored as `x` - text destroyed, silently, by us. Neither wp-admin nor the
+  REST API does that. Core's `title_save_pre` decides instead: only `trim` for a user with
+  `unfiltered_html`, and kses for one without, which ENCODES rather than strips.
+- **So the same title stores different bytes depending on the token's user**, and that is the
+  contract, not a defect: an administrator's `x<y z` is stored `x<y z`; an author's is stored
+  `x&lt;y z`, exactly as wp-admin would store it. `Tom's "quoted" A\B` is stored byte for byte
+  for both. `changed` can therefore report a title as changed when an administrator re-saves a
+  subscriber's post - wp-admin does the same.
+- **Reading a title and writing it back still stores the same bytes**, for both roles, because
+  a field equal to what is stored is not written at all.
+- The whole rule, with its measurements, is now written down in `ARCHITECTURE.md` under **The
+  tool layer is the browser and the form**.
+
+### Changed: less of our code, more of the platform's
+
+Five swaps and a deletion. None changes a capability; each retires something we maintained.
+
+- **`list-posts` can now return a plugin's CUSTOM post statuses.** The five core statuses were
+  written out in our code; the status registry and the `public` / `private` / `protected` flags
+  decide now - the same flags `WP_Query` itself consults. A workflow plugin's `archived` or
+  `expired` is listable, scoped by the same capabilities: public to everybody, protected to a
+  caller with `edit_others_posts` (and to the author for their own posts), private to one with
+  `read_private_posts`, and a status with none of the three to nobody, which is core's own
+  answer. On the ACF-heavy test site this adds exactly one status, ACF's own `acf-disabled`.
+- **A `date` naming a local time that does not exist is stored as typed.** Date parsing is now
+  core's `rest_get_date_with_gmt()` behind our grammar (which accepts `2026-03-04` and
+  `T09:30`, both of which core's refuses) and our guard (core's parser ends in `strtotime()`
+  and rolls 30 February forward). 95 old-against-new comparisons across five timezones differ
+  in exactly one case: `2026-03-08T02:30:00` on a site in America/New_York, the hour that
+  spring-forward skips, is now stored as 02:30 local with the correct GMT instant - which is
+  what the REST API stores - instead of being moved to 03:30.
+- **The theme-code tools now respect a hardening plugin.** The `DISALLOW_FILE_MODS` half of the
+  gate asks `wp_is_file_mod_allowed()`, which is what core asks for `edit_themes`, so a plugin
+  that switches file editing off through the `file_mod_allowed` filter switches the six code
+  tools out of `tools/list` as well. Before this they were advertised and then refused, one
+  call at a time. `DISALLOW_FILE_EDIT` stays a direct constant read, because core's has no
+  filter in front of it either.
+- **Settings are written through the Settings API.** Nothing changes for an operator beyond a
+  post-redirect-get and core's own "Settings saved." - but the sanitiser has moved to where
+  `update_option()` runs it on EVERY path, so a protected meta key typed into the allow-list is
+  dropped whether it arrives from the form, from `wp option update`, or from a restored backup
+  being re-saved.
+- **The JSON body is decoded once**, by core, instead of twice. Nothing observable; the batch
+  refusal still reads the raw first byte, because `[]` and `{}` decode to the same value.
+- **`get-media`'s `url` is `null` when the attachment has no file**, where it used to be the
+  JSON literal `false`. Found by declaring the field's type (see below).
+
+### Changed: an orphaned menu item moves to where WordPress shows it
+
+- **The menu tree is core's `Walker::walk()` now**, with a small collecting subclass fed our own
+  raw rows. Our traversal, our parent map and our orphan handling are gone.
+- **The one observable difference: an item whose stored parent is not an item of its menu** -
+  because the parent was deleted, or is in another menu - used to appear interleaved at the top
+  level by `menu_order`, and now appears AFTER every top-level tree, flat, which is where
+  `wp_nav_menu()` shows it. So `get-menu`'s `position` finally agrees with what a visitor sees.
+  Such an item's own children are shown flat beside it rather than nested under it, which is
+  also core's behaviour.
+- **The next write to that menu persists the new order**, because the renumbering is built from
+  the same walk. ZERO orphaned items were measured on both real test sites (81 items in 5 menus,
+  and 44 items), so nothing changes there - but if your menus have one, its `menu_order` will
+  move the first time anything is added, moved or removed.
+- **`get-menu` primes every linked post and term in two queries** (`update_menu_item_cache()`)
+  before reading them one at a time. On a 66-item menu that is 66 pairs of queries that no
+  longer happen. No value changes: it is the cache, not the read.
+
+### Added: an operator can see what a token is doing
+
+- **The settings screen names the connected CLIENT.** Every MCP client sends its name and
+  version in the first message of every connection, and those two strings are now stored on the
+  token row beside `last_used_at` and `use_count`, so a row reads "Claude Desktop 1.4, last seen
+  3 minutes ago, 412 calls". The server keeps no session state; this is the visibility a session
+  feature would have bought. Token-table schema revision 6.
+- **`do_action('wpmcp_tool_call', $tool, $ok, $context)` fires once per tool call**, including
+  for a refusal and for a crash, so a site can observe usage without this plugin inventing a log
+  format, a location, a rotation policy or a retention rule. `$context` carries the argument
+  KEYS - never values - the token row id, the user id, the scope and the duration in
+  milliseconds.
+
+### Added: `outputSchema` on four read tools (a pilot)
+
+- **`site-info`, `get-post`, `get-media` and `get-user` declare an `outputSchema` and send
+  `structuredContent`** beside the text block, which the specification requires to stay. Four
+  tools and not thirty-six, because a tool that has one sends its data twice and a client cannot
+  tell us whether it wants the second copy.
+- **Each of the four declares its fields once** - name, type, description, and the closure that
+  produces the value - and both the schema and the result are generated from that declaration,
+  so they cannot drift. `structuredContent` is decoded from the text block, so the two wire
+  copies cannot drift either.
+- **The field lists moved out of those four descriptions into their schemas**, a sentence per
+  field, which gives the 1,000 characters a client keeps back to the warnings that need them.
+
+### Changed: the declared WordPress floor is 6.9, and CI executes it
+
+- **`Requires at least` is now `6.9`.** The floor is a CHOICE now rather than a derivation. 5.5,
+  then 6.4, were each the oldest version the code would run on - 6.4 because
+  `_wp_put_post_revision`'s `$post_id` argument is `@since 6.4.0` and `restore-revision` filters
+  on it. That is still the oldest WordPress the code would run on, and it is no longer the floor.
+- **6.9 is where the Abilities API begins**, and that is where the ecosystem has gone: core
+  registers three abilities, Rank Math 24, Gravity Forms 32 behind a flag, and ACF Pro 6.8.10
+  ships its own for field groups, post types, taxonomies and per-post-type CRUD. Supporting
+  below it bought a version question on every future feature, and a 91-minute CI job, to serve
+  sites unlikely to run an agent at all. W3Techs, 23 September 2026: 62.6% of WordPress sites run
+  7.x and 30.4% the whole of 6.x, so the floor keeps the overwhelming majority and drops versions
+  that are updating themselves out of existence.
+- **`Requires at least` is a GATE, not a hint**, which is why the header moves rather than the
+  README explaining itself: core's `validate_plugin_requirements()` refuses to ACTIVATE a plugin
+  below the version it declares. A header of 6.9 with prose promising "6.4 works" would be false
+  for exactly the sites it was addressed to.
+- **CI runs the whole integration suite on WordPress 6.9 with PHP 8.4**, beside the leg on
+  current WordPress, and a red floor blocks a release. The PHP was re-derived rather than carried
+  over: 6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so the leg runs the newest PHP
+  that was in active support when that WordPress was released - the same rule that put the old
+  6.4 leg on 8.2 rather than 8.3. The job asserts the container really came up on that WordPress
+  and that PHP, because a `WP_ENV_CORE` wp-env quietly ignored would leave the leg testing
+  current core twice.
+- **The README opens with a requirements table and the version each feature needs.** One row
+  today, because everything documented works at the floor.
 
 ### Fixed: a test that had to win a race with cron
 

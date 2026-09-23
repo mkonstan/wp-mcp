@@ -714,7 +714,17 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
      * behind (measured), and a theme's walker shows such an item at the END of the menu; rewriting
      * it to 0 moved it into the middle of a live menu. Only a parent_id the caller sends changes it.
      *
+     * AND SINCE 1.1.1 THE STORED ORDER AGREES WITH THAT WALKER, which is the sentence above coming
+     * true. The menu tree is built by core's `Walker::walk()` now, and it shows an item whose
+     * parent is not an item of this menu AFTER every top-level tree (class-wp-walker.php:253-264);
+     * the renumbering is built from the same walk, so the first write moves B1 from the middle of
+     * the stored order to the end - where the theme was already showing it. Before 1.1.1 this test
+     * asserted A, B1, C, which is what our own traversal produced and what this docblock had
+     * already recorded as disagreeing with the site. The PARENT claim, which is the point of the
+     * test, is unchanged.
+     *
      * @group sprint-13
+     * @group sprint-14d
      */
     public function testAnUpdateThatDoesNotSendAParentKeepsTheStoredOne(): void
     {
@@ -736,7 +746,13 @@ final class MenuToolsTest extends FixtureIntegrationTestCase
         self::assertSame($ids['B'], $parentOf($ids['B1']), 'A target-only update rewrote the stored parent.');
 
         $after = array_column(Fixtures::menuItemRows($menuId), null, 'id');
-        self::assertSame([$ids['A'], $ids['B1'], $ids['C']], array_keys($after), 'The update reordered the menu.');
+        self::assertSame(
+            [$ids['A'], $ids['C'], $ids['B1']],
+            array_keys($after),
+            'The stored order is not the one core\'s walker prints: every top-level tree, then'
+            . ' every item whose parent it cannot find. B1 is an orphan here - B was deleted - so'
+            . ' it belongs at the end, which is where wp_nav_menu() has been showing it all along.'
+        );
 
         foreach ([$ids['A'], $ids['C']] as $id) {
             self::assertSame(

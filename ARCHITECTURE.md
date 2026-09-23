@@ -109,10 +109,21 @@ runs.
 
 ## The disclosure boundary
 
-One catch-all around dispatch. Anything unexpected becomes `-32603` "Internal error" plus
-an eight-character trace id, and nothing else crosses. The throwable goes to
-`wp-content/wpmcp/trace-<32 hex>.log` under that id, with its class, message, file, line,
-`WP_Error` data and stack.
+One catch-all around dispatch. Anything unexpected becomes `-32603`
+**`Internal error (trace 1f53b972)`** plus the same id in `error.data.trace_id`, and nothing
+else crosses. The throwable goes to `wp-content/wpmcp/trace-<32 hex>.log` under that id, with
+its class, message, file, line, `WP_Error` data and stack.
+
+**The id is in the message as well as in `data` since 1.1.1**, and the reason is a measurement:
+a cold client rendered `error.message` and nothing else, so the one identifier that makes a
+deliberately empty message actionable was invisible to the person reading it and the log line
+could not be found. Eight hex digits generated per event disclose nothing.
+
+**The stack carries argument SHAPES, never argument values.** PHP's own `getTraceAsString()`
+prints the first fifteen characters of every string argument - verified on this project's PHP,
+8.2.29 with `zend.exception_ignore_args=0` - which is the start of a URL, a title, or whatever
+a caller sent. The log now writes `{closure}(array{source_url,filename}, string(41), stdClass)`
+instead: an array's KEYS, a string's length, an object's class.
 
 `trace.php` is the only file allowed to touch a throwable's `getMessage()`, `getFile()`,
 `getTraceAsString()` or a string cast of it. Every one of those puts the filesystem layout,
@@ -135,6 +146,34 @@ is a tool refusing something: both are HTTP 200 with `isError: true` and a sente
 author wrote for the caller.
 Adding a code means a client has to act differently on it, which is a higher bar than
 wanting to be specific.
+
+**Four core `WP_Error` codes are relayed instead of hidden**, because each one is the caller's
+own mistake in words it can act on: `term_exists`, `comment_duplicate`, `comment_flood`,
+`empty_content`. `http_request_failed` was a fifth and came off the list in 1.1.1: its message is
+the HTTP transport's, and cURL's names the host it could not reach, which on a proxied site is
+the operator's own `WP_PROXY_HOST`. The case that list was really protecting is a remote server
+that ANSWERS and refuses, and `upload-media` now turns that into a `wpmcp_fetch_failed` naming
+the status and the reason phrase - never the response body, which core attaches up to a
+kilobyte of and which in the measured case was a whole HTML error page.
+
+## What an operator can watch
+
+Three surfaces, and each answers a different question without the plugin inventing a log format:
+
+- **the auth events** (`wpmcp_auth_event`) - was a credential accepted, and whose;
+- **the trace log** - what broke, keyed by the id the caller was given;
+- **`do_action('wpmcp_tool_call', $tool, $ok, $context)`**, since 1.1.1 - what a token is
+  actually DOING. One firing per `tools/call`, in a `finally` so a crash fires it too, with `ok`
+  read off the response so a scope refusal, a schema failure, a tool's own error and a thrown
+  `TypeError` all report `false` without four call sites having to remember to. `$context`
+  carries the argument KEYS - never values - the token row id, the user id, the scope and the
+  duration. A site that wants none of it pays one empty hook call.
+
+And on the settings screen, the token table now names **what is connected**: the client's own
+`name` and `version` from `initialize`'s `clientInfo`, stored on the token row beside
+`last_used_at` and `use_count`, so a row reads "Claude Desktop 1.4, last seen 3 minutes ago,
+412 calls". That is the operator visibility a session feature would have bought, and the server
+stays stateless.
 
 ## The pass system, and what each piece is for
 
@@ -250,6 +289,67 @@ create does not exist yet - but its capability check does not. So the refusal ha
 before `wp_insert_post()` runs and only the writing waits, which is what stops a refused
 create leaving an orphan behind.
 
+## The tool layer is the browser and the form
+
+Every question about a text value - strip it? encode it? decode it? pass it through? - is
+settled by one sentence, and it is the contract this plugin is built on:
+
+> **A tool returns what the wp-admin field would show, accepts what a user would type, and
+> storage is whatever core makes of it FOR THAT TOKEN'S USER.**
+
+The tool layer mimics a person using wp-admin. So on write, hand core the value as typed and
+let the `*_save_pre` filters run - kses included when the user lacks `unfiltered_html` - and add
+no stripping of our own. On read, decode one level for a value wp-admin renders in a TEXT INPUT,
+and pass through untouched for one it renders in an HTML EDITOR. A new field is settled by
+looking at wp-admin's markup for it, not by argument.
+
+**The measurements that justify it**, all taken on sample.local against WordPress 7.1.1 on
+2026-09-21, and re-measured on jaygroup in 1.1.1:
+
+- **kses is a fixed point.** `wp_filter_kses('x<y z')` is `x&lt;y z`, and a second and third
+  pass change nothing. A bare `&` becomes `&amp;`; an existing `&lt;` is left alone.
+- **`esc_attr()` does not double-encode.** A stored `x&lt;y z` reaches the browser as
+  `x&lt;y z`, and the browser shows the user `x<y z`.
+- **The two are inverses**, which is the entire reason wp-admin never compounds an encoding.
+  Nothing tracks state; nothing needs to.
+- **Core's own hookup.** `title_save_pre` carries only `trim`
+  (`wp-includes/default-filters.php:328`); `wp_filter_kses` is added to it ONLY for a user
+  without `unfiltered_html` (`wp-includes/kses.php:2548`), and `DISALLOW_UNFILTERED_HTML`
+  forces that path for everyone, administrators included. `wp_insert_post()` expects SLASHED
+  data and unslashes at `wp-includes/post.php:4981`, after those filters have run at `:4632`.
+- **A term stored `Arts &amp; Crafts`** comes back that way from `sanitize_term_field` in every
+  context, so wp-admin's edit field holds those bytes and shows `Arts & Crafts` - which is what
+  these tools return, and the reason the sprint-14d decode was right.
+
+**Titles follow it as of 1.1.1.** `create-post` and `update-post` used to run
+`wp_strip_all_tags()` on a title, so a title typed `x<y z` was stored as `x` - text destroyed,
+silently, by us. That rule is gone. Measured on both capability paths:
+
+| sent | administrator stores | author stores |
+|---|---|---|
+| `x<y z` | `x<y z` | `x&lt;y z` |
+| `Tom's "quoted" A\B` | `Tom's "quoted" A\B` | `Tom's "quoted" A\B` |
+| `Arts & Crafts` | `Arts & Crafts` | `Arts &amp; Crafts` |
+
+**The accepted cost** is in that table: the same wire value stores different bytes per
+capability, so `changed` can report a title as changed when an administrator re-saves a
+subscriber's post. wp-admin does the same thing.
+
+**The slashing is the trap, and one call closes it.** `wp_filter_kses` is
+`addslashes(wp_kses(stripslashes($data)))`, so it expects slashed input exactly as
+`wp_insert_post()` does. Both write tools slash the whole postarr once, at the boundary, so the
+pair cancels and the middle row of that table survives byte for byte for both roles. Hand kses
+an UNSLASHED title instead and it becomes `Tom\'s \"quoted\" AB` - the backslash eaten, the
+quotes mangled. Slash the array, never the field.
+
+**One field does not yet have the read half, and that is named rather than hidden.** `get-post`
+returns the stored `post_title` column, so an author's `x<y z` reads back as `x&lt;y z` while
+wp-admin's field would show `x<y z`. Writing back what was read is still exact, because an
+unchanged field is not written at all - so nothing is lost today. Decoding a title on read is a
+separate decision: it would change what five read tools return, and it would let an
+administrator's write-back rewrite an author's stored bytes (faithfully, as wp-admin does, but
+on a call that only meant to echo the object). It is open.
+
 ## What a tool returns can be written back
 
 A client reads a field and later sends it back - to change something beside it, or because
@@ -274,6 +374,30 @@ write (`wpmcp_post_state()`), not a list of what was sent, so it names core's ow
 re-dated draft, a re-slug on a status change, a default category - as well as the caller's,
 and never names a field that did not move. The table of every field, its read tool, its
 write tool and what was measured on both test sites is in the sprint-14d report.
+
+## One declaration per result: the output-schema pilot
+
+Four small-payload read tools - `site-info`, `get-post`, `get-media`, `get-user` - declare an
+`outputSchema` and send `structuredContent` beside the text block. It is a PILOT, and the case
+for it is INTERNAL rather than client-side:
+
+- **it kills shape drift**, which has bitten this project repeatedly. Each of the four declares
+  its fields ONCE - name, JSON type, description, and the closure that produces the value - and
+  `wpmcp_result_schema()` and `wpmcp_result_build()` read that same declaration. A field that is
+  added, renamed or re-typed moves in both at once, and a field with no producer is a PHP error
+  rather than a schema promising something nobody sends. Declaring the types is what found
+  `get-media`'s `url` answering the JSON literal `false` when an attachment has no file.
+- **it buys back description budget**, which is genuinely scarce: the cap clients apply is 1,000
+  characters, and much of these four descriptions was a list of returned fields. That list is now
+  in the schema, a sentence per field, and the descriptions carry the warnings instead.
+- `structuredContent` is **decoded from the text block**, so the two copies of the data cannot
+  disagree - not about a value, not about a type, not about whether an empty field is `{}` or
+  `[]`.
+
+The cost is that a tool with a schema sends its data twice, because the specification requires
+the text block to stay. That is why it is four tools and not thirty-six. Whether it goes further
+depends on what a real client does with the structured half, which is a measurement nobody has
+made yet.
 
 ## One envelope, one date, and an end
 
