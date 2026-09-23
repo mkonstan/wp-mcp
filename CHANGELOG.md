@@ -62,6 +62,14 @@ None of this is visible on a site. It is recorded because it changes what a gree
   because `VersionConsistencyTest` ties this changelog's top heading to the version in the
   code. A weekly scheduled run re-proves everything, because a matching fingerprint says the
   code is identical and says nothing about WordPress or the container.
+- **The integration tier runs on eight machines, not one.** Eight containers, each running a
+  disjoint set of test classes balanced by measured cost, each writing its own JUnit log, and a
+  merge job assembling them into the one log the gate reads. About seventy minutes becomes about
+  fifteen; total test time goes UP by roughly 30%, because each shard builds its own fixtures and
+  none shares a warm database. Free on a public repository and not worth it on a private one. The
+  merge refuses a missing, truncated, empty or duplicated shard rather than reporting a smaller
+  suite as a complete one, and it found a real defect on its first run: one test depended on how
+  much other work had populated the database before it.
 - **A release reuses that verdict instead of re-running the gate.** Publishing still requires
   a green full run for the code being published; what changed is that the run may be the one
   CI already did. A one-word changelog commit used to get a 90-minute release gate.
