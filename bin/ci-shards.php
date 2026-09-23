@@ -18,18 +18,28 @@
  *
  * BALANCING is longest-processing-time-first greedy: sort classes by weight descending, put each
  * on the lightest shard so far. For this suite that is within a few per cent of optimal and the
- * heaviest single class (214 s) is well under a shard's share, so no class decides the wall clock
- * on its own. See tests/class-timings.txt for where the weights come from and why they are a
- * model rather than a measurement.
+ * heaviest single class (321 s - MenuToolsTest, after round 4's calibration) is well under a
+ * shard's share, so no class decides the wall clock on its own. See tests/class-timings.txt for
+ * where the weights come from and why they are a model corrected once against measurement rather
+ * than a measurement.
  *
- * THE FILTER FORM IS NOT OBVIOUS, so it is written down. PHPUnit 10.5's `--filter` is a regex
- * over the fully-qualified `Class::method`, but:
- *   - `/…/` delimiters make it match nothing; bare or `#…#` works.
- *   - a literal backslash cannot survive the trip through a shell and a regex reliably, and
- *     `\T` in `WpMcp\Tests` is read by PCRE as an escape. `\x5c` is the namespace separator that
- *     works everywhere - verified against this suite, including the two DIFFERENT classes both
- *     called `ToolContractTest` (one unit, one integration), which is also why the filter is
- *     built per namespace and never from short names.
+ * THE FILTER FORM IS NOT OBVIOUS, so it is written down - and the first version of this note got
+ * the reason wrong, which is worth keeping because it is the more useful half. PHPUnit 10.5's
+ * `--filter` is a regex over the fully-qualified `Class::method`:
+ *   - **A LITERAL BACKSLASH IS THE THING THAT KILLS IT.** `\T` in `WpMcp\Tests` is not an escape
+ *     PCRE knows, so the pattern is invalid, `preg_match` is suppressed, and every test is
+ *     rejected WITHOUT A WORD. `\x5c` is the namespace separator that survives a shell and a
+ *     regex together, and it is what this script emits.
+ *   - `/…/` delimiters are NOT the problem, and an earlier version of this comment said they
+ *     were. PHPUnit (`NameFilterIterator::setFilter`) uses the pattern as given when it is a
+ *     valid regex and wraps it as `/…/i` when it is not - so `/^(…)::/` with `\x5c` works, and
+ *     the BARE form this script emits is wrapped, which quietly makes it CASE-INSENSITIVE.
+ *     That cannot bite this suite, where no two classes differ only in case, and it is the kind
+ *     of thing that should be written down rather than rediscovered.
+ *   - The alternation is closed by `)::` and the namespace is spelled out, so `MenuToolsTest`
+ *     cannot take `MenuToolsTestExtra` and `Unit\ToolContractTest` cannot take
+ *     `Integration\ToolContractTest` - this suite really has two different classes of that name,
+ *     which is why the filter is built per namespace and never from short names.
  *
  *   php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
  *       --shards=6 --shard=3          # the --filter for shard 3
@@ -193,18 +203,29 @@ function wpmcp_ci_shard_filter(array $classes): string
     foreach ($byNamespace as $namespace => $shorts) {
         sort($shorts);
 
+        $alternation = '(' . implode('|', $shorts) . ')';
+
+        // A GLOBAL-NAMESPACE CLASS HAS NO SEPARATOR BEFORE IT. The first version emitted
+        // `^(\x5c(Foo))::` for one, which requires a leading backslash and matches nothing -
+        // planned, never run, and silent. No test class is in the global namespace today, so this
+        // was a trap laid for whoever adds the first one rather than a live fault; the merge's
+        // class-coverage check now catches that whole shape as well.
+        if ($namespace === '') {
+            $parts[] = $alternation;
+            continue;
+        }
+
         // Each SEGMENT is quoted on its own and the separators are put back as `\x5c`. Quoting
         // the whole namespace and replacing afterwards does not work: preg_quote turns one
         // backslash into two, and the replacement then emits `\x5c\x5c`, which matches a
         // namespace nobody has. That was the first version, and it matched no tests at all -
-        // which the shard would have reported as a green run of nothing, if the merged
-        // map-vs-log check downstream did not count rows.
+        // which the shard would have reported as a green run of nothing.
         $segments = array_map(
             static function ($segment) { return preg_quote($segment, '#'); },
             explode('\\', $namespace)
         );
 
-        $parts[] = implode('\x5c', $segments) . '\x5c(' . implode('|', $shorts) . ')';
+        $parts[] = implode('\x5c', $segments) . '\x5c' . $alternation;
     }
 
     sort($parts);

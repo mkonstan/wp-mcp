@@ -165,13 +165,12 @@ final class FloorConsistencyTest extends TestCase
         return $m[1];
     }
 
+    /**
+     * Through RepoFile: the README table rows are asserted with `/…\|$/m`, which a CRLF working
+     * copy breaks on a laptop while CI stays green. See RepoFile.
+     */
     private static function read(string $relative): string
     {
-        $path     = WPMCP_PLUGIN_DIR . '/' . $relative;
-        $contents = is_file($path) ? file_get_contents($path) : false;
-
-        self::assertIsString($contents, "Could not read {$relative} at {$path}.");
-
-        return (string) $contents;
+        return RepoFile::read($relative);
     }
 }

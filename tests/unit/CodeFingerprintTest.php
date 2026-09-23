@@ -181,13 +181,12 @@ final class CodeFingerprintTest extends TestCase
         return $files;
     }
 
+    /**
+     * Through RepoFile: the staging-step assertion below is anchored on a line end, and a CRLF
+     * working copy would fail it on a laptop while passing in CI. See RepoFile.
+     */
     private static function read(string $relative): string
     {
-        $path     = WPMCP_PLUGIN_DIR . '/' . $relative;
-        $contents = is_file($path) ? file_get_contents($path) : false;
-
-        self::assertIsString($contents, "Could not read {$relative} at {$path}.");
-
-        return (string) $contents;
+        return RepoFile::read($relative);
     }
 }

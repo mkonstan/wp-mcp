@@ -198,9 +198,15 @@ final class CiShardsTest extends TestCase
         self::assertStringContainsString('WpMcp\x5cTests\x5cIntegration\x5c(HandshakeTest)', $filter);
         self::assertStringEndsWith('::', $filter);
 
-        // A literal backslash cannot survive a shell and a regex reliably, and `\T` reads as a
-        // PCRE escape. `\x5c` is the spelling that works; a bare one would be a filter that
-        // matches nothing, which is a shard that runs nothing and calls itself green.
+        // A LITERAL BACKSLASH IS THE THING THAT KILLS THE FILTER, and it kills it in silence:
+        // `\T` in `WpMcp\Tests` is not a PCRE escape, so the whole pattern is invalid, PHPUnit's
+        // suppressed preg_match rejects every test, and the shard runs nothing and calls itself
+        // green. `\x5c` is the spelling that survives both a shell and a regex.
+        //
+        // NOT the delimiters, which an earlier version of this comment blamed: PHPUnit uses a
+        // valid pattern as given and wraps an invalid one as `/…/i`, so the bare form this script
+        // emits is wrapped and is therefore case-insensitive. Harmless here - no two classes in
+        // this suite differ only in case - and worth knowing rather than rediscovering.
         self::assertStringNotContainsString(
             '\\\\',
             $filter,
@@ -219,6 +225,32 @@ final class CiShardsTest extends TestCase
     }
 
     /**
+     * A CLASS IN THE GLOBAL NAMESPACE HAS NO SEPARATOR BEFORE IT, and the first version of the
+     * filter builder emitted one anyway: `^(\x5c(Foo))::`, which demands a leading backslash and
+     * therefore matches nothing. No test class in this suite is global, so nothing was losing
+     * tests - it was a trap set for whoever adds the first one, found by review rather than by a
+     * failure, and the kind of thing that would have been noticed months later as "that class was
+     * never running".
+     *
+     * @group sprint-0
+     */
+    public function testAGlobalNamespaceClassGetsAFilterThatActuallyMatchesIt(): void
+    {
+        $filter = \wpmcp_ci_shard_filter(['PlainOldTest']);
+
+        self::assertSame('^((PlainOldTest))::', $filter);
+        self::assertMatchesRegularExpression('#' . $filter . '#', 'PlainOldTest::testSomething');
+        self::assertDoesNotMatchRegularExpression('#' . $filter . '#', 'Other\\PlainOldTest::testSomething');
+
+        // And mixing the two shapes in one shard must not break either of them.
+        $mixed = \wpmcp_ci_shard_filter(['PlainOldTest', 'WpMcp\\Tests\\Unit\\HandshakeTest']);
+        $live  = '#' . str_replace('\x5c', '\\\\', $mixed) . '#';
+
+        self::assertMatchesRegularExpression($live, 'PlainOldTest::testSomething');
+        self::assertMatchesRegularExpression($live, 'WpMcp\\Tests\\Unit\\HandshakeTest::testSomething');
+    }
+
+    /**
      * THE TWO PLACES THE SHARD COUNT IS WRITTEN MUST AGREE. The matrix decides how many shard
      * jobs GitHub starts; `WPMCP_SHARDS` decides how the suite is divided and how many logs the
      * merge demands. Drift between them is not a crash: seven jobs dividing the suite six ways
@@ -230,7 +262,10 @@ final class CiShardsTest extends TestCase
      */
     public function testTheShardMatrixAndTheDeclaredShardCountAgree(): void
     {
-        $yaml = (string) file_get_contents(WPMCP_PLUGIN_DIR . '/.github/workflows/ci.yml');
+        // Through RepoFile: `$` in multiline mode does not match before a carriage return, and
+        // this file is CRLF in a Windows working copy and LF on the runner. See RepoFile for the
+        // round this cost.
+        $yaml = RepoFile::read('.github/workflows/ci.yml');
 
         self::assertMatchesRegularExpression('/^        shard: \[([0-9, ]+)\]$/m', $yaml, 'ci.yml has no shard matrix.');
         preg_match('/^        shard: \[([0-9, ]+)\]$/m', $yaml, $m);

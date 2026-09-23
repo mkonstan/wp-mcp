@@ -214,10 +214,12 @@ jobs:
 
   shard:
     # ONE MACHINE PER SLICE OF THE SUITE (analysis/53-open-decisions.md, D18). The tier used to
-    # run on one runner for about seventy minutes; it now runs on six, each with its own wp-env
+    # run on one runner for about seventy minutes; it now runs on EIGHT, each with its own wp-env
     # container, each on a disjoint set of test CLASSES, each writing its own JUnit log. Billed
-    # minutes go up - six containers instead of one - and waiting time comes down. That trade is
-    # only worth making on a public repository, where the minutes are free.
+    # minutes go up twice over - eight containers instead of one, and about 30% more total test
+    # time because each shard builds its own fixtures - and waiting time comes down from about
+    # seventy minutes to about fifteen. That trade is only worth making on a public repository,
+    # where the minutes are free.
     #
     # THE PARTITION IS THE WHOLE RISK. Every class must be in exactly one shard: a class in none
     # never runs, every shard is green, and the gate has a hole the width of whatever was lost.
@@ -313,7 +315,7 @@ jobs:
           vendor/bin/phpunit --list-tests-xml junit-map.xml
 
           # The plan is printed by shard 1 only - it is the same on every shard by construction
-          # (ties broken by name), and six copies of it buries everything else in the log.
+          # (ties broken by name), and eight copies of it buries everything else in the log.
           if [ "${{ matrix.shard }}" = "1" ]; then
             echo "::group::the whole plan"
             php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
@@ -342,9 +344,17 @@ jobs:
         # live entirely in the unit tier. The planner puts all of them on one shard, since
         # together they cost about a second.
         #
-        # A filter that matched nothing makes PHPUnit exit non-zero ("No tests executed"), which
-        # is the right answer for a shard with no work: it means the plan and the suite disagree.
-        run: vendor/bin/phpunit --filter "${{ steps.plan.outputs.filter }}" --log-junit "${{ steps.plan.outputs.log }}"
+        # `--fail-on-empty-test-suite` IS LOAD-BEARING, and the comment that used to sit here was
+        # simply wrong: it claimed a filter matching nothing makes PHPUnit exit non-zero. It does
+        # not. PHPUnit 10.5 exits 0 and writes `<testsuites/>` unless that flag (or
+        # `failOnEmptyTestSuite` in the config) is set - measured: without it exit 0, with it
+        # exit 1. So a shard whose filter was subtly wrong was GREEN, and the only thing between
+        # that and a smaller suite passing was the merge's zero-testcase refusal. Belt and
+        # braces, minus the belt; the flag is the belt. Found by review, not by this workflow.
+        run: >-
+          vendor/bin/phpunit --fail-on-empty-test-suite
+          --filter "${{ steps.plan.outputs.filter }}"
+          --log-junit "${{ steps.plan.outputs.log }}"
 
       - name: Upload this shard's log
         # NOT `if: always()`. A shard that failed has a log that is missing whatever it never got
@@ -428,7 +438,15 @@ jobs:
         run: |
           set -euo pipefail
           ls -l shards/
+          # `--map` and `--config` add the refusal that does not depend on luck: every class the
+          # map names must appear in the merged log, unless every one of its methods is in a
+          # group phpunit.xml.dist EXCLUDES. A shard can lose a CLASS without losing a LOG - a
+          # filter that does not match what the planner meant runs the shard's other classes
+          # perfectly and never mentions this one - and before this the only thing that would
+          # have noticed was the per-group check, and only if the lost class carried a gate
+          # group.
           php bin/ci-merge-junit.php --out=junit-all.xml --expect="$WPMCP_SHARDS" \
+            --map=junit-map.xml --config=phpunit.xml.dist \
             shards/junit-shard-*-of-"$WPMCP_SHARDS".xml
 
       - name: Sprint gates actually executed - read from the merged log
@@ -445,7 +463,9 @@ jobs:
         # Free measurement, and the input to the next refresh of tests/class-timings.txt. Read it
         # knowing what it does NOT include: PHPUnit attributes only the time inside test methods,
         # so class fixture building - about three quarters of this tier - is missing from every
-        # row. The weights file adds a modelled constant for that.
+        # row. tests/class-timings.txt covers it with a model that has been corrected once
+        # against measured shard times - a flat per-integration-class constant to begin with,
+        # then every class scaled by its own shard's measured-over-modelled ratio.
         if: always()
         run: |
           php -r '

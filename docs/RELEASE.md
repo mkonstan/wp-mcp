@@ -94,19 +94,19 @@ whether this code has already been proved. See **What the gate is now** below. W
 not, it lints every PHP file, runs the unit suite on PHP 8.1 through 8.4, runs the integration
 suite against a `wp-env` container on current WordPress and again on the declared floor, and
 checks from that run's JUnit log that every test in every closed sprint group executed rather
-than skipped.
+than skipped. Only then does the `release` job build `wp-mcp.zip`, unzip it, compare every file
+against the source, lint the extracted copies, and publish a GitHub Release with the zip attached.
 
 **In `ci.yml` that current-WordPress run is SHARDED across eight machines** (D18): eight
 containers, each running a disjoint set of test classes balanced by measured cost, each writing
 its own JUnit log, and a merge job assembling them into the one log the per-group check reads.
 It brings the tier from about seventy minutes down to about fifteen, and costs about 30% more
 total test time because each shard builds its own fixtures. The merge refuses rather than
-improvises: a missing log, a truncated one, one with no tests in it, or the same test in two
-shards is an error that names itself. `bin/ci-shards.php --plan` prints the whole partition.
-`release.yml`'s fallback gate is deliberately NOT sharded - it runs only when no green run exists
-at all, which is rare, and one machine is simpler there. Only then does the `release` job build `wp-mcp.zip`, unzip it, compare every
-file against the source, lint the extracted copies, and publish a GitHub Release with the zip
-attached.
+improvises: a missing log, a truncated one, one with no tests in it, the same test in two shards,
+or a class that is in the test map and in nobody's log - each an error that names itself.
+`bin/ci-shards.php --plan` prints the whole partition. `release.yml`'s fallback gate is
+deliberately NOT sharded: it runs only when no green run exists at all, which is rare, and one
+machine is simpler there.
 
 That job stages the install set with `cp`, so it takes `build.txt` from
 `git archive HEAD build.txt` instead - the one file in the zip that is deliberately *not*
