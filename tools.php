@@ -5931,7 +5931,9 @@ function wpmcp_menu_tools() {
             }
 
             return array(
-                'block_theme' => function_exists('wp_is_block_theme') && wp_is_block_theme(),
+                // No function_exists guard since 1.1.1: wp_is_block_theme() is @since 5.9 and
+                // the declared floor is 6.9, so the guard could only ever answer the same way.
+                'block_theme' => wp_is_block_theme(),
                 'locations'   => $locations,
                 'menus'       => $menus,
             );
@@ -5965,6 +5967,15 @@ function wpmcp_menu_tools() {
 
             // Draft items only for a caller who can edit theme options, as core's REST endpoint.
             $rows = wpmcp_menu_rows($menu, current_user_can('edit_theme_options'));
+
+            // EVERY LINKED POST AND TERM IN TWO QUERIES, before the tree reads them one at a
+            // time (scout 49, candidate 5; taken in 1.1.1 because the 6.9 floor removed the
+            // `function_exists` guard that was its only cost). `update_menu_item_cache()` is
+            // `@since 6.1` and primes exactly what wpmcp_menu_item_visible() and
+            // wpmcp_menu_linked_title() then ask for per item - get_post() and get_term() -
+            // so a 66-item menu stops issuing 66 pairs of queries. It changes no value: it is
+            // the cache, not the read.
+            update_menu_item_cache($rows);
 
             return wpmcp_menu_summary($menu, count($rows), get_registered_nav_menus(), get_nav_menu_locations())
                 + array('items' => wpmcp_menu_tree($rows));

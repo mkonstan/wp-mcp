@@ -12,6 +12,13 @@
  * `restore-revision` filters on it (analysis/52-scout-version-coverage.md §4.1;
  * analysis/53-open-decisions.md D2).
  *
+ * THE FLOOR IS NOW A CHOICE AND NOT A DERIVATION (1.1.1, D2). 6.4 was the oldest version the
+ * code would run on; 6.9 is where the Abilities API begins, which is what the ecosystem has
+ * converged on, and supporting below it bought a version question on every feature and a
+ * 91-minute CI job for sites unlikely to run an agent. Nothing about THIS test changes: it
+ * reads the number out of the header and holds the other three places to it, which is exactly
+ * what makes moving the floor a four-line change instead of a hunt.
+ *
  * So the floor now has to agree with itself in four places, and the fourth is the one that
  * makes the other three true:
  *

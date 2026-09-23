@@ -12,11 +12,11 @@ PHP files, a token table, and one REST route that stays dormant until a live tok
 | | |
 |---|---|
 | PHP | 8.1 or newer |
-| WordPress | 6.4 or newer |
+| WordPress | 6.9 or newer |
 | HTTPS | required; the endpoint refuses plaintext with 403 before it reads the token |
 
 **What works at which WordPress version.** One row, because there is nothing to put in a
-second: the whole documented tool set works at 6.4, and every version above it. If a later
+second: the whole documented tool set works at 6.9, and every version above it. If a later
 release gates a feature on a newer WordPress, that feature gets its own row here and says so
 in its own tool description - WordPress has ONE `Requires at least` field for the whole
 plugin, not one per feature, so a per-feature condition has to be documented rather than
@@ -24,27 +24,33 @@ implied.
 
 | WordPress | What you get |
 |---|---|
-| 6.4 and newer | Everything this README documents |
+| 6.9 and newer | Everything this README documents |
 
-**Where 6.4 comes from.** `_wp_put_post_revision`'s second argument, `$post_id`, which core
-records as `@since 6.4.0` (`wp-includes/revision.php`). `restore-revision` hooks that action
-and filters on that argument to know which revisions core wrote while restoring. Below 6.4
-the action fires with one argument, the filter never matches, and the tool returns
-`pre_restore_revision_id` and `new_revision_id` as `null` on every call - two fields this
-README documents. That is not an error and not a wrong answer; it is a silently empty one,
-which is worse. Everything else the plugin calls is older, the nearest being
-`wp_get_environment_type()`'s `'local'` value at 5.5.1 and `wp_new_comment()`'s
-`comment_type` argument at 5.5.0.
+**Where 6.9 comes from, and it is a choice rather than a derivation.** Earlier releases of
+this plugin derived the floor from the oldest core function they called - 5.5, then 6.4, the
+latter because `_wp_put_post_revision`'s `$post_id` argument is `@since 6.4.0` and
+`restore-revision` filters on it. That is still the oldest WordPress the code would RUN on,
+and it is no longer the floor. 6.9 is where the Abilities API begins
+(`wp_register_ability()`, `@since 6.9.0`), which is the surface the WordPress ecosystem has
+converged on: core registers three abilities, Rank Math 24, Gravity Forms 32 behind a flag,
+and ACF Pro 6.8.10 ships its own for field groups, post types, taxonomies and per-post-type
+CRUD. Supporting below it costs a version question on every future feature, and a 91-minute
+CI job, to serve sites that are unlikely to run an agent at all. W3Techs, 23 September 2026:
+62.6% of WordPress sites run 7.x and 30.4% the whole of 6.x, so a 6.9 floor keeps the
+overwhelming majority and drops versions that are updating themselves out of existence.
 
-**And 6.4 is executed, not asserted.** `Requires at least` is a gate, not a hint: core's
+**And 6.9 is executed, not asserted.** `Requires at least` is a gate, not a hint: core's
 `validate_plugin_requirements()` refuses to ACTIVATE a plugin below the version it declares,
 so a number nobody runs is a promise nobody has checked. CI runs the integration suite twice
 on every change to the plugin's code - once against the current WordPress release and once
-against **WordPress 6.4 on PHP 8.2**, which is the pairing this floor is actually tested at. 6.4 shipped the same
-month as PHP 8.3, so 8.2 is the newest PHP that combination has ever been sensible on; the
-`Requires PHP: 8.1` floor is proven separately by the unit tier, which runs on 8.1, 8.2, 8.3
-and 8.4. Declaring a combination nobody can execute is exactly the mistake the previous
-"WordPress 5.5 with PHP 8.1" claim made.
+against **WordPress 6.9 on PHP 8.4**, which is the pairing this floor is actually tested at.
+6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so 8.4 is the newest PHP that was
+in active support when that WordPress was released - the same rule that made the old 6.4 leg
+run on 8.2 rather than on the PHP of its own release month. 6.9 itself requires PHP 7.2.24
+(`$required_php_version` in its `wp-includes/version.php`), so 8.4 is well inside what it
+supports, and the `Requires PHP: 8.1` floor is proven separately by the unit tier, which runs
+on 8.1, 8.2, 8.3 and 8.4. Declaring a combination nobody can execute is exactly the mistake
+the "WordPress 5.5 with PHP 8.1" claim of 1.0 made.
 
 HTTPS is not optional, and behind a proxy it needs one line of configuration. Read
 [HTTPS enforcement depends on your proxy](#https-enforcement-depends-on-your-proxy)

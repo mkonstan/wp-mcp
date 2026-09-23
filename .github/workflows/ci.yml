@@ -505,16 +505,20 @@ jobs:
     # copies; the scout that measured this (analysis/52 §10.2) names the rename as the way
     # to break the release gate without noticing.
     #
-    # PHP 8.2, NOT 8.3, and that pairing is stated in the README beside the requirement:
-    # WordPress 6.4 shipped in November 2023, the same month as PHP 8.3, and declaring a
-    # combination nobody can execute is the exact mistake the old "5.5 + PHP 8.1" claim
-    # made. WP_ENV_PHP_VERSION sets the container's PHP; the 8.2 above is the runner's,
-    # which only runs PHPUnit and Guzzle.
+    # PHP 8.4, NOT 8.5, and that pairing is stated in the README beside the requirement:
+    # WordPress 6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so 8.4 is the
+    # newest PHP that was in active support when that WordPress was released - the same rule
+    # that made the old 6.4 leg run on 8.2 rather than on 8.3. 6.9's own
+    # $required_php_version is 7.2.24, so 8.4 is well inside what it supports, and
+    # `wordpress:php8.4` is a current official image (checked 2026-09-23), so wp-env can
+    # build it. Declaring a combination nobody can execute is the exact mistake the old
+    # "5.5 + PHP 8.1" claim made. WP_ENV_PHP_VERSION sets the container's PHP; the 8.2 in
+    # the setup step above is the RUNNER's, which only runs PHPUnit and Guzzle.
     #
     # NO per-group step here, deliberately. "Did every gate group run" is a property of the
     # test suite, which the current-core leg already proves; asking it twice would add
     # another 1 h 38 m for nothing (analysis/52 §10.3).
-    name: PHPUnit integration (floor WP 6.4 / PHP 8.2)
+    name: PHPUnit integration (floor WP 6.9 / PHP 8.4)
     runs-on: ubuntu-latest
     needs: decide
     if: needs.decide.outputs.reuse != 'true'
@@ -540,11 +544,11 @@ jobs:
         env:
           # wp-env reads both of these from the environment and they override
           # .wp-env.json, so this job sets the floor and .wp-env.json keeps saying
-          # "current" for the leg above. The tag is the bare `6.4` in WordPress/WordPress,
-          # which is 6.4.0 - the oldest release the header claims, and therefore the one
+          # "current" for the leg above. The tag is the bare `6.9` in WordPress/WordPress,
+          # which is 6.9.0 - the oldest release the header claims, and therefore the one
           # worth executing.
-          WP_ENV_CORE: WordPress/WordPress#6.4
-          WP_ENV_PHP_VERSION: '8.2'
+          WP_ENV_CORE: WordPress/WordPress#6.9
+          WP_ENV_PHP_VERSION: '8.4'
         run: npx --yes @wordpress/env start --debug
 
       - name: Enable pretty permalinks
@@ -559,19 +563,19 @@ jobs:
           version=$(npx --yes @wordpress/env run cli wp core version | tr -d '\r' | tail -1)
           echo "wp core version: $version"
           case "$version" in
-            6.4|6.4.*) echo "The container is at the declared floor." ;;
-            *) echo "::error::This leg is supposed to run the declared floor (6.4) and the container says ${version}. WP_ENV_CORE did not take."; exit 1 ;;
+            6.9|6.9.*) echo "The container is at the declared floor." ;;
+            *) echo "::error::This leg is supposed to run the declared floor (6.9) and the container says ${version}. WP_ENV_CORE did not take."; exit 1 ;;
           esac
-          # AND THE OTHER HALF OF THE PAIR. The README says "WordPress 6.4 on PHP 8.2" and
+          # AND THE OTHER HALF OF THE PAIR. The README says "WordPress 6.9 on PHP 8.4" and
           # FloorConsistencyTest pins that sentence to WP_ENV_PHP_VERSION - but until now
           # nothing asserted what the CONTAINER actually got. wp-env builds from
-          # `wordpress:php8.2` today; if it ever stopped honouring the variable the README
+          # `wordpress:php8.4` today; if it ever stopped honouring the variable the README
           # sentence would go false with this job still green (analysis/58 §5).
           php_version=$(npx --yes @wordpress/env run cli wp eval 'echo PHP_VERSION;' | tr -d '\r' | tail -1)
           echo "container PHP: $php_version"
           case "$php_version" in
-            8.2|8.2.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
-            *) echo "::error::This leg claims WordPress 6.4 on PHP 8.2 and the container is on PHP ${php_version}. WP_ENV_PHP_VERSION did not take, and the README sentence is now false."; exit 1 ;;
+            8.4|8.4.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
+            *) echo "::error::This leg claims WordPress 6.9 on PHP 8.4 and the container is on PHP ${php_version}. WP_ENV_PHP_VERSION did not take, and the README sentence is now false."; exit 1 ;;
           esac
           npx --yes @wordpress/env run cli wp plugin list --status=active | tee active.txt
           grep -q 'wp-mcp' active.txt || {
