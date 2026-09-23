@@ -22,13 +22,22 @@
  * and it makes each assertion slightly weaker than the thing it means to say. Reading through
  * here costs one call and leaves the patterns saying precisely what they mean.
  *
+ * AND IT LIVES IN Support/, NOT unit/, FOR A REASON THAT COST A CI RUN. The autoloader maps
+ * `WpMcp\Tests\` to `tests/`, so a class named `WpMcp\Tests\Unit\RepoFile` resolves to
+ * `tests/Unit/RepoFile.php` with a capital U - which a case-insensitive Windows filesystem finds
+ * and a Linux runner does not. Every existing class under `tests/unit/` escapes that because
+ * PHPUnit INCLUDES those files itself after scanning the directory; a helper referenced only by
+ * NAME goes through the autoloader and cannot. So the fix for "green in CI, red on a laptop" was
+ * itself green on a laptop and red in CI, on its first run - a tidy demonstration of why neither
+ * machine is the one that decides.
+ *
  * Only for files IN the repository, and only where the answer is text. A test that must see the
  * bytes as they sit on disk - a build stamp, a zip, anything hashed - reads them itself.
  */
 
 declare(strict_types=1);
 
-namespace WpMcp\Tests\Unit;
+namespace WpMcp\Tests\Support;
 
 use PHPUnit\Framework\Assert;
 

@@ -36,6 +36,7 @@ declare(strict_types=1);
 namespace WpMcp\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
+use WpMcp\Tests\Support\RepoFile;
 
 final class FloorConsistencyTest extends TestCase
 {
