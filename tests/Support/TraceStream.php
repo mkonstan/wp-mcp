@@ -48,6 +48,21 @@ final class TraceStream
     /** path => ['done' => bool, 'recover' => bool] */
     private static array $short = [];
 
+    /**
+     * PHP ASSIGNS THIS ITSELF, and it has to be declared.
+     *
+     * The stream layer sets `$context` on every wrapper instance it constructs. Since PHP 8.2 a
+     * dynamic property on a class that is not `#[AllowDynamicProperties]` is DEPRECATED, and
+     * phpunit.xml.dist has `failOnDeprecation="true"` - so without this line the unit tier is red,
+     * and it is red only where deprecations are visible. It was green on this workstation and red on
+     * all three CI legs above 8.1, because `bin/local-env.sh` runs PHP with `error_reporting=0` to
+     * silence Local's imagick startup warning: the laptop cannot see a deprecation at all. Same
+     * shape as the CRLF split RepoFile documents, from the other direction.
+     *
+     * @var resource|null
+     */
+    public $context;
+
     /** @var resource|false */
     private $handle = false;
 
