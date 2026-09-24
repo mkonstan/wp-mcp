@@ -4,9 +4,10 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.1
 
-**Unreleased.** Open for the next cycle. The platform-swap release: less code of ours doing
-what WordPress already does, a failure that says what failed, and the WordPress floor moved to
-where the ecosystem is.
+**Released 2026-09-24.** The platform-swap release: less code of ours doing what WordPress
+already does, a failure that says what failed, and the WordPress floor moved to where the
+ecosystem is. The private trace log is bounded for the first time, and CI that took an hour and
+three quarters now takes twenty-four minutes.
 
 ### Fixed: a failure now says what failed
 
