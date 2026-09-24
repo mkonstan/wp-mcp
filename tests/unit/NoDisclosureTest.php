@@ -44,8 +44,14 @@ use PHPUnit\Framework\TestCase;
 
 final class NoDisclosureTest extends TestCase
 {
-    /** Files on the request path. No throwable may be introspected in any of them. */
-    private const GUARDED = ['endpoint.php', 'tools.php', 'wp-mcp.php'];
+    /**
+     * Files on the request path. No throwable may be introspected in any of them.
+     *
+     * THE MODULES ARE ON IT TOO (1.1.2). A module builds its results inside a `run` closure
+     * the dispatcher calls, which is the position tools.php is in, so the same rule applies.
+     * They are added from the DIRECTORY rather than listed here - see guardedFiles().
+     */
+    private const GUARDED = ['endpoint.php', 'tools.php', 'wp-mcp.php', 'modules.php'];
 
     /** The one file allowed to, because it writes the result to the private log. */
     private const LOGGER = 'trace.php';
@@ -70,7 +76,7 @@ final class NoDisclosureTest extends TestCase
      */
     public function testNoThrowableMessageIsReadOnTheRequestPath(): void
     {
-        foreach (self::GUARDED as $file) {
+        foreach (self::guardedFiles() as $file) {
             $hits = self::hits($file);
 
             self::assertSame(
@@ -85,6 +91,34 @@ final class NoDisclosureTest extends TestCase
                 . ' what the caller needs. Lines: ' . implode(' | ', $hits)
             );
         }
+    }
+
+    /**
+     * GUARDED, plus every module file on disk.
+     *
+     * A DIRECTORY AND NOT A LIST, because the list is the part that gets forgotten: a module
+     * added in a later sprint is on the request path the moment its slug reaches the
+     * manifest, and a guard that has to be remembered is a guard that covers whatever was in
+     * it last.
+     *
+     * @return list<string>
+     */
+    private static function guardedFiles(): array
+    {
+        $files = self::GUARDED;
+
+        foreach (glob(\WPMCP_PLUGIN_DIR . '/modules/*.php') ?: [] as $module) {
+            $files[] = 'modules/' . basename($module);
+        }
+
+        self::assertGreaterThan(
+            count(self::GUARDED),
+            count($files),
+            'No module file was found, so no module is being guarded at all. If modules/ really'
+            . ' is empty, the seam has nothing behind it.'
+        );
+
+        return $files;
     }
 
     /**

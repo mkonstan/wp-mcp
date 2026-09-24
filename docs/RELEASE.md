@@ -48,9 +48,9 @@ tree is exactly what this whole mechanism exists to make impossible to confuse:
 ```bash
 git archive --format=zip --prefix=wp-mcp/ \
   -o ../dist/wp-mcp-1.1.0-dev-<sha>.zip <sha> \
-  wp-mcp.php endpoint.php tools.php trace.php admin.php uninstall.php build.txt \
+  wp-mcp.php endpoint.php tools.php trace.php admin.php uninstall.php modules.php build.txt \
   README.md ARCHITECTURE.md BUILD-NOTES.md CHANGELOG.md LICENSE SECURITY.md \
-  'src/*.php' 'docs/*.md'
+  'src/*.php' 'modules/*.php' 'docs/*.md'
 ```
 
 `build.txt` must be in that file list. Leave it out and the zip installs a plugin that
@@ -138,15 +138,24 @@ rather than about the number of times somebody pressed a button. `release.yml` u
 re-run the whole gate on every tag with the reasoning that `ci.yml` does not run on a tag
 push, so there was no run to depend on - which is true of the COMMIT and not of the CODE.
 
-**The code fingerprint.** `bin/code-fingerprint.sh` prints three numbers for a commit:
+**The code fingerprint.** `bin/code-fingerprint.sh` prints five numbers for a commit:
 
 | | What it hashes | What a change to it means |
 |---|---|---|
-| `code` | the git blob ids of exactly the PHP that goes into the zip - `wp-mcp.php`, `endpoint.php`, `tools.php`, `trace.php`, `admin.php`, `uninstall.php`, `src/*.php` | the shipped code moved; everything runs |
+| `code` | the git blob ids of exactly the PHP that goes into the zip - `wp-mcp.php`, `endpoint.php`, `tools.php`, `trace.php`, `admin.php`, `uninstall.php`, `modules.php`, `src/*.php`, `modules/*.php` | the shipped code moved; everything runs |
+| `core` | the same, less `modules/` | a CORE file moved. Decides nothing - see below |
+| `modules` | `modules/` alone | a module moved. Decides nothing - see below |
 | `env` | both workflows, the gate-group list, `.wp-env.json`, `composer.json`, `composer.lock`, `phpunit.xml.dist`, `.gitattributes`, `tests/`, `bin/` | the suite or the container moved; everything runs |
 | `key` | the two together | what a green run is filed under |
 
 Run it yourself before pushing if you want to know what CI will do:
+
+`core` and `modules` are a RECORD, not a decision: the reuse is still taken on `code` over the
+whole shipped set, so a module-only change re-runs everything exactly as before. What they buy is
+that `bin/code-fingerprint.sh HEAD verdict <base>` - and one step of every CI run - PRINTS which
+half moved, so "a module changed, the core did not" is a line a machine wrote. A base older than
+`modules/`, which is every commit before 1.1.2, is reported as having no comparison rather than
+being guessed at.
 
 ```bash
 bin/code-fingerprint.sh          # HEAD

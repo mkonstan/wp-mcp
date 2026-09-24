@@ -155,25 +155,29 @@ RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
 The connector shows as connected and lists its tools.
 
-A `read`-scope token gets exactly 14:
+A `read`-scope token gets exactly 15:
 
 ```
 site-info      list-posts     get-post      list-terms
 list-media     get-media      list-comments  list-revisions
 get-revision   list-menus     get-menu      list-users
-get-user       get-option
+get-user       get-option     list-content-types
 ```
 
-An `admin`-scope token gets 29, those 14 plus `create-post`, `update-post`, `delete-post`,
+`list-content-types` is the one to call first on a site you have not seen: `list-posts`
+defaults to `post_type: "post"`, so a site whose content lives in custom post types looks
+nearly empty until you know their names.
+
+An `admin`-scope token gets 30, those 15 plus `create-post`, `update-post`, `delete-post`,
 `restore-revision`, `create-term`, `delete-term`, `upload-media`, `delete-media`,
 `moderate-comment`, `reply-comment`, `add-menu-item`, `update-menu-item`,
-`remove-menu-item`, `list-plugins` and `list-themes`. It gets 35 if Enable code-edit tools is also
+`remove-menu-item`, `list-plugins` and `list-themes`. It gets 36 if Enable code-edit tools is also
 ticked in Settings > WP MCP, which adds `code-list`, `code-read`, `code-write`,
-`code-delete`, `code-history` and `code-restore`, and 36 if Allow SQL reads is ticked as
+`code-delete`, `code-history` and `code-restore`, and 37 if Allow SQL reads is ticked as
 well, which adds `sql-select`.
 Naming at least one key in Post meta keys adds `get-post-meta` to both lists - it is a read
-tool - and `set-post-meta` to the admin one, so a site with everything switched on serves 15
-and 38. Every switch is off, and the key list empty, until you say otherwise; a tool that
+tool - and `set-post-meta` to the admin one, so a site with everything switched on serves 16
+and 39. Every switch is off, and the key list empty, until you say otherwise; a tool that
 cannot run is not in the list at all.
 
 ### Undoing a code edit

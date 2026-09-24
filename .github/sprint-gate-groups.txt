@@ -32,6 +32,13 @@
 #             the site rather than from a constant. Both Local sites and the container sit at
 #             UTC, so the case that actually exercises the conversion sends an explicit
 #             +05:30 offset.
+#   sprint-seam is the first group whose subject is the plugin's own FILE LAYOUT: it proves
+#             that a module registers through a checked door, that a module cannot publish a
+#             write tool without declaring it one, and that the core assembles with no module
+#             loaded at all. One of its tests runs a SUBPROCESS of PHP over a staged copy of the
+#             plugin with modules/ deleted (tests/unit/BareCoreTest.php); it uses PHP_BINARY, so
+#             it needs nothing on PATH, but a red sprint-seam on a green everything-else is
+#             likely to be that test and not the seam.
 #   sprint-14c is the first group that shells out to GIT: it builds a real `git archive` of
 #             HEAD in a temp directory and reads the one file the plugin reads, which is the
 #             only way to prove that a built zip carries its commit without installing one.
@@ -55,3 +62,4 @@ sprint-14
 sprint-14b
 sprint-14c
 sprint-14d
+sprint-seam

@@ -2244,9 +2244,10 @@ function wpmcp_flush_expired_cb() {
  * The class loader for `src/`. Namespace `WpMcp\` -> `src/`, one class per file.
  *
  * HAND-ROLLED, BECAUSE THERE IS NO COMPOSER AT RUNTIME. This plugin ships as plain PHP
- * with no vendor directory (composer.json is dev-only), so the four flat files are
- * gaining a `src/` tree one sprint at a time and this is what finds it. Nine lines is
- * the whole cost.
+ * with no vendor directory (composer.json is dev-only), so the flat files are gaining a
+ * `src/` tree one sprint at a time and this is what finds it. Nine lines is the whole cost.
+ * It does NOT find `modules/`: those are plain function files loaded by name from
+ * wpmcp_module_manifest(), not classes, so nothing autoloads them.
  *
  * IT RETURNS SILENTLY WHEN THE FILE IS NOT THERE, which is not laziness - it is the
  * contract spl_autoload_register imposes. Several autoloaders are registered in any
@@ -2274,6 +2275,12 @@ function wpmcp_bootstrap() {
     // trace.php first: the activation hook above and endpoint.php both call into it.
     require_once plugin_dir_path(__FILE__) . 'trace.php';
     require_once plugin_dir_path(__FILE__) . 'tools.php';
+    // modules.php declares the seam - wpmcp_register_module() and the gate that checks what
+    // comes through it - so it loads BEFORE the module files, which call that function at
+    // their own file scope. tools.php loads before both because a module may call the core
+    // helpers in it; nothing in the other direction, which is the rule ARCHITECTURE states.
+    require_once plugin_dir_path(__FILE__) . 'modules.php';
+    wpmcp_module_load();
     require_once plugin_dir_path(__FILE__) . 'admin.php';
     require_once plugin_dir_path(__FILE__) . 'endpoint.php';
 }

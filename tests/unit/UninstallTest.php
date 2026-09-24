@@ -319,10 +319,18 @@ final class UninstallTest extends TestCase
     /** @return list<string> */
     private static function pluginFiles(): array
     {
-        $files = ['wp-mcp.php', 'endpoint.php', 'tools.php', 'admin.php', 'trace.php'];
+        $files = ['wp-mcp.php', 'endpoint.php', 'tools.php', 'admin.php', 'trace.php', 'modules.php'];
 
         foreach (glob(WPMCP_PLUGIN_DIR . '/src/*.php') ?: [] as $class) {
             $files[] = 'src/' . basename($class);
+        }
+
+        // A MODULE STORES OPTIONS TOO, and uninstall.php has to name them for the same reason
+        // the core's do: a deleted plugin that leaves rows behind is a deleted plugin that did
+        // not uninstall. Globbed rather than listed, so a module added later is covered without
+        // this file being remembered.
+        foreach (glob(WPMCP_PLUGIN_DIR . '/modules/*.php') ?: [] as $module) {
+            $files[] = 'modules/' . basename($module);
         }
 
         return $files;

@@ -16,7 +16,10 @@ who checks that pass on every knock and then does the work as that user.
 |---|---|
 | `wp-mcp.php` | Bootstrap, the three tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, the hourly sweep of dead tokens and old traces, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The thirty-eight tools and the helpers they share. |
+| `tools.php` | The thirty-three core tools and the helpers they share. |
+| `modules.php` | The module seam: the manifest, the loader, `wpmcp_register_module()`, and the gate that checks what comes through it. Defines no tools. |
+| `modules/menus.php` | Module: the five classic menu tools. |
+| `modules/discovery.php` | Module: `list-content-types`. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: one row per traced failure, the lookup by id, the retention sweep, and the `error_log()` fallback. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
@@ -24,7 +27,8 @@ who checks that pass on every knock and then does the work as that user.
 | `uninstall.php` | Deleting the plugin: all three tables, the options, the cron hook, and whatever 1.1.1 left in `wp-content/wpmcp/`. |
 | `build.txt` | Three git placeholders. The only `export-subst` file: `git archive` writes the commit into it when a zip is cut. |
 
-`src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
+`modules/` is loaded by `wpmcp_module_load()` from the manifest in `modules.php`; see **The
+module seam** below for what a module may and may not do. `src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
 `spl_autoload_register` in `wp-mcp.php`. There is no Composer at runtime: `composer.json`
 is dev-only and nothing is vendored, so the plugin ships as plain PHP. Code moves out of
 the flat files into `src/` when something needs a type rather than a convention, which so
@@ -60,7 +64,81 @@ Not built once at startup and kept. Assembling a few small arrays per request co
 nothing, and in exchange there is no stored state to drift or go stale, and no "the
 registry says X but the code does Y" bug class, because there is no registry. That is also
 why the functions are named `wpmcp_content_tools()` rather than `wpmcp_register_content_tools()`:
-you ask, they return a list, they register nothing.
+you ask, they return a list, they register nothing. A module's provider is the same kind of
+function; `wpmcp_register_module()` records which function to ask, not what it answered.
+
+## The module seam
+
+**The core is what is left when every module is gone.** A module is one file that adds tools
+and can be deleted without the core noticing. Two exist: `modules/menus.php` (the five classic
+menu tools) and `modules/discovery.php` (`list-content-types`).
+
+**Why, and it is not tidiness.** `tools.php` was 6,987 lines of a 12,266-line plugin - one file
+with a small core beside it. The next feature in the queue writes ACF values, which is the
+highest blast radius anything here has proposed, and a feature in its own file behind its own
+guard costs a site without ACF nothing and can break nothing there. **What the seam does NOT
+buy is a lighter review.** Scrutiny follows blast radius, not file boundaries: five of the six
+reviewed sprints in this project failed their first review with a green test suite and not one
+of those defects was in the dispatch path. A locked core makes a diff smaller. It does not make
+new code safer.
+
+**How a module registers.** One statement, at the foot of the file:
+
+```php
+wpmcp_register_module('menus', 'wpmcp_menu_tools');
+```
+
+A slug, and a callable that returns the same `array('write' => ..., 'annotations' => ...,
+'description' => ..., 'inputSchema' => ..., 'run' => ...)` shape `tools.php` uses. The file is
+loaded by `wpmcp_module_load()` from a literal manifest in `modules.php`, called by
+`wpmcp_bootstrap()`. **The manifest is not filterable and there is no hook that adds a file to
+it** - a hook that loaded arbitrary PHP would be a remote-code-execution surface wearing the
+clothes of extensibility. Third-party tools arrive through the `wpmcp_tools` filter, which adds
+arrays rather than files.
+
+**What a module may call:** WordPress, and four helpers in `tools.php` - `wpmcp_cannot()`,
+`wpmcp_decode_specialchars()`, `wpmcp_post_type_ok()` and `wpmcp_raw_title()`.
+
+**What it may not:** anything in `endpoint.php`, `admin.php` or `trace.php`. A module does not
+reach into the request path, the settings screen or the log. Nothing in the core calls into a
+module either, which is the property `tests/unit/BareCoreTest.php` gates: it copies the core
+into a temporary directory WITHOUT `modules/`, loads it in a fresh PHP process, and asserts the
+registry comes back as exactly the 24 core tools. A core file that needed a module would fatal
+there and name the symbol.
+
+**A module's own availability guard goes at the top of its own file**, before the registration
+call - `function_exists('acf')` and the like - so a module that cannot work does not register
+and its tools do not exist. Not "exist but refuse": absent, so `tools/call` answers the same
+`-32602 Unknown tool` a name nobody registered gets. That is the same rule the code tools,
+`sql-select` and the post-meta pair already obey, for the same reason: a distinct "it exists
+but is off" tells an unauthorised caller a fact about this site's configuration for free.
+
+**And nothing a module returns is trusted.** Registration records a callable and checks nothing;
+the gate is on the way OUT, in `wpmcp_module_tools()`, and it is the same function a
+third-party filter entry has always faced - `wpmcp_registry_reject_reason()` in `endpoint.php`,
+one function, called from both paths. **A module that returns a write tool without declaring
+`write` publishes nothing:** the entry is dropped, it is absent from `tools/list`, it cannot be
+called, and a `module_reject` event names the module, the tool and the reason. The same for a
+`write` that is truthy but not a boolean, a missing `description` or `inputSchema`, an
+incomplete `annotations` block, a `run` that is not callable, and a description over 1,000
+characters. Two refusals are the module path's own: a **provider** that cannot be called or does
+not return an array drops the whole module, and a **name the core or an earlier module already
+uses** is refused - `array_merge` lets a later string key win, so without that check a module
+could replace `delete-post` with its own closure, and a built-in's `write` flag is the gate a
+read-scope token is refused on.
+
+`wpmcp_register_module()` is a public function and anything on the site can call it. That is
+deliberate: the gate is identical to the filter's, so the most a third party gains by using this
+door is the right to be checked the same way, and it is what lets
+`tests/integration/ModuleSeamTest.php` register a deliberately broken module on a real site and
+prove its tools do not exist. **The trust boundary is the gate, never the door.**
+
+**A core edit is a visible event.** `bin/code-fingerprint.sh` hashes the shipped PHP three
+times - `core` over everything but `modules/`, `modules` over `modules/` alone, and `code` over
+the union, which is still the only number the CI reuse decision reads. `bin/code-fingerprint.sh
+HEAD verdict <base>` prints which half moved, and CI prints it per run, so "a module changed,
+the core did not" is a line a machine wrote rather than a claim in a commit message. It gates
+nothing; it is the record.
 
 ## What happens on a request
 
@@ -166,13 +244,16 @@ for writes 40-400 KB rows.
 
 **And two things the first version of that figure left out.** Column data is not what a disk
 carries: MEASURED by planting 500 rows at exactly those caps on MySQL 8.4 (InnoDB
-`ROW_FORMAT=Dynamic`), the worst case at the cap is about **48 MB of tablespace** - 23,888 bytes a
+`innodb_file_per_table` and `ROW_FORMAT=Dynamic`), the worst case at the cap is about **48 MB of tablespace** - 23,888 bytes a
 row, because an 8 KiB `stack` does not fit in half a 16 KB page and goes off-page into a page of
 its own - and about **27 MB in a `mysqldump`**, where escaping costs 4.2% rather than the 10-15% a
 first estimate assumed. And the tablespace number is a HIGH-WATER MARK: deleting rows frees them
 for reuse, which is what bounds the table, but does not hand the space back to the filesystem
 (measured: the file stayed at 12 MB after the rows went, and only `OPTIMIZE TABLE` returned it to
-112 KB). Every one of those figures also has a CONDITION - the sweep removes at most 100,000 rows
+112 KB) **whose two conditions are the ones in brackets above**: on a host that keeps InnoDB in
+the shared `ibdata1` tablespace, `OPTIMIZE TABLE` frees pages for reuse inside that file and
+returns nothing at all to the filesystem, and under the older `COMPACT` row format the first 768
+bytes of the stack stay in the row with the remainder off-page, which moves the per-row figure. Every one of those figures also has a CONDITION - the sweep removes at most 100,000 rows
 an hour, so the ceiling holds up to about **27 traced failures a second sustained**, roughly ten
 times an AI client retry-looping at ~350 ms a call; above it the table grows until the rate drops.
 

@@ -411,7 +411,7 @@ jobs:
 
       - name: Lint all plugin files
         run: |
-          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php src/*.php; do
+          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php modules.php src/*.php modules/*.php; do
             php -l "$f"
           done
 
@@ -435,6 +435,11 @@ jobs:
         # namespace needs this to become `cp -r src dist/wp-mcp/` and the gate's file list
         # to become a find. There is no nested class to justify that yet.
         #
+        # `cp modules/*.php` is flat for a stronger reason: modules.php loads each module by the
+        # literal path in wpmcp_module_manifest(), and every one of those is `modules/<name>.php`.
+        # A module in a subdirectory would need the manifest to name it, so a `find` here would
+        # copy files the plugin does not load - and the gate below would still pass.
+        #
         # build.txt IS THE ONE FILE THAT IS NOT COPIED, and it is the one file that must
         # not be: `cp` would put the literal placeholders in the zip and the published
         # release would report its build as `source`, which is what a git checkout says.
@@ -443,10 +448,11 @@ jobs:
         # every other file is compared byte for byte against the source, and this one
         # cannot be.
         run: |
-          mkdir -p dist/wp-mcp/src dist/wp-mcp/docs dist/stamp
-          cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php dist/wp-mcp/
+          mkdir -p dist/wp-mcp/src dist/wp-mcp/modules dist/wp-mcp/docs dist/stamp
+          cp wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php modules.php dist/wp-mcp/
           cp LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md BUILD-NOTES.md dist/wp-mcp/
           cp src/*.php dist/wp-mcp/src/
+          cp modules/*.php dist/wp-mcp/modules/
           cp docs/*.md dist/wp-mcp/docs/
           # `-f -` is explicit on purpose: GNU tar on Debian and Ubuntu defaults its
           # archive to stdin, and nothing else does. On another runner image, or with
@@ -465,9 +471,9 @@ jobs:
           mkdir -p verify
           unzip -q dist/wp-mcp.zip -d verify
           fail=0
-          files="wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php"
+          files="wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php modules.php"
           files="$files LICENSE README.md CHANGELOG.md SECURITY.md ARCHITECTURE.md"
-          files="$files BUILD-NOTES.md $(ls src/*.php) $(ls docs/*.md)"
+          files="$files BUILD-NOTES.md $(ls src/*.php) $(ls modules/*.php) $(ls docs/*.md)"
           for f in $files; do
             if ! cmp -s "$f" "verify/wp-mcp/$f"; then
               echo "MISMATCH: $f differs from the zipped copy"; fail=1
@@ -497,7 +503,7 @@ jobs:
           # it, by a number, months later.
           echo "code fingerprint of this build: $(bash bin/code-fingerprint.sh HEAD code)"
           # Every PHP file the plugin loads at runtime is in the zip and parses there.
-          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php $(ls src/*.php); do
+          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php modules.php $(ls src/*.php) $(ls modules/*.php); do
             php -l "verify/wp-mcp/$f" || fail=1
           done
           # The same two markers the lint job guards, asserted on the EXTRACTED copy:

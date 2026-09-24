@@ -220,6 +220,10 @@ final class ToolContractTest extends TestCase
             'get-option'       => [false, true,  false],
             'list-plugins'     => [false, true,  false],
             'list-themes'      => [false, true,  false],
+            // Sprint SEAM. list-content-types reads the post-type and taxonomy registries and
+            // counts rows. Nothing destroyed, the same answer twice for the same site, and no
+            // other server reached.
+            'list-content-types' => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

@@ -70,6 +70,39 @@ jobs:
           echo "code fingerprint: $code"
           echo "env  fingerprint: $env"
           echo "run key:          $key"
+          echo "core half:        $core"
+          echo "modules half:     $modules"
+
+      - name: Which half of the shipped PHP moved - the core, or a module?
+        # D23 CONDITION 4, AND IT DECIDES NOTHING. The reuse decision above is taken on the
+        # whole-code fingerprint exactly as before, so a module-only change still re-runs
+        # everything; `|| true` below is deliberate and this step cannot turn a run red. What it
+        # buys is that "a module changed, the core did not" is PRINTED by the machine that hashed
+        # both halves instead of claimed in a commit message.
+        #
+        # A BASE REF IS NOT ALWAYS THERE, and the step says so rather than guessing. checkout
+        # fetches depth 1, so the parent commit is not in the clone at all; the base named by the
+        # event is fetched shallowly, and a schedule or a manual dispatch names none. The script
+        # also refuses a base older than modules/ - every commit before 1.1.2 - and prints which
+        # case it hit, because a verdict that silently means "nothing to compare" is the one
+        # failure this mechanism must not have.
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -uo pipefail
+          {
+            echo "### Which half of the shipped PHP moved"
+            echo
+            echo '```'
+            if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              echo "No base ref for a ${GITHUB_EVENT_NAME} event, so there is nothing to compare."
+              bash bin/code-fingerprint.sh HEAD || true
+            else
+              git fetch --no-tags --depth=1 origin "$BASE" >/dev/null 2>&1 || true
+              bash bin/code-fingerprint.sh HEAD verdict "$BASE" 2>&1 || true
+            fi
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Is a green full run already on file for this fingerprint?
         id: reuse
@@ -147,7 +180,7 @@ jobs:
       - name: php -l all plugin files
         run: |
           status=0
-          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php src/*.php; do
+          for f in wp-mcp.php endpoint.php admin.php tools.php trace.php uninstall.php modules.php src/*.php modules/*.php; do
             echo "::group::php -l $f"
             php -l "$f" || status=1
             echo "::endgroup::"
@@ -379,6 +412,53 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           overwrite: true
+
+      - name: A RUNTIME deprecation from this plugin fails the shard
+        # THE BLIND SPOT THIS CLOSES, and it is a measured one. The unit tier's
+        # `--display-deprecations` run closes the DECLARATION-time class only: a deprecation
+        # raised while a tool is RUNNING, on a path that exists only against a real WordPress, is
+        # invisible everywhere else we look. bin/local-env.sh sets `error_reporting=0` on the
+        # developer workstation - it has to, to hide an imagick startup warning that would trip
+        # beStrictAboutOutputDuringTests - and both Local sites run `E_ALL & ~E_DEPRECATED` with
+        # WP_DEBUG off. Their PHP logs, 125 MB and 104 MB, hold ZERO lines matching "deprecated":
+        # masking, not absence.
+        #
+        # .wp-env.json sets WP_DEBUG and WP_DEBUG_LOG, so this container is the one place in the
+        # whole pipeline where a runtime deprecation is written down. This step reads it.
+        #
+        # SCOPED TO THIS PLUGIN, and that is not politeness: on a container with other code the
+        # log fills with deprecations nobody here can fix, and a step that goes red for somebody
+        # else's plugin is a step that gets deleted. `Deprecated:.*wp-mcp` matches the line PHP
+        # writes, whose tail is the file that raised it - .../plugins/wp-mcp/tools.php on line N.
+        #
+        # ON SUCCESS ONLY. A shard whose tests already failed has a more interesting failure, and
+        # a second red on top of it hides which one to read first.
+        run: |
+          set -uo pipefail
+          npx --yes @wordpress/env run cli wp eval '
+            $f = WP_CONTENT_DIR . "/debug.log";
+            if (!is_file($f)) { echo "NO-DEBUG-LOG\n"; return; }
+            foreach ((array) file($f) as $line) {
+              if (stripos($line, "deprecated") !== false) { echo rtrim($line), "\n"; }
+            }
+          ' > deprecations.txt 2>&1 || true
+
+          if grep -q 'NO-DEBUG-LOG' deprecations.txt; then
+            echo "::warning title=No debug.log::WP_DEBUG_LOG wrote nothing, so this step proved" \
+                 "nothing. Check .wp-env.json still sets WP_DEBUG and WP_DEBUG_LOG."
+            exit 0
+          fi
+
+          if grep -E 'Deprecated:.*wp-mcp' deprecations.txt; then
+            echo "::error title=Runtime deprecation in wp-mcp::The lines above were raised by this" \
+                 "plugin while the suite ran. Neither the workstation nor the unit tier can see" \
+                 "them; this step is the only place they appear."
+            exit 1
+          fi
+
+          echo "No wp-mcp deprecation in the container's debug.log."
+          # Somebody else's, printed and not failed: it is worth seeing and it is not ours.
+          grep -c 'Deprecated' deprecations.txt || true
 
       - name: WordPress logs (on failure)
         if: failure()
@@ -678,6 +758,53 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           overwrite: true
+
+      - name: A RUNTIME deprecation from this plugin fails the shard
+        # THE BLIND SPOT THIS CLOSES, and it is a measured one. The unit tier's
+        # `--display-deprecations` run closes the DECLARATION-time class only: a deprecation
+        # raised while a tool is RUNNING, on a path that exists only against a real WordPress, is
+        # invisible everywhere else we look. bin/local-env.sh sets `error_reporting=0` on the
+        # developer workstation - it has to, to hide an imagick startup warning that would trip
+        # beStrictAboutOutputDuringTests - and both Local sites run `E_ALL & ~E_DEPRECATED` with
+        # WP_DEBUG off. Their PHP logs, 125 MB and 104 MB, hold ZERO lines matching "deprecated":
+        # masking, not absence.
+        #
+        # .wp-env.json sets WP_DEBUG and WP_DEBUG_LOG, so this container is the one place in the
+        # whole pipeline where a runtime deprecation is written down. This step reads it.
+        #
+        # SCOPED TO THIS PLUGIN, and that is not politeness: on a container with other code the
+        # log fills with deprecations nobody here can fix, and a step that goes red for somebody
+        # else's plugin is a step that gets deleted. `Deprecated:.*wp-mcp` matches the line PHP
+        # writes, whose tail is the file that raised it - .../plugins/wp-mcp/tools.php on line N.
+        #
+        # ON SUCCESS ONLY. A shard whose tests already failed has a more interesting failure, and
+        # a second red on top of it hides which one to read first.
+        run: |
+          set -uo pipefail
+          npx --yes @wordpress/env run cli wp eval '
+            $f = WP_CONTENT_DIR . "/debug.log";
+            if (!is_file($f)) { echo "NO-DEBUG-LOG\n"; return; }
+            foreach ((array) file($f) as $line) {
+              if (stripos($line, "deprecated") !== false) { echo rtrim($line), "\n"; }
+            }
+          ' > deprecations.txt 2>&1 || true
+
+          if grep -q 'NO-DEBUG-LOG' deprecations.txt; then
+            echo "::warning title=No debug.log::WP_DEBUG_LOG wrote nothing, so this step proved" \
+                 "nothing. Check .wp-env.json still sets WP_DEBUG and WP_DEBUG_LOG."
+            exit 0
+          fi
+
+          if grep -E 'Deprecated:.*wp-mcp' deprecations.txt; then
+            echo "::error title=Runtime deprecation in wp-mcp::The lines above were raised by this" \
+                 "plugin while the suite ran. Neither the workstation nor the unit tier can see" \
+                 "them; this step is the only place they appear."
+            exit 1
+          fi
+
+          echo "No wp-mcp deprecation in the container's debug.log."
+          # Somebody else's, printed and not failed: it is worth seeing and it is not ours.
+          grep -c 'Deprecated' deprecations.txt || true
 
       - name: WordPress logs (on failure)
         if: failure()

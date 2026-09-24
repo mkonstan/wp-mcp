@@ -236,7 +236,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Thirty-eight tools. Each declares the four MCP annotation hints, so a client can tell a
+Thirty-nine tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -255,6 +255,7 @@ listing from a deletion before it asks you to approve anything.
 | `list-users` | read | yes | no | yes | no |
 | `get-user` | read | yes | no | yes | no |
 | `get-option` | read | yes | no | yes | no |
+| `list-content-types` | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -376,13 +377,39 @@ Two things make that true:
 a name, or the `{id, name, slug}` object itself. An empty list clears that taxonomy - except
 that WordPress gives a post left with no category its default category.
 
+### What kinds of content are here
+
+`list-content-types` answers that, and it is the tool to call first on a site you have not seen.
+`list-posts` defaults to `post_type: "post"` and `list-terms` defaults to `category`, so a site
+whose content lives in custom post types looks nearly empty until you know their names - which is
+exactly what happened to a client working blind against a real site: one item back, five custom
+types it had no way to see.
+
+It takes no arguments and returns `post_types` and `taxonomies`.
+
+Each post type: `name` (the value `list-posts` and `get-post` take for `post_type`), `label`,
+`singular_label`, `description`, `hierarchical`, `public`, `show_in_rest`, `rest_base` (null when
+it is not in REST), `taxonomies` (the taxonomy names attached to it) and `counts` - a status to a
+number of posts, carrying only the statuses your capabilities let you see listed, so a token
+bound to an Author is told how many are published and nothing about anybody's drafts. The counts
+do not add in your own unpublished posts, which `list-posts` finds through a second query.
+
+Each taxonomy: the same first eight fields, plus `post_types` (the types it covers) and `terms`
+(how many terms it holds, including the empty ones - which is the number that tells you whether
+somebody set a taxonomy up and never filled it).
+
+**Only what WordPress itself treats as viewable is listed**, and never `attachment` - use
+`list-media` for media. A post type or taxonomy some plugin registered for its own bookkeeping is
+absent on purpose: an unfiltered list is a plugin inventory by another route, and `list-plugins`
+is admin-scope for a reason. `list-terms` still accepts a private taxonomy's name if you know it.
+
 ### Finding content
 
 `list-posts` is the search surface. Every argument is optional:
 
 | Argument | Takes | Default |
 |---|---|---|
-| `post_type` | one post type this tool serves | `post` |
+| `post_type` | one post type this tool serves - `list-content-types` names them | `post` |
 | `status` | one post status, a plugin's own included | every status the caller may see |
 | `search` | text matched against title, excerpt and content; a leading `-` on a word **excludes** it | - |
 | `category`, `tag` | a slug or a term id | - |
@@ -854,7 +881,7 @@ exactly those caps on MySQL 8.4 with InnoDB `ROW_FORMAT=Dynamic`:
 | At the 2,000-row cap | |
 |---|---|
 | column data | under 26 MB |
-| **InnoDB tablespace** | **about 48 MB** - 23,888 bytes a row, because an 8 KiB stack does not fit in half a 16 KB page and goes off-page into a page of its own |
+| **InnoDB tablespace** | **about 48 MB** - 23,888 bytes a row, because an 8 KiB stack does not fit in half a 16 KB page and goes off-page into a page of its own. Assumes `innodb_file_per_table`, on since MySQL 5.6, and `ROW_FORMAT=Dynamic` |
 | **`mysqldump`** | **about 27 MB** - 13,502 bytes a row; escaping backslashes and newlines costs 4.2%, not the 10-15% you might assume |
 
 **Two conditions on those numbers, and both matter.** The sweep removes at most **100,000 rows an
@@ -864,7 +891,11 @@ tablespace figure is a **high-water mark**: deleting rows frees them for reuse, 
 bounds the table, but it does not hand the space back to the filesystem - measured, the file
 stayed at 12 MB after the 500 rows were deleted and only `OPTIMIZE TABLE wp_wpmcp_traces`
 returned it to 112 KB. A site that has had one bug storm keeps the file size until it rebuilds
-the table.
+the table - **and on a host that keeps InnoDB in the shared `ibdata1` tablespace rather than a
+file per table, `OPTIMIZE TABLE` frees those pages for reuse inside that one file and returns
+nothing at all to the filesystem, while under the older `COMPACT` row format the first 768 bytes
+of each stack stay in the row and only the rest goes off-page, which moves the per-row number
+above.**
 
 In practice all of this is far smaller: the measured mean entry is 2,283 bytes, small enough to
 live inside its own page, and a development site under continuous suite load wrote 69 failures a
@@ -1140,6 +1171,12 @@ the built-ins are assembled and before scope filtering. An entry must declare a 
 `write`, a string `description`, an array `inputSchema`, all four boolean `annotations`,
 and a callable `run`. An entry missing any of them is refused at registration rather than
 given a default, and it cannot re-declare a built-in's name.
+
+Since 1.1.2 the plugin's own feature files register through the same checks. The menu tools
+live in `modules/menus.php` and `list-content-types` in `modules/discovery.php`, each one line
+of `wpmcp_register_module()` and nothing trusted: the entries a module returns meet the very
+list above, on the way out of registration, and a rejected one is named in the log with its
+reason. See **The module seam** in ARCHITECTURE.md. It changes nothing for this filter.
 
 Two things about the description. A `description`, or any
 `inputSchema.properties.*.description`, over 1,000 characters is refused: clients cap

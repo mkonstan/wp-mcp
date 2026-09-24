@@ -4,8 +4,87 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.2
 
-**Unreleased.** The private trace log stops being a file. Still planned for this cycle: the tool
-surface split out of `tools.php` behind a declared seam.
+**Unreleased.** The private trace log stops being a file, and the tool surface starts moving out
+of `tools.php` behind a declared seam.
+
+### Added: `list-content-types`, so a site's real content is findable
+
+- **New read tool, `list-content-types`.** It takes no arguments and returns `post_types` and
+  `taxonomies`: for each post type its `name`, `label`, `singular_label`, `description`,
+  `hierarchical`, `public`, `show_in_rest`, `rest_base`, the `taxonomies` attached to it and
+  `counts` - a status to a number of posts; for each taxonomy the same first eight fields plus the
+  `post_types` it covers and how many `terms` it holds, empty ones included.
+- **It exists because of a measured mislead, and it was the worst one on the list.** A client
+  working blind against a real customer site called `list-posts`, got ONE item back, and had no
+  way to learn that the site's content sat in five custom post types - `list-posts` defaults to
+  `post_type: "post"` and nothing in the tool surface named anything else. It eventually found
+  them by reverse-engineering the `object` field of `get-menu` results. `list-terms` defaults to
+  `category`, which on that site held a single term, because none of the five types registered
+  one. A migration cannot copy post types it cannot discover.
+- **A tool rather than a field inside `site-info`,** because a cold client reads the tool LIST: an
+  inventory buried in another tool's result is exactly as invisible as the custom types were. And
+  taxonomies in the SAME tool, because "what kinds of content are here" is one question and two
+  tools would be two chances not to be called.
+- **The counts say only what your capabilities let you see listed.** They carry the statuses
+  `list-posts` would query for you and no others, so a token bound to an Author is told how many
+  posts are published and nothing about anybody's drafts. They do not add in your own unpublished
+  posts, which `list-posts` finds through a second query - a count that silently mixed two
+  visibility rules would be worse than one that states its rule.
+- **Only post types and taxonomies WordPress itself treats as viewable are listed, and never
+  `attachment`.** Every name it gives is one `list-posts` and `get-post` accept, so the answer is
+  usable and not just informative; and a type or taxonomy a plugin registered for its own
+  bookkeeping is absent on purpose, because an unfiltered list is a plugin inventory by another
+  route and `list-plugins` is admin-scope for a reason.
+- **The catalog is 39 tools.**
+
+### Changed: the menu tools moved to their own file, behind a seam that checks them
+
+- **Nothing about the menu tools changed** - not an argument, not a result, not a refusal. They
+  are the same 1,089 lines, byte for byte, in `modules/menus.php` instead of in the middle of
+  `tools.php`. The two test classes that cover them were run before and after and neither was
+  edited: 18 cases and 273 assertions on `--group sprint-13`, 3 and 11 on `MenuOrphanOrderTest`,
+  identical on both development sites.
+- **One observable consequence, and only one:** the menu tools now appear at the END of
+  `tools/list` rather than between the comment tools and the inventory tools. `tools/list` pages
+  at 50 and the catalog is 39, so there is no second page and no cursor is affected. MCP clients
+  treat the listing as a set.
+- **`tools.php` is 5,896 lines instead of 6,987**, and a new file, `modules.php`, carries the
+  seam: the manifest of module files, the loader, `wpmcp_register_module()`, and the gate.
+- **The seam checks rather than trusts, which is the whole of its security value.** A module's
+  entries face the SAME function a third-party `wpmcp_tools` filter entry has always faced -
+  `wpmcp_registry_reject_reason()`, one function, called from both paths - applied on the way OUT
+  of registration. **A module that returns a write tool without declaring `write` publishes
+  nothing:** the entry is dropped, absent from `tools/list`, uncallable, and named in a new
+  `module_reject` auth event with the module, the tool and the reason. Two refusals are the module
+  path's own - a provider that cannot be called or does not return an array drops the whole
+  module, and a name the core already uses is refused, because `array_merge` would otherwise let a
+  module replace `delete-post` with its own closure and a built-in's `write` flag is the gate a
+  read-scope token is refused on.
+- **What it does NOT buy is a lighter review, and that is written down where it will be read.**
+  Five of the six reviewed sprints in this project failed their first review with a green suite
+  and not one of those defects was in the dispatch path. Scrutiny follows blast radius, not file
+  boundaries. A locked core makes a diff smaller; it does not make new code safer.
+- **A new auth event, `module_reject`** - `module`, `tool`, `reason` - beside the existing
+  `registry_reject`, which keeps meaning "the `wpmcp_tools` filter did this".
+- **ARCHITECTURE.md gains "The module seam"**: how a module registers, what it may call
+  (WordPress plus four helpers in `tools.php`), what it may not (anything in `endpoint.php`,
+  `admin.php` or `trace.php`), and what happens to one that does not declare `write`.
+- **Nothing changed for the `wpmcp_tools` filter or for the two opt-in switches.** The code tools
+  and `sql-select` are gated exactly where and how they were, including that a switched-off tool
+  does not EXIST rather than reporting itself disabled.
+- **For anyone building a zip by hand: `modules.php` and `modules/*.php` now have to be in it.**
+  `docs/RELEASE.md` has the updated file list. The release workflow and its extraction gate were
+  updated with it.
+
+### Fixed: a one-frame stack trace no longer hides that the rest of the stack is gone
+
+- **When the innermost frame alone is bigger than the whole 8 KiB stack budget, the truncation
+  marker now says that every other frame went, `{main}` included.** It used to read `#0 ...[frame
+  cut, 8072 of 20003 bytes kept, under the 8192-byte stack cap]` and nothing else - which an
+  operator has every reason to read as "one very long frame, nothing else to see", when in fact
+  the stack had been reduced to a fragment of its innermost call. The other truncation path has
+  always counted what it dropped. The bytes reserved for that sentence went from 120 to 176 to
+  fit the extra clause, which costs 56 bytes of the frame being cut, out of 8,192.
 
 ### Changed: the trace log is a table, and the file is deleted
 
@@ -53,12 +132,17 @@ surface split out of `tools.php` behind a declared seam.
   with the stack bounded only in frames, the runaway recursion a frame cap exists for wrote
   40-400 KB rows, and 2,000 of those is not 4.6 MB.
 - **And column data is not what a disk carries, so both figures are stated - MEASURED**, by
-  planting 500 rows at exactly those caps on MySQL 8.4 with InnoDB `ROW_FORMAT=Dynamic`: **about
+  planting 500 rows at exactly those caps on MySQL 8.4 with InnoDB `innodb_file_per_table` and
+  `ROW_FORMAT=Dynamic`: **about
   48 MB of tablespace** (23,888 bytes a row - an 8 KiB stack does not fit in half a 16 KB page, so
   it goes off-page into a page of its own) and **about 27 MB in a `mysqldump`** (13,502 bytes a
   row; escaping costs 4.2%). The tablespace figure is a HIGH-WATER MARK: deleting rows frees them
   for reuse but does not return the space to the filesystem - measured, the file stayed at 12 MB
-  after the rows went and only `OPTIMIZE TABLE` shrank it. In practice all of it is far smaller -
+  after the rows went and only `OPTIMIZE TABLE` shrank it. **Both conditions above are load-bearing:**
+  on a host that keeps InnoDB in the shared `ibdata1` tablespace, `OPTIMIZE TABLE` frees pages for
+  reuse inside that one file and returns nothing to the filesystem at all, and under the older
+  `COMPACT` row format the first 768 bytes of each stack stay in the row with only the remainder
+  off-page, which moves the per-row figure. In practice all of it is far smaller -
   the measured mean entry is 2,283 bytes, so seven days at a development site's 69 failures a day
   is 486 rows, about 1.1 MB.
 - **And the ceiling has a stated CONDITION, which the first version of it did not:** the sweep
