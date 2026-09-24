@@ -62,7 +62,7 @@ One line each, with the reason rather than a promise.
 | `resources` | A resource list of a site's posts is unusable at any real post count, and `list-posts` plus `get-post` already cover the reads a client makes. |
 | `resources/subscribe` | Needs resources, and needs a push channel this transport does not have. |
 | `completion/complete` | Argument completion is worth having once there are prompts to complete arguments for. |
-| `logging` | The protocol's log channel sends server detail to the client. This server deliberately sends a client one generic error and an eight-character trace id, and keeps the detail in a log only the operator can read. The two designs contradict each other. |
+| `logging` | The protocol's log channel sends server detail to the client. This server deliberately sends a client one generic error and an eight-character trace id, and keeps the detail in a table only an administrator can read, and that no web server can serve. The two designs contradict each other. |
 | Progress notifications | Every tool here completes inside one request. There is nothing to report progress about, and no channel to report it on. |
 | Batch requests | A JSON array body is refused with `-32600` "Batch requests are not supported". Batching multiplies the work one unauthenticated request can ask for, and no client needs it. |
 | Sessions | Every request carries its own credential and is validated on its own. No session id, no server-side state between requests, nothing to expire or to fixate. |

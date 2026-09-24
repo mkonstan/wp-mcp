@@ -4,9 +4,63 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.2
 
-**Unreleased.** Open for the next cycle. Planned: the private trace log moves out of a file and
-into a table of its own, which deletes the file machinery with it; and the tool surface is split
-out of `tools.php` behind a declared seam.
+**Unreleased.** The private trace log stops being a file. Still planned for this cycle: the tool
+surface split out of `tools.php` behind a declared seam.
+
+### Changed: the trace log is a table, and the file is deleted
+
+- **BEFORE YOU UPDATE, IF YOU HAVE A LIVE SUPPORT CASE: take a copy of
+  `wp-content/wpmcp/trace-*.log`.** The upgrade DELETES that file, its directory, its two guard
+  files, three options and a transient, and it does NOT copy the old entries into the new table.
+  A trace id issued before the update stops resolving. This is deliberate twice over: the file is
+  the exposure the change exists to remove, so leaving it would make the fix cosmetic, and
+  importing a year of unswept entries would carry that whole history into every database backup
+  you ever take from then on.
+- **Traced failures now go to a new table, `{prefix}wpmcp_traces`, instead of
+  `wp-content/wpmcp/trace-<32 hex>.log`.** The reason is the web server: the log sat behind an
+  `.htaccess`, and `.htaccess` is an APACHE file. nginx has no per-directory configuration and
+  never reads it - MEASURED on the development host, `GET /wp-content/wpmcp/trace.log` answered
+  `200` with 14 KB of absolute paths, the OS username, the plugin inventory, tool names, user ids
+  and every stack frame, to anybody, with no token. The random file name hid that URL; it did not
+  remove it. **No web server can serve a table.**
+- **Both trace-log admin notices are gone**, and an operator will notice: the red "the trace log
+  is readable from the web" and the amber "could not check whether the trace log is readable"
+  both described a file that no longer exists. So did the daily outbound HTTP request the plugin
+  made to fetch its own log on every admin page load. A third notice, "the trace log could not be
+  written", is also gone; an INSERT that fails still sends the whole entry to the PHP error log,
+  now prefixed `wp-mcp trace (could not be stored)`.
+- **`wp-content/wpmcp/` is removed entirely** - the log, the empty `index.php`, the `.htaccess`
+  and the directory. Nothing in the plugin writes outside the database any more except the theme
+  files the code tools are asked to edit.
+- **Traces are kept 7 days and at most 2,000 of them**, swept on the hourly `wpmcp_flush_expired`
+  event that already clears dead tokens, oldest first. The file was never swept at all: two
+  development sites reached 1.7 MB and 1.5 MB in eleven days, and on a customer host nothing ever
+  came along to clean it up. Retention is now days rather than for ever for a cost the file did
+  not have - a row rides in every database backup, export and staging clone. At the measured mean
+  entry of 2,283 bytes, 2,000 rows is about 4.6 MB, and that is the hard ceiling this adds to a
+  backup. Both numbers are filterable, `wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows`, and a
+  value under 1 day or 100 rows is ignored rather than obeyed.
+- **A new auth event, `trace_file_removed`,** fires once on the upgrade request with what it
+  deleted and what it could not - the latter being the sites where the file is still readable.
+- **`sql-select` refuses the new table by name**, exactly as it already refuses the token and
+  file-version tables, anywhere in the statement, comments and string literals included. A trace
+  row holds the class, the message, the absolute file:line, the `WP_Error` data (which is where
+  wpdb puts a failing query) and the whole stack - precisely what the error boundary hands a
+  caller eight hex digits INSTEAD of. While the traces were a file no token could read them at
+  all; this denial is what replaces the filesystem as the wall.
+- **New on the settings screen: Look up a trace id.** Paste the eight hex digits a client was
+  given and see that one entry, `manage_options` only. It exists because the change would
+  otherwise have made diagnosis harder for exactly the person the id is for: while the traces
+  were a file, an operator opened the file. It is deliberately not a log browser - no list, no
+  search, no pagination - because what it prints is the detail the API is refused.
+- **A stored stack is bounded at 200 frames**, the middle dropped with a line saying how many.
+  That is the one value the file's 2 MiB cap used to bound and a column does not: a runaway
+  recursion could otherwise make one row a megabyte, 2,000 times over, in every backup.
+- **Deleting the plugin now drops three tables**, not two.
+- **Gone with the file, for anybody who was relying on them:** the `wpmcp_trace_log_max_bytes`
+  filter, the `wpmcp_trace_log_name`, `wpmcp_trace_log_readable` and `wpmcp_trace_log_unwritable`
+  options, and the `wpmcp_trace_checked` transient. The upgrade deletes the three options and the
+  transient for you.
 
 ## 1.1.1
 
