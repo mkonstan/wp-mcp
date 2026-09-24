@@ -225,11 +225,13 @@ None of this is visible on a site. It is recorded because it changes what a gree
   suite as a complete one, and it found a real defect on its first run: one test depended on how
   much other work had populated the database before it.
 - **The WordPress-6.9 floor leg is sharded too, six ways.** It was the one unsharded leg and
-  therefore the one that decided the whole run's wall clock - 95 minutes. Two numbers from run
-  35886384855 settled why: WP 6.9 on PHP 8.4 costs only +4.7% over the old 6.4 baseline (5734 s
-  against 5478 s), so the VERSION is not the cost; and the eight current-core shards spent 7220 s
-  of machine time doing what this leg did in 5751 s on one machine. It was slow only because
-  nobody had sharded it. Same planner, same merge, same `needs:` without `always()` so a shard that
+  therefore the one that decided the whole run's wall clock - 5734 s of suite time inside a
+  1 h 44 m job. Two numbers from run 35886384855 settled why: WP 6.9 on PHP 8.4 costs only +4.7%
+  over the old 6.4 baseline (5734 s against 5478 s), so the VERSION is not the cost; and the eight
+  current-core shards spent 7220 s of machine time doing what this leg did in 5751 s on one
+  machine. It was slow only because nobody had sharded it. Measured after: the leg now takes
+  **1313 s** end to end for 6880 s of machine time - 4.8 times off the wall clock for 10% more
+  work, and the whole CI run finishes in 22 minutes. Same planner, same merge, same `needs:` without `always()` so a shard that
   DIES reds the run instead of vanishing - six rather than eight only because both tiers now shard
   at once and GitHub runs twenty jobs concurrently. The earlier plan (move the floor to
   releases-only) was dropped: it rested on believing 6.x was inherently slow, and it is not.

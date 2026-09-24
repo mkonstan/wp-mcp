@@ -525,10 +525,18 @@ jobs:
     #
     # SIX, NOT EIGHT, AND THE CONSTRAINT IS GITHUB'S 20 CONCURRENT JOBS. With `decide` done,
     # lint + the four unit legs + the eight current-core shards are already 13 jobs in flight;
-    # six here makes 19 and leaves one job of slack for a re-run. Modelled slowest shard 1040 s
-    # (+3.8% against the ideal) against a 6007 s total, so about 18 minutes with the floor's own
-    # +4.7% and a container start, against 95 minutes unsharded. Seven shards model at 903 s and
+    # six here makes 19 and leaves one job of slack for a re-run. Seven shards model at 903 s and
     # would sit exactly ON the ceiling, where anything extra queues.
+    #
+    # MEASURED ON THE FIRST SHARDED RUN, 35956952898, beside the model so the next refresh has
+    # both. Modelled slowest shard 1040 s (+3.8% against a 6007 s total); MEASURED suite steps
+    # 814 / 925 / 979 / 1099 / 1117 / 1158 s, a 42% spread, slowest job 1294 s, and the whole leg
+    # including the merge 1313 s. The leg it replaced was 5734 s of suite time (run 35886384855)
+    # in a 6250 s job (run 35928357006), so: 4.8x off the wall clock for 6880 s of machine time
+    # against 6250 s - only +10%, where the current-core tier's sharding cost +30%, because this
+    # leg's classes are heavier and container start is a smaller share of each shard. The model
+    # ran 1.11x optimistic on the slowest shard; one feedback iteration into
+    # tests/class-timings.txt would help and is not urgent at a 42% spread.
     #
     # THE WEIGHTS ARE THE CURRENT-CORE TIER'S, and that is correct rather than convenient: they
     # are RELATIVE costs, and the floor's +4.7% applies to every class about equally. A per-leg
