@@ -249,6 +249,39 @@ jobs:
           php bin/ci-group-counts.php \
             --map=junit-map.xml --log=junit-all.xml --groups="$groups"
 
+      - name: A RUNTIME deprecation from this plugin fails the gate
+        # THE SAME CHECK ci.yml MAKES, and here for the reason the gate step above is here:
+        # this workflow is the only thing standing between a red gate and a published release,
+        # so it must not be the weaker of the two. See ci.yml's copy for what the check closes -
+        # a deprecation raised at RUNTIME, on a path that exists only against a real WordPress,
+        # which neither the developer workstation nor the unit tier can see.
+        run: |
+          set -uo pipefail
+          npx --yes @wordpress/env run cli wp eval '
+            $f = WP_CONTENT_DIR . "/debug.log";
+            if (!is_file($f)) { echo "NO-DEBUG-LOG\n"; return; }
+            foreach ((array) file($f) as $line) {
+              if (stripos($line, "deprecated") !== false) { echo rtrim($line), "\n"; }
+            }
+          ' > deprecations.txt 2>&1 || true
+
+          if grep -q 'NO-DEBUG-LOG' deprecations.txt; then
+            echo "::warning title=No debug.log::WP_DEBUG_LOG wrote nothing, so this step proved" \
+                 "nothing. Check .wp-env.json still sets WP_DEBUG and WP_DEBUG_LOG."
+            exit 0
+          fi
+
+          if grep -E 'Deprecated:.*wp-mcp' deprecations.txt; then
+            echo "::error title=Runtime deprecation in wp-mcp::The lines above were raised by this" \
+                 "plugin while the suite ran. Neither the workstation nor the unit tier can see" \
+                 "them; this step is the only place they appear."
+            exit 1
+          fi
+
+          echo "No wp-mcp deprecation in the container's debug.log."
+          # Somebody else's, printed and not failed: it is worth seeing and it is not ours.
+          grep -c 'Deprecated' deprecations.txt || true
+
       - name: WordPress logs (on failure)
         if: failure()
         # `logs` FOLLOWS the logs by default (--watch defaults to true in @wordpress/env 11.15),
