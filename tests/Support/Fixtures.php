@@ -1996,42 +1996,60 @@ final class Fixtures
         return ['notices' => $notices, 'debris' => $debris];
     }
 
+    /** How many unexpected trace rows debris-check NAMES, however many it counted. */
+    public const TRACE_ROWS_LISTED = 20;
+
     /**
      * The trace rows this site is holding, split into the two buckets debris-check reports.
      *
-     * @return array{ours: int, others: list<string>}
+     * BOTH COUNTS ARE OVER THE WHOLE TABLE (round 3). Round 2 read only the newest 200 rows, so an
+     * unexpected trace older than that was neither counted nor listed - a blind spot inside the
+     * check added to remove a blind spot, which is the worse of the two because it looks covered.
+     *
+     * AND THE PREFIX IS NOW ACTUALLY LOOKED FOR WHERE ROUND 2 SAID IT WAS. Round 2's report text
+     * claimed the haystack was "the tool, the message, the data or the stack" and the query read
+     * `tool` and `message` alone - the prose was edited and the SQL was not, which is the drift
+     * class the divergence review exists for, sitting in the round that was fixing a false number.
+     *
+     * Counted in SQL over at most 2,000 rows (the plugin's own cap), as four `LIKE`s rather than a
+     * `CONCAT_WS` so MySQL can stop at the first column that matches instead of building tens of
+     * megabytes of strings.
+     *
+     * THE LISTING IS STILL BOUNDED, at TRACE_ROWS_LISTED, and the report says so when the count
+     * and the listing differ - a check that silently shows a subset is the defect being closed.
+     *
+     * @return array{ours: int, others: int, listed: list<string>}
      */
     public static function traceBuckets(): array
     {
         $raw = WpCli::evaluate(
             'global $wpdb; $t = wpmcp_traces_table();'
             . ' if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t)) !== $t) { echo "NOTABLE"; return; }'
-            . ' $ours = 0;'
-            . ' foreach ($wpdb->get_results("SELECT id, logged_at, tool, method, class, message FROM " . $t . " ORDER BY id DESC LIMIT 200") as $r) {'
-            . ' $hay = (string) $r->tool . " " . (string) $r->message;'
-            . ' if (strpos($hay, "wpmcp-test-") !== false) { $ours++; continue; }'
-            . ' echo "OTHER\t", (int) $r->id, "\t", $r->logged_at, "\t",'
+            . ' $p = "%wpmcp-test-%";'
+            . ' $mine = "(tool LIKE %s OR message LIKE %s OR data LIKE %s OR stack LIKE %s)";'
+            . ' echo "OURS\t", (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM " . $t . " WHERE " . $mine, $p, $p, $p, $p)), "\n";'
+            . ' echo "OTHERS\t", (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM " . $t . " WHERE NOT " . $mine, $p, $p, $p, $p)), "\n";'
+            . ' foreach ($wpdb->get_results($wpdb->prepare("SELECT id, logged_at, tool, method, class FROM " . $t'
+            . ' . " WHERE NOT " . $mine . " ORDER BY id DESC LIMIT ' . self::TRACE_ROWS_LISTED . '", $p, $p, $p, $p)) as $r) {'
+            . ' echo "ROW\t", (int) $r->id, "\t", $r->logged_at, "\t",'
             . ' ($r->tool === "" ? $r->method : $r->tool), "\t", $r->class, "\n"; }'
-            . ' echo "OURS\t", $ours, "\n";'
         );
 
         $ours   = 0;
-        $others = [];
+        $others = 0;
+        $listed = [];
 
         foreach (preg_split('/\r\n|\r|\n/', $raw) as $line) {
-            $line = trim($line);
+            $line  = trim($line);
+            $parts = explode("\t", $line);
 
             if ($line === '' || $line === 'NOTABLE') { continue; }
 
-            $parts = explode("\t", $line);
+            if ($parts[0] === 'OURS') { $ours = (int) ($parts[1] ?? 0); continue; }
+            if ($parts[0] === 'OTHERS') { $others = (int) ($parts[1] ?? 0); continue; }
 
-            if ($parts[0] === 'OURS') {
-                $ours = (int) ($parts[1] ?? 0);
-                continue;
-            }
-
-            if ($parts[0] === 'OTHER') {
-                $others[] = sprintf(
+            if ($parts[0] === 'ROW') {
+                $listed[] = sprintf(
                     'id %s  %s UTC  %s  %s',
                     $parts[1] ?? '?',
                     $parts[2] ?? '?',
@@ -2041,7 +2059,7 @@ final class Fixtures
             }
         }
 
-        return ['ours' => $ours, 'others' => $others];
+        return ['ours' => $ours, 'others' => $others, 'listed' => $listed];
     }
 
     /**
@@ -2070,17 +2088,25 @@ final class Fixtures
      * $keepDays is read from the SITE (wpmcp_trace_keep_days()) rather than repeated here, so the
      * sentence cannot drift from the number the plugin is actually honouring - a filter can move it.
      *
-     * @param list<string> $others rows with no test prefix, each already formatted.
+     * $others is the COUNT over the whole table and $listed is the newest few of them. They are
+     * separate arguments because they are separate numbers, and round 3 exists because round 2 had
+     * only the one and reported it as both.
+     *
+     * @param list<string> $listed the newest unexpected rows, each already formatted.
      */
-    public static function traceReport(int $ours, array $others, int $keepDays): string
+    public static function traceReport(int $ours, int $others, array $listed, int $keepDays): string
     {
         $out = '';
 
-        if ($others !== []) {
-            $out .= 'NOTICE: ' . count($others) . " trace row(s) on this site were NOT caused by a test.\n"
+        if ($others > 0) {
+            $out .= 'NOTICE: ' . $others . " trace row(s) on this site were NOT caused by a test.\n"
                 . "  Each is a failure something on this site actually hit. The suite's own traces carry\n"
                 . "  " . self::PREFIX . " in the tool, the message, the data or the stack; these do not:\n"
-                . '    ' . implode("\n    ", $others) . "\n"
+                . '    ' . implode("\n    ", $listed) . "\n"
+                . ($others > count($listed)
+                    ? '  Showing the newest ' . count($listed) . ' of ' . $others
+                        . " - the COUNT is over the whole table, the list is not.\n"
+                    : '')
                 . "  Look one up in Settings > WP MCP > Look up a trace id, or\n"
                 . "  `wp eval 'echo wpmcp_trace_entry(wpmcp_trace_find(\"<id>\")[0]);'`.\n"
                 . "  KNOWN FALSE POSITIVE, so read the timestamps first: a failure the suite caused

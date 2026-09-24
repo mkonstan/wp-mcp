@@ -215,6 +215,13 @@ final class TraceRowBoundTest extends TestCase
             'The note does not say WHY frames went, so an operator cannot tell a byte cap from a'
             . ' frame cap.'
         );
+        self::assertStringContainsString(
+            'bytes dropped',
+            $note,
+            'The note says the bytes were "over" the cap. They were REMOVED, and the two are'
+            . ' different numbers whenever the surviving ends do not fill the budget - so the'
+            . ' word has to name what went, not by how much the cap was exceeded.'
+        );
         self::assertStringNotContainsString(
             'trace=',
             $note,
@@ -235,6 +242,54 @@ final class TraceRowBoundTest extends TestCase
     }
 
     /**
+     * Across the whole boundary - just under the cap to just over it - the stack is either
+     * returned untouched or says truthfully what it dropped. Never "0 frames omitted".
+     *
+     * A MARKER READING "0 FRAMES OMITTED" IS WORSE THAN NO MARKER: it tells an operator the stack
+     * is incomplete when it is whole. Round 3 also fixed the measurement this sweep depends on -
+     * `implode` puts count-1 separators in, not count, and round 2 counted one byte too many, which
+     * is harmless in the middle of the range and exactly wrong at its edge.
+     *
+     * @group sprint-14d
+     */
+    public function testNoSizeNearTheCapProducesAnEmptyOrUntruthfulMarker(): void
+    {
+        $budget = (int) WPMCP_TRACE_STACK_BYTES;
+
+        for ($total = $budget - 200; $total <= $budget + 200; $total++) {
+            // Three lines whose imploded length is exactly $total: two separators, so the body
+            // must come to $total - 2.
+            $body  = $total - 2 - strlen('#0 a') - strlen('#2 {main}');
+            $lines = ['#0 a', '#1 ' . str_repeat('b', max(0, $body - 3)), '#2 {main}'];
+
+            $fitted = wpmcp_trace_stack_fit($lines);
+            $out    = implode("\n", $fitted);
+
+            self::assertStringNotContainsString(
+                '0 frames omitted',
+                $out,
+                'A stack of ' . strlen(implode("\n", $lines)) . ' bytes against a ' . $budget
+                . '-byte cap produced a marker claiming nothing was dropped.'
+            );
+
+            self::assertLessThanOrEqual(
+                $budget,
+                strlen($out),
+                'A stack of ' . strlen(implode("\n", $lines)) . ' bytes came back at '
+                . strlen($out) . ' bytes, over the cap.'
+            );
+
+            if (strlen(implode("\n", $lines)) <= $budget) {
+                self::assertSame(
+                    $lines,
+                    $fitted,
+                    'A stack already inside the cap was rewritten anyway.'
+                );
+            }
+        }
+    }
+
+    /**
      * One frame bigger than the whole budget is CUT and says so, rather than being dropped.
      *
      * The file:line is in another column, but the frame is the only thing that says which call
@@ -244,12 +299,23 @@ final class TraceRowBoundTest extends TestCase
      */
     public function testASingleOversizedFrameIsCutRatherThanDropped(): void
     {
-        $fitted = wpmcp_trace_stack_fit(['#0 ' . str_repeat('y', 20000) . '()', '#1 {main}']);
+        $huge   = '#0 ' . str_repeat('y', 20000) . '()';
+        $fitted = wpmcp_trace_stack_fit([$huge, '#1 {main}']);
         $bytes  = strlen(implode("\n", $fitted));
 
         self::assertLessThanOrEqual((int) WPMCP_TRACE_STACK_BYTES, $bytes);
         self::assertStringStartsWith('#0 ', $fitted[0]);
-        self::assertStringContainsString('frame cut at', implode("\n", $fitted));
+
+        // AND THE NUMBER IT REPORTS IS THE ONE IT DID, which round 2's wording was not: it said
+        // the cap, 8192, while it actually cut at the cap less the reserved note. An operator can
+        // check that number with `strlen`, so it has to be the number of bytes KEPT.
+        $kept = (int) WPMCP_TRACE_STACK_BYTES - (int) WPMCP_TRACE_STACK_NOTE_BYTES;
+
+        self::assertStringContainsString(
+            'frame cut, ' . $kept . ' of ' . strlen($huge) . ' bytes kept',
+            implode("\n", $fitted),
+            'The single-frame marker does not name the bytes it actually kept: ' . $fitted[0]
+        );
     }
 
     /**
@@ -358,6 +424,74 @@ final class TraceRowBoundTest extends TestCase
             $gone,
             'The sweep did not stop at ' . WPMCP_TRACE_SWEEP_ROUNDS . ' rounds, so a site with a'
             . ' month of backlog does all of it inside one request.'
+        );
+    }
+
+    /**
+     * The ROW pass gets its own, larger round cap - and that number is what decides whether the
+     * documented 26 MB ceiling is true.
+     *
+     * A ROW CAP THAT REMOVES FEWER ROWS PER HOUR THAN ARRIVE IS A LAG, NOT A CAP. Round 2 gave both
+     * passes 20 rounds, so the ceiling silently held only below 10,000 traced failures an hour -
+     * about 2.8 a second, which is exactly where an AI client retry-looping against a throwing tool
+     * at ~350 ms a call sits. The row pass is a PRIMARY KEY range delete, the cheapest shape there
+     * is, so rounds are close to free and the cap is set by the rate worth defending.
+     *
+     * @group sprint-14d
+     */
+    public function testTheRowPassClearsFarMorePerSweepThanTheAgePass(): void
+    {
+        $wpdb  = WordPressRuntime::install();
+        $batch = (int) WPMCP_TRACE_SWEEP_BATCH;
+
+        // Always a full batch, and a MAX(id) high enough that the row cap has work to do.
+        $wpdb->queryReturns = [$batch];
+        $wpdb->vars         = ['SELECT MAX(id) FROM wp_wpmcp_traces' => '500000'];
+
+        $gone = wpmcp_trace_sweep();
+
+        self::assertSame(
+            ((int) WPMCP_TRACE_SWEEP_ROUNDS + (int) WPMCP_TRACE_SWEEP_ROW_ROUNDS) * $batch,
+            $gone,
+            'The two passes did not each stop at their own round cap, so either the age pass is'
+            . ' doing the row pass\'s work or the row pass is capped at the age pass\'s rounds.'
+        );
+
+        self::assertGreaterThanOrEqual(
+            10,
+            (int) WPMCP_TRACE_SWEEP_ROW_ROUNDS / (int) WPMCP_TRACE_SWEEP_ROUNDS,
+            'The row pass no longer has ten times the age pass\'s rounds. It is the pass the'
+            . ' ceiling depends on and it is the cheap one.'
+        );
+    }
+
+    /**
+     * The rate the ceiling holds to, as arithmetic rather than as a sentence in a README.
+     *
+     * The hourly sweep removes ROW_ROUNDS x BATCH rows. Above that rate more arrive than leave and
+     * "2,000 rows" stops bounding anything - so the number the documentation states as the
+     * condition on its own ceiling is asserted here.
+     *
+     * @group sprint-14d
+     */
+    public function testTheCeilingHoldsToTheRateTheDocumentationClaims(): void
+    {
+        $perSweep  = (int) WPMCP_TRACE_SWEEP_ROW_ROUNDS * (int) WPMCP_TRACE_SWEEP_BATCH;
+        $perSecond = $perSweep / 3600;
+
+        self::assertSame(
+            100000,
+            $perSweep,
+            'The row pass no longer clears 100,000 rows an hour, which is the number README.md,'
+            . ' CHANGELOG.md and ARCHITECTURE.md state as the condition on the 26 MB ceiling.'
+        );
+
+        self::assertGreaterThanOrEqual(
+            27,
+            (int) $perSecond,
+            'The ceiling now holds only below ' . (int) $perSecond . ' traced failures a second.'
+            . ' The documented figure is 27, and the rate to beat is an AI client in a retry loop'
+            . ' at ~350 ms a call, which is ~2.8 a second.'
         );
     }
 

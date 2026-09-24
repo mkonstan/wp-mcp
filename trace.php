@@ -58,6 +58,13 @@ if (!defined('ABSPATH')) { exit; }
 /**
  * How many days of traces are kept, and how many rows at most. Filterable; both floored.
  *
+ * AND EVERY FIGURE BELOW HAS A CONDITION: the sweep has to keep up. The row pass removes at
+ * most WPMCP_TRACE_SWEEP_ROW_ROUNDS x WPMCP_TRACE_SWEEP_BATCH rows an hour - 100,000, or 27 a
+ * second - and above that rate more traces arrive than leave, the table grows, and none of these
+ * numbers bounds anything until the rate drops. That condition is stated beside the figure in
+ * README.md, CHANGELOG.md and ARCHITECTURE.md, because a ceiling with an unstated condition is
+ * the same defect as a mean presented as a maximum.
+ *
  * SEVEN DAYS, AND THE NUMBER IS THE FIRST COST. A trace now sits in every database backup
  * and every staging clone, so "for ever" is not available - but a support case opened on
  * Monday still has to be answerable on Friday, and one working week is the shortest span
@@ -77,9 +84,30 @@ if (!defined('ABSPATH')) { exit; }
  * runaway recursion a frame cap exists for wrote 40-400 KB rows, and 2,000 of those is 80-800
  * MB, not 4.6 MB. Every field now has a BYTE cap as well, so the row itself has a ceiling:
  * see WPMCP_TRACE_STACK_BYTES and wpmcp_trace_record()'s per-column caps. At most 12,960
- * bytes of column data per row, which puts the hard ceiling at the row cap under **26 MB**
- * (24.7 MiB) rather than under 5 MB, and leaves the typical figure where it was - a real site
- * writes the measured mean, so 486 rows in seven days is still about 1.1 MB.
+ * bytes of COLUMN DATA per row, which is 2,000 rows under 26 MB of it.
+ *
+ * AND COLUMN DATA IS NOT WHAT A DISK CARRIES, which is round 3's correction to round 2's.
+ * MEASURED 2026-09-24 on the bare development site (MySQL 8.4.0, InnoDB `ROW_FORMAT=Dynamic`)
+ * by planting 500 rows at exactly these caps, with a path-heavy stack so the escaping costs
+ * what it really costs:
+ *
+ *   23,888 bytes of TABLESPACE per worst-case row - 1.84x the column data, because an 8 KiB
+ *                  `stack` does not fit in half a 16 KB page and InnoDB puts it off-page into
+ *                  a page of its own. At the row cap that is about **48 MB**.
+ *   13,502 bytes per row in a `mysqldump` - only 4.2% over the column data, not the 10-15% a
+ *                  first estimate assumed: the escaping is real but it is a few hundred
+ *                  backslashes and newlines in 8 KiB, not a constant factor. About **27 MB**
+ *                  at the cap.
+ *
+ * AND THE TABLESPACE IS A HIGH-WATER MARK. Also measured: after deleting those 500 rows the
+ * file stayed at 12,075,008 bytes and only `OPTIMIZE TABLE` returned it to 114,688. The sweep
+ * frees rows for REUSE, which is what bounds the table; it does not hand the space back to the
+ * filesystem, so an operator who has once had a bug storm keeps the file size until they
+ * rebuild the table. Said in the README, because it is the kind of thing found at 2 a.m.
+ *
+ * THE TYPICAL FIGURE IS UNCHANGED and is the one a real site meets: the measured mean entry is
+ * 2,283 bytes, which is small enough to live entirely inside its page, so 486 rows in seven
+ * days is still about 1.1 MB however the worst case is counted.
  *
  * AND IT IS THE OLDEST ROWS THAT GO, for the reason the file's cap was cut the same way: the
  * newest entry is the one whose id was issued a moment ago and is about to be quoted.
@@ -92,7 +120,7 @@ define('WPMCP_TRACE_KEEP_DAYS', 7);
 define('WPMCP_TRACE_KEEP_ROWS', 2000);
 
 /**
- * How many rows one DELETE removes, and how many DELETEs one sweep runs.
+ * How many rows one DELETE removes, and how many DELETEs each of the two passes runs.
  *
  * AN UNBOUNDED DELETE IS ONE TRANSACTION, AND THE SITE THAT NEEDS THE SWEEP IS THE SITE THAT
  * CANNOT AFFORD IT (round 2). WP-Cron is driven by page loads, so a quiet or broken-cron site
@@ -101,15 +129,35 @@ define('WPMCP_TRACE_KEEP_ROWS', 2000);
  * a `longtext` per row in the undo log, inside an ordinary front-end request. Five hundred rows
  * a statement keeps each one short, and the loop keeps the total work per sweep bounded.
  *
- * TWENTY ROUNDS, SO AT MOST 10,000 ROWS PER CAP PER SWEEP. That is five times the row cap, so
- * a site at its cap clears in one sweep; a site with a month of backlog clears over the next
- * few hourly runs instead of in one request. The bound is deliberately on the WORK and not on
- * the outcome: the sweep is idempotent and the hook fires again in an hour, so stopping early
- * costs nothing but a little more retention than the policy names, and the alternative is a
- * cron callback whose cost has no upper bound at all.
+ * AND THE ROUND CAP IS WHAT DECIDES WHETHER THE ROW CEILING IS TRUE (round 3). A row cap that
+ * removes fewer rows per hour than arrive is not a cap, it is a lag - so the two passes get
+ * different round caps, because they answer different questions.
+ *
+ * THE ROW PASS: 200 ROUNDS, 100,000 ROWS AN HOUR. It is a PRIMARY KEY range delete
+ * (`WHERE id <= <cut>`), the cheapest shape MySQL has for this - a clustered-index range scan,
+ * no secondary lookup, no sort - so rounds are close to free and the sensible number is the one
+ * that makes the documented ceiling hold at a rate worth defending. Hourly, 100,000 rows is
+ * **27 traced failures a second sustained**. The rate to beat is an AI client in a retry loop
+ * against a throwing tool: at ~350 ms a call that is ~2.8 a second, and an AI client is the
+ * entire user base, so this is ten times the fastest thing we can name. ABOVE 27 a second more
+ * arrive than leave and the table grows until the rate drops - that condition is stated beside
+ * the 26 MB figure in README.md, CHANGELOG.md and ARCHITECTURE.md, because a ceiling with an
+ * unstated condition is the same defect as a mean presented as a maximum, one layer down.
+ *
+ * THE AGE PASS: 20 ROUNDS, 10,000 ROWS AN HOUR, and it needs no more. It runs FIRST, and when
+ * the row cap is holding there are at most 2,000 rows in the table for it to consider - so 20
+ * rounds is five times the most it can ever have to do. On a site that is over the row cap the
+ * ROW pass is the binding one anyway, and it runs second.
+ *
+ * THE LOOP EXITS ON THE FIRST SHORT BATCH, so a healthy site runs exactly ONE statement per
+ * pass and the 200 is never reached. The bound is deliberately on the WORK and not on the
+ * outcome: the sweep is idempotent and the hook fires again in an hour, so stopping early costs
+ * nothing but a little more retention than the policy names, and the alternative is a cron
+ * callback whose cost has no upper bound at all.
  */
 define('WPMCP_TRACE_SWEEP_BATCH', 500);
 define('WPMCP_TRACE_SWEEP_ROUNDS', 20);
+define('WPMCP_TRACE_SWEEP_ROW_ROUNDS', 200);
 
 /**
  * TWO BOUNDS ON THE STACK, AND THEY BOUND DIFFERENT THINGS. Round 1 of this sprint shipped
@@ -430,22 +478,31 @@ function wpmcp_trace_sweep() {
 
     $table = wpmcp_traces_table();
 
-    $gone = wpmcp_trace_sweep_batched($wpdb->prepare(
-        'DELETE FROM ' . $table . ' WHERE logged_at < (UTC_TIMESTAMP() - INTERVAL %d DAY)'
-        . ' LIMIT %d',
-        wpmcp_trace_keep_days(),
-        (int) WPMCP_TRACE_SWEEP_BATCH
-    ));
+    $gone = wpmcp_trace_sweep_batched(
+        $wpdb->prepare(
+            'DELETE FROM ' . $table . ' WHERE logged_at < (UTC_TIMESTAMP() - INTERVAL %d DAY)'
+            . ' LIMIT %d',
+            wpmcp_trace_keep_days(),
+            (int) WPMCP_TRACE_SWEEP_BATCH
+        ),
+        (int) WPMCP_TRACE_SWEEP_ROUNDS
+    );
 
     $newest = (int) $wpdb->get_var('SELECT MAX(id) FROM ' . $table);
     $cut    = $newest - wpmcp_trace_keep_rows();
 
     if ($cut > 0) {
-        $gone += wpmcp_trace_sweep_batched($wpdb->prepare(
-            'DELETE FROM ' . $table . ' WHERE id <= %d LIMIT %d',
-            $cut,
-            (int) WPMCP_TRACE_SWEEP_BATCH
-        ));
+        // The PK-range pass, and the one the ceiling depends on - see
+        // WPMCP_TRACE_SWEEP_ROW_ROUNDS for the rate it holds to and why it gets ten times the
+        // age pass's rounds.
+        $gone += wpmcp_trace_sweep_batched(
+            $wpdb->prepare(
+                'DELETE FROM ' . $table . ' WHERE id <= %d LIMIT %d',
+                $cut,
+                (int) WPMCP_TRACE_SWEEP_BATCH
+            ),
+            (int) WPMCP_TRACE_SWEEP_ROW_ROUNDS
+        );
     }
 
     return $gone;
@@ -454,22 +511,22 @@ function wpmcp_trace_sweep() {
 /**
  * Run one bounded DELETE until it stops removing a full batch, or until the round cap.
  *
- * The statement is prepared by the caller and already carries its own `LIMIT`, so this decides
- * only how many times to run it - see WPMCP_TRACE_SWEEP_BATCH for why an unbounded DELETE is
- * the wrong shape for a cron callback on the site that most needs it.
+ * The statement is prepared by the caller and already carries its own `LIMIT`, and the caller
+ * also says how many rounds it gets - the two passes differ by a factor of ten, because only one
+ * of them decides whether the documented row ceiling is true. See WPMCP_TRACE_SWEEP_BATCH.
  *
  * A round that removes FEWER than the batch has reached the end of what matches, so the loop
  * stops rather than running one more statement to be told nothing is left. A `false` return -
  * the table is missing, the query failed - stops it too: retrying a broken statement twenty
  * times inside a front-end request is the cost this function exists to avoid.
  */
-function wpmcp_trace_sweep_batched($sql) {
+function wpmcp_trace_sweep_batched($sql, $rounds) {
     global $wpdb;
 
     $batch = (int) WPMCP_TRACE_SWEEP_BATCH;
     $gone  = 0;
 
-    for ($round = 0; $round < (int) WPMCP_TRACE_SWEEP_ROUNDS; $round++) {
+    for ($round = 0; $round < (int) $rounds; $round++) {
         $removed = $wpdb->query($sql);
 
         if ($removed === false) { break; }
@@ -581,14 +638,20 @@ function wpmcp_trace_stack(Throwable $e) {
  * @return list<string>
  */
 function wpmcp_trace_stack_fit(array $lines) {
+    if ($lines === array()) { return $lines; }
+
     $budget = (int) WPMCP_TRACE_STACK_BYTES;
-    $bytes  = 0;
 
-    // +1 per line for the newline implode() will put between them, so the budget is measured
-    // against the string that actually reaches the column.
-    foreach ($lines as $line) { $bytes += strlen($line) + 1; }
+    // EXACTLY WHAT implode("\n", $lines) WILL BE, which is one byte less than a `strlen + 1` per
+    // line: there are count-1 separators, not count. Round 2 measured the wrong thing by one byte,
+    // which is harmless for the cap and not harmless at the boundary, where being one byte out is
+    // the difference between returning a stack untouched and rewriting it to say nothing was
+    // dropped.
+    $bytes = count($lines) - 1;
 
-    if ($bytes <= $budget || $lines === array()) { return $lines; }
+    foreach ($lines as $line) { $bytes += strlen($line); }
+
+    if ($bytes <= $budget) { return $lines; }
 
     $room = $budget - (int) WPMCP_TRACE_STACK_NOTE_BYTES;
     $head = array();
@@ -618,18 +681,36 @@ function wpmcp_trace_stack_fit(array $lines) {
     }
 
     if ($head === array() && $tail === array()) {
-        // The innermost frame alone is over budget. Keep as much of it as fits and say so.
-        return array(substr($lines[0], 0, $room) . ' ...[frame cut at ' . $budget . ' bytes]');
+        // The innermost frame alone is over budget. Keep as much of it as fits and say so - with
+        // the number of bytes KEPT, which is the cap less the reserved note and not the cap
+        // itself. Round 2's wording said 8192 while it cut at 8,072, which is a number an
+        // operator can check and find wrong.
+        return array(
+            substr($lines[0], 0, $room)
+            . ' ...[frame cut, ' . $room . ' of ' . strlen($lines[0]) . ' bytes kept, under the '
+            . $budget . '-byte stack cap]'
+        );
     }
 
     $dropped = $j - $i + 1;
-    $lost    = 0;
 
-    for ($k = $i; $k <= $j; $k++) { $lost += strlen($lines[$k]) + 1; }
+    // NOTHING WAS DROPPED, SO NOTHING IS SAID. A marker reading "0 frames omitted" is worse than
+    // no marker: it tells an operator the stack is incomplete when it is whole. This is a guard
+    // rather than a fix for a reachable case - every line fitting inside `$room` implies the
+    // whole stack was under `$budget`, which is the branch that already returned above - but the
+    // arithmetic that makes it unreachable is three variables wide, and a wrong sentence on an
+    // admin screen is not the place to rely on that.
+    if ($dropped <= 0) { return $lines; }
+
+    $lost = $dropped - 1;
+
+    for ($k = $i; $k <= $j; $k++) { $lost += strlen($lines[$k]); }
 
     return array_merge(
         $head,
-        array('#.. ' . $dropped . ' frames omitted, ' . $lost . ' bytes over the '
+        // "dropped", not "over": the number names what was REMOVED, not by how much the cap was
+        // exceeded, and those are different numbers whenever the ends do not fill the budget.
+        array('#.. ' . $dropped . ' frames omitted, ' . $lost . ' bytes dropped to hold the '
             . $budget . '-byte stack cap'),
         $tail
     );

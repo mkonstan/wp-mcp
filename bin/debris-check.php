@@ -72,7 +72,8 @@ $cron = wpmcp_debris_sweep_report();
 // era had the same blind spot, which names the gap rather than excusing it.
 //
 // NEITHER BUCKET CHANGES THE VERDICT. See Fixtures::traceReport() for why: this script's exit
-// code answers "did the suite leave fixtures behind", and a trace is not a fixture.
+// code answers "did the suite leave fixtures behind", and a trace is not a fixture. Both counts
+// are over the WHOLE table since round 3; only the LISTING is bounded, and the report says so.
 $traces = Fixtures::traceBuckets();
 
 [$code, $output] = Fixtures::debrisVerdict(
@@ -80,6 +81,7 @@ $traces = Fixtures::traceBuckets();
     Fixtures::traceReport(
         $traces['ours'],
         $traces['others'],
+        $traces['listed'],
         (int) WpCli::evaluate('echo (int) wpmcp_trace_keep_days();')
     ) . $switches['notices'],
     $switches['debris']

@@ -39,18 +39,33 @@ surface split out of `tools.php` behind a declared seam.
   not have - a row rides in every database backup, export and staging clone. Both numbers are
   filterable, `wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows`, and a value under 1 day or
   100 rows is ignored rather than obeyed.
-- **The sweep deletes in batches of 500, at most 20 batches per cap per run.** A site whose cron
-  has not fired for a month would otherwise delete a month of rows in one statement - one
-  transaction, with a `longtext` per row in the undo log, inside an ordinary page load. It clears
-  over the next few hourly runs instead.
+- **The sweep deletes in batches of 500 - 20 batches for the age cap, 200 for the row cap.** A
+  site whose cron has not fired for a month would otherwise delete a month of rows in one
+  statement: one transaction, with a `longtext` per row in the undo log, inside an ordinary page
+  load. The row cap gets ten times the rounds because it is a PRIMARY KEY range delete, the cheap
+  shape, and because it is the pass the size ceiling below depends on. A healthy site runs exactly
+  one statement per pass - the loop stops the moment a batch comes back short.
 - **Every field of a trace is capped in bytes against its own column, and the stack is capped at
   8 KiB as well as at 200 frames** - so what the table can cost a backup is a MAXIMUM and not an
   average. One row is at most 12,960 bytes (`method` 64, `tool` 191, `class` 191, `at` 255,
-  `message` and `data` 2,000 each, `stack` 8,192), which puts **2,000 rows under 26 MB**; the
-  measured mean entry is 2,283 bytes, so seven days at a development site's rate of 69 failures a
-  day is 486 rows, about 1.1 MB. A cap on the NUMBER of rows is not a cap on their SIZE unless the
-  row is bounded too: with the stack bounded only in frames, the runaway recursion a frame cap
-  exists for wrote 40-400 KB rows, and 2,000 of those is not 4.6 MB.
+  `message` and `data` 2,000 each, `stack` 8,192), which puts **2,000 rows under 26 MB of column
+  data**. A cap on the NUMBER of rows is not a cap on their SIZE unless the row is bounded too:
+  with the stack bounded only in frames, the runaway recursion a frame cap exists for wrote
+  40-400 KB rows, and 2,000 of those is not 4.6 MB.
+- **And column data is not what a disk carries, so both figures are stated - MEASURED**, by
+  planting 500 rows at exactly those caps on MySQL 8.4 with InnoDB `ROW_FORMAT=Dynamic`: **about
+  48 MB of tablespace** (23,888 bytes a row - an 8 KiB stack does not fit in half a 16 KB page, so
+  it goes off-page into a page of its own) and **about 27 MB in a `mysqldump`** (13,502 bytes a
+  row; escaping costs 4.2%). The tablespace figure is a HIGH-WATER MARK: deleting rows frees them
+  for reuse but does not return the space to the filesystem - measured, the file stayed at 12 MB
+  after the rows went and only `OPTIMIZE TABLE` shrank it. In practice all of it is far smaller -
+  the measured mean entry is 2,283 bytes, so seven days at a development site's 69 failures a day
+  is 486 rows, about 1.1 MB.
+- **And the ceiling has a stated CONDITION, which the first version of it did not:** the sweep
+  removes at most 100,000 rows an hour, so the cap holds up to about **27 traced failures a second
+  sustained**. Above that more arrive than leave and the table grows until the rate drops. An AI
+  client retry-looping against a throwing tool at ~350 ms a call is about 2.8 a second, so the
+  headroom is roughly tenfold.
 - **An upgrade that could NOT remove the old log raises an error notice on every admin screen**,
   naming what is left. On nginx that file is still being served, which is the whole reason the
   log moved, so an upgrade that did not manage it must not look like one that did. Deleting the

@@ -846,10 +846,30 @@ row rides in every database backup, export and staging clone you take.
 **How much that costs, as a maximum rather than an average.** Every field of a trace is capped
 in bytes against the column that holds it - `method` 64, `tool` 191, `class` 191, `at` 255,
 `message` and the `WP_Error` data 2,000 each, and the **stack 8 KiB** - so one row is at most
-12,960 bytes and **2,000 rows is under 26 MB**. In practice it is far less: the measured mean
-entry is 2,283 bytes, and a development site under continuous suite load wrote 69 failures a
-day, which fills 486 rows - about **1.1 MB** - in seven days. Both retention numbers are
-filterable, and a useless value is ignored rather than obeyed:
+12,960 bytes and **2,000 rows is under 26 MB of column data**.
+
+Column data is not what a disk carries, so here are both, MEASURED by planting 500 rows at
+exactly those caps on MySQL 8.4 with InnoDB `ROW_FORMAT=Dynamic`:
+
+| At the 2,000-row cap | |
+|---|---|
+| column data | under 26 MB |
+| **InnoDB tablespace** | **about 48 MB** - 23,888 bytes a row, because an 8 KiB stack does not fit in half a 16 KB page and goes off-page into a page of its own |
+| **`mysqldump`** | **about 27 MB** - 13,502 bytes a row; escaping backslashes and newlines costs 4.2%, not the 10-15% you might assume |
+
+**Two conditions on those numbers, and both matter.** The sweep removes at most **100,000 rows an
+hour** (200 batches of 500), so the cap holds up to about **27 traced failures a second
+sustained**; above that more arrive than leave and the table grows until the rate drops. And the
+tablespace figure is a **high-water mark**: deleting rows frees them for reuse, which is what
+bounds the table, but it does not hand the space back to the filesystem - measured, the file
+stayed at 12 MB after the 500 rows were deleted and only `OPTIMIZE TABLE wp_wpmcp_traces`
+returned it to 112 KB. A site that has had one bug storm keeps the file size until it rebuilds
+the table.
+
+In practice all of this is far smaller: the measured mean entry is 2,283 bytes, small enough to
+live inside its own page, and a development site under continuous suite load wrote 69 failures a
+day - 486 rows, about **1.1 MB**, in seven days. Both retention numbers are filterable, and a
+useless value is ignored rather than obeyed:
 
 ```php
 add_filter('wpmcp_trace_keep_days', fn() => 14);   // under 1 day is ignored
@@ -865,9 +885,11 @@ If a trace cannot be stored at all, the whole entry goes to the PHP error log pr
 `wp-mcp trace (could not be stored)`, so the trace id you were given still resolves to
 something.
 
-The hourly sweep deletes in batches of 500, at most 20 batches per cap per run, so a site whose
-cron has not fired for a month clears over the next few hourly runs instead of in one enormous
-transaction inside somebody's page load.
+The hourly sweep deletes in batches of 500 - at most 20 batches for the age cap and 200 for the
+row cap, which is a PRIMARY KEY range delete and the cheap one - so a site whose cron has not
+fired for a month clears over the next few hourly runs instead of in one enormous transaction
+inside somebody's page load. A healthy site runs exactly one statement per pass, because the loop
+stops the moment a batch comes back short.
 
 **Upgrading from 1.1.1 or earlier deletes the log file, `wp-content/wpmcp/` and the three
 options that went with it.** That is the only way the exposure actually goes away. The old

@@ -154,14 +154,29 @@ not running to log anything; the realistic case is a SINGLE query failing - bad 
 every database backup, export and staging clone, where a file did not - so retention is DAYS:
 seven of them, and at most 2,000 rows, swept on the hourly `wpmcp_flush_expired` event that
 already clears dead tokens, oldest first for the same reason the file's cap cut that way. The
-sweep deletes in batches of 500 with a round cap, because the site that most needs it is the
+sweep deletes in batches of 500 with a round cap - 20 for the age pass, 200 for the row pass,
+which is a PRIMARY KEY range delete and the cheap one - because the site that most needs it is the
 site whose cron died a month ago, and an unbounded `DELETE` is one transaction inside somebody's
 page load. **A ROW CAP IS NOT A SIZE CAP UNLESS THE ROW IS BOUNDED, which round 1 of this sprint
 got wrong and documented wrongly:** every field is now capped in bytes against its own column
 and the stack at 8 KiB as well as 200 frames, so one row is at most 12,960 bytes and 2,000 rows
-is **under 26 MB** - where a count cap over a `longtext` bounded only in frames put the real
-worst case in the hundreds of megabytes, because the runaway recursion a frame cap exists for
-writes 40-400 KB rows. The measured mean entry is 2,283 bytes, so a development site's 69
+is **under 26 MB of column data** - where a count cap over a `longtext` bounded only in frames put
+the real worst case in the hundreds of megabytes, because the runaway recursion a frame cap exists
+for writes 40-400 KB rows.
+
+**And two things the first version of that figure left out.** Column data is not what a disk
+carries: MEASURED by planting 500 rows at exactly those caps on MySQL 8.4 (InnoDB
+`ROW_FORMAT=Dynamic`), the worst case at the cap is about **48 MB of tablespace** - 23,888 bytes a
+row, because an 8 KiB `stack` does not fit in half a 16 KB page and goes off-page into a page of
+its own - and about **27 MB in a `mysqldump`**, where escaping costs 4.2% rather than the 10-15% a
+first estimate assumed. And the tablespace number is a HIGH-WATER MARK: deleting rows frees them
+for reuse, which is what bounds the table, but does not hand the space back to the filesystem
+(measured: the file stayed at 12 MB after the rows went, and only `OPTIMIZE TABLE` returned it to
+112 KB). Every one of those figures also has a CONDITION - the sweep removes at most 100,000 rows
+an hour, so the ceiling holds up to about **27 traced failures a second sustained**, roughly ten
+times an AI client retry-looping at ~350 ms a call; above it the table grows until the rate drops.
+
+The measured mean entry is 2,283 bytes and lives inside its own page, so a development site's 69
 failures a day fills 486 rows, about 1.1 MB, in seven days. Both retention numbers are
 filterable and a useless value is ignored rather than obeyed.
 (2) `sql-select` must refuse this table, and does - it is the third name in

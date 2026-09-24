@@ -122,8 +122,8 @@ final class DebrisVerdictTest extends TestCase
      */
     public function testAnUnexpectedTraceIsReportedByNameAndDoesNotFailTheCheck(): void
     {
-        $others = ['id 41  2026-09-24 12:00:00 UTC  list-posts  TypeError'];
-        $report = Fixtures::traceReport(3, $others, 7);
+        $listed = ['id 41  2026-09-24 12:00:00 UTC  list-posts  TypeError'];
+        $report = Fixtures::traceReport(3, 1, $listed, 7);
 
         self::assertStringContainsString('were NOT caused by a test', $report);
         self::assertStringContainsString('id 41', $report, 'The unexpected row is not named, so it cannot be looked up.');
@@ -151,15 +151,50 @@ final class DebrisVerdictTest extends TestCase
     }
 
     /**
+     * When there are more unexpected traces than the report LISTS, it says so.
+     *
+     * ROUND 2 READ THE NEWEST 200 ROWS AND REPORTED THAT AS THE COUNT, so an older unexpected trace
+     * was neither counted nor named - a blind spot inside the check added to remove a blind spot,
+     * and the worse of the two because it looks covered. The count is now over the whole table and
+     * only the LISTING is bounded, so the one remaining bound has to be visible in the output.
+     *
+     * @group sprint-14d
+     */
+    public function testTheReportSaysWhenItIsListingFewerRowsThanItCounted(): void
+    {
+        $listed = [];
+
+        for ($i = 0; $i < Fixtures::TRACE_ROWS_LISTED; $i++) {
+            $listed[] = 'id ' . (900 - $i) . '  2026-09-24 12:00:00 UTC  list-posts  TypeError';
+        }
+
+        $report = Fixtures::traceReport(0, 57, $listed, 7);
+
+        self::assertStringContainsString('57 trace row(s) on this site were NOT caused by a test', $report);
+        self::assertStringContainsString(
+            'Showing the newest ' . Fixtures::TRACE_ROWS_LISTED . ' of 57',
+            $report,
+            'The report lists fewer rows than it counted and does not say so, so a reader does not'
+            . ' know what they are not being told - which is the defect being closed.'
+        );
+
+        // And when the list IS the whole of it, there is no such line to read past.
+        self::assertStringNotContainsString(
+            'Showing the newest',
+            Fixtures::traceReport(0, 1, ['id 1  2026-09-24 12:00:00 UTC  x  TypeError'], 7)
+        );
+    }
+
+    /**
      * No traces at all: nothing printed, and the clean sentence is untouched.
      *
      * @group sprint-14d
      */
     public function testNoTracesPrintsNothing(): void
     {
-        self::assertSame('', Fixtures::traceReport(0, [], 7));
+        self::assertSame('', Fixtures::traceReport(0, 0, [], 7));
 
-        [$code, $out] = Fixtures::debrisVerdict('', Fixtures::traceReport(0, [], 7), '');
+        [$code, $out] = Fixtures::debrisVerdict('', Fixtures::traceReport(0, 0, [], 7), '');
 
         self::assertSame(0, $code);
         self::assertStringStartsWith('debris-check: clean', $out);
@@ -173,7 +208,7 @@ final class DebrisVerdictTest extends TestCase
      */
     public function testTheSuitesOwnTracesAreANoticeAndStillClean(): void
     {
-        $report = Fixtures::traceReport(13, [], 7);
+        $report = Fixtures::traceReport(13, 0, [], 7);
 
         self::assertStringNotContainsString('NOT caused by a test', $report);
         self::assertStringContainsString('13 trace row(s) were caused by this suite on purpose', $report);
