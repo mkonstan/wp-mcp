@@ -2,6 +2,12 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.1.2
+
+**Unreleased.** Open for the next cycle. Planned: the private trace log moves out of a file and
+into a table of its own, which deletes the file machinery with it; and the tool surface is split
+out of `tools.php` behind a declared seam.
+
 ## 1.1.1
 
 **Released 2026-09-24.** The platform-swap release: less code of ours doing what WordPress
