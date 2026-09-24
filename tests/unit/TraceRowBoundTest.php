@@ -319,6 +319,64 @@ final class TraceRowBoundTest extends TestCase
     }
 
     /**
+     * AND IT SAYS THE REST OF THE STACK IS GONE, which until 1.1.2 it did not.
+     *
+     * This branch returns a ONE-LINE array: `{main}` and every frame between it and the innermost
+     * one are dropped outright. The old marker counted only the bytes cut off the frame it kept,
+     * so `#0 ...[frame cut, 8072 of 20003 bytes kept]` read as "one very long frame, nothing else
+     * to see" when the stack had actually been reduced to a fragment of its innermost call. The
+     * other truncation path has always counted what it dropped.
+     *
+     * THE SENTENCE STILL HAS TO FIT. WPMCP_TRACE_STACK_NOTE_BYTES is a RESERVE, not a
+     * measurement - the note is appended after the frame has been cut to the room the reserve
+     * leaves - so a longer sentence is only safe while it is still inside that reserve. The last
+     * assertion is the one that catches a future clause pushing it out: the whole line stays under
+     * the cap with every number at its widest.
+     *
+     * @group sprint-seam
+     */
+    public function testTheSingleFrameMarkerSaysTheOtherFramesAreGone(): void
+    {
+        $huge   = '#0 ' . str_repeat('y', 20000) . '()';
+        $fitted = wpmcp_trace_stack_fit([$huge, '#1 a()', '#2 b()', '#3 {main}']);
+        $line   = implode("\n", $fitted);
+
+        self::assertCount(
+            1,
+            $fitted,
+            'This branch is meant to return exactly one line; the test below describes that line.'
+        );
+        self::assertStringContainsString(
+            '3 further frames dropped, {main} included',
+            $line,
+            'The single-frame marker does not say that the other three frames, one of them the'
+            . ' {main} sentinel, were dropped entirely: ' . $fitted[0]
+        );
+
+        // Singular, because "1 further frames" on an admin screen is the kind of wrongness that
+        // makes a reader doubt the numbers beside it.
+        $pair = implode("\n", wpmcp_trace_stack_fit([$huge, '#1 {main}']));
+
+        self::assertStringContainsString('1 further frame dropped, {main} included', $pair);
+        self::assertStringNotContainsString('1 further frames', $pair);
+
+        // A single frame and nothing else: there is no other frame, so nothing is claimed about
+        // one. The old wording was right for this case and stays right.
+        $alone = implode("\n", wpmcp_trace_stack_fit([$huge]));
+
+        self::assertStringNotContainsString('further frame', $alone);
+
+        // AND EVERY FORM IS STILL UNDER THE CAP, reserve included.
+        foreach ([$line, $pair, $alone] as $form) {
+            self::assertLessThanOrEqual(
+                (int) WPMCP_TRACE_STACK_BYTES,
+                strlen($form),
+                'The marker pushed the stack column over the cap: ' . strlen($form) . ' bytes.'
+            );
+        }
+    }
+
+    /**
      * And the REAL builder is bounded too, on a real deep throwable - both caps together.
      *
      * @group sprint-14d

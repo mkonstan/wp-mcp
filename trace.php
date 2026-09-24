@@ -191,12 +191,18 @@ define('WPMCP_TRACE_STACK_BYTES', 8192);
 /**
  * The bytes reserved inside WPMCP_TRACE_STACK_BYTES for the line that says what was dropped.
  *
- * RESERVED RATHER THAN MEASURED, because the line's own length depends on the two numbers it
- * has not counted yet - how many frames went and how many bytes they were. A hundred and
- * twenty bytes is comfortably over the longest form of that sentence, and spending it means
- * the budget is never exceeded by the explanation of the budget.
+ * RESERVED RATHER THAN MEASURED, because the line's own length depends on the numbers it has
+ * not counted yet - how many frames went and how many bytes they were. The reserve is
+ * comfortably over the longest form of either sentence, and spending it means the budget is
+ * never exceeded by the explanation of the budget.
+ *
+ * RAISED FROM 120 IN 1.1.2, because the single-oversized-frame sentence gained a third fact: it
+ * now says that the REST of the stack is gone, which it did not (see wpmcp_trace_stack_fit()).
+ * The longest form of it is about 130 bytes with every number at its widest, so 176 keeps the
+ * same comfortable margin the original 120 had over the shorter sentence. The price is 56 fewer
+ * bytes of the frame that is being cut, out of 8,192.
  */
-define('WPMCP_TRACE_STACK_NOTE_BYTES', 120);
+define('WPMCP_TRACE_STACK_NOTE_BYTES', 176);
 
 /**
  * The byte cap on every other field, keyed to the column that holds it.
@@ -685,10 +691,24 @@ function wpmcp_trace_stack_fit(array $lines) {
         // the number of bytes KEPT, which is the cap less the reserved note and not the cap
         // itself. Round 2's wording said 8192 while it cut at 8,072, which is a number an
         // operator can check and find wrong.
+        //
+        // AND SAY THAT EVERY OTHER FRAME IS GONE, which until 1.1.2 it did not. This branch
+        // returns a ONE-LINE array: `{main}` and every frame between it and the innermost one are
+        // dropped, and the old marker mentioned only the bytes cut off the frame it kept. An
+        // operator reading `#0 ...[frame cut, 8072 of 20003 bytes kept]` has every reason to read
+        // it as "one long frame, nothing else to see" - the marker said the stack was trimmed
+        // where it was actually reduced to a fragment of its innermost call. The other branch
+        // below has always counted what it dropped; this one now does too.
+        $others = count($lines) - 1;
+
         return array(
             substr($lines[0], 0, $room)
-            . ' ...[frame cut, ' . $room . ' of ' . strlen($lines[0]) . ' bytes kept, under the '
-            . $budget . '-byte stack cap]'
+            . ' ...[frame cut, ' . $room . ' of ' . strlen($lines[0]) . ' bytes kept'
+            . ($others > 0
+                ? '; ' . $others . ' further frame' . ($others === 1 ? '' : 's')
+                    . ' dropped, {main} included'
+                : '')
+            . ', under the ' . $budget . '-byte stack cap]'
         );
     }
 
