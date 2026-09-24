@@ -30,6 +30,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
  *
  * wpmcp_db_ver              schema revision, compared on every load
  * wpmcp_client_columns_missing set when revision 6's two optional columns could not be added
+ * wpmcp_trace_file_left    set when revision 7 could not remove 1.1.1's trace log
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
  * wpmcp_sql_enabled         the sql-select switch
@@ -48,6 +49,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
 $wpmcp_options = array(
     'wpmcp_db_ver',
     'wpmcp_client_columns_missing',
+    'wpmcp_trace_file_left',
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
     'wpmcp_sql_enabled',

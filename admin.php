@@ -613,14 +613,34 @@ function wpmcp_render_admin() {
              retention, it was mistyped, or the failure could not be stored at all &mdash; in
              which case the whole entry went to the PHP error log instead, prefixed
              <code>wp-mcp trace (could not be stored)</code>.</p></div>
-        <?php else: foreach ($lookup['rows'] as $wpmcp_trace_row): ?>
+        <?php else: ?>
+          <?php
+          /*
+           * A SHARED ID IS LABELLED, NOT SILENTLY DISAMBIGUATED (round 2). `trace_id` is a KEY
+           * and not a UNIQUE KEY on purpose - a duplicate must not make the INSERT fail and lose
+           * the entry whose id has just gone out on the wire - so two rows CAN carry one id.
+           * Eight hex digits against the 2,000-row cap puts that at about one in two million
+           * traces, which at the measured rate is a once-in-decades event; the cost of not
+           * saying so is that an operator reads the newest match as "the" trace and diagnoses
+           * the wrong failure, which is not a cost that scales with the odds.
+           */
+          ?>
+          <?php if (count($lookup['rows']) > 1): ?>
+            <div class="notice notice-warning inline"><p><strong><?php
+                echo (int) count($lookup['rows']);
+            ?> traces share this id.</strong> Eight hex digits can collide, so all of them are
+               below, newest first &mdash; read the time and the tool to tell which failure you
+               were told about.</p></div>
+          <?php endif; ?>
+        <?php foreach ($lookup['rows'] as $wpmcp_trace_row): ?>
           <?php // WHITE-SPACE PRESERVED, because the stack's indentation is how an entry is
                 // read - and it is the same text the error-log fallback writes, so an operator
                 // who has seen one form has seen both. ?>
           <pre style="background:#fff;border:1px solid #c3c4c7;padding:12px;overflow:auto;white-space:pre-wrap"><?php
               echo esc_html(wpmcp_trace_entry($wpmcp_trace_row));
           ?></pre>
-        <?php endforeach; endif; ?>
+        <?php endforeach; ?>
+        <?php endif; ?>
       <?php endif; ?>
 
       <h2>Code editing, SQL reads and post meta</h2>

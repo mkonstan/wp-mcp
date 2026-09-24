@@ -428,6 +428,20 @@ define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 // notice. Absent when they are both there. See wpmcp_note_client_columns().
 define('WPMCP_CLIENT_COLUMNS_OPTION', 'wpmcp_client_columns_missing');
 
+/**
+ * Revision 7's trace FILE, when it could not be removed: what is left, for the admin notice.
+ * Absent when the upgrade took everything. See wpmcp_migrate_remove_trace_file().
+ *
+ * THE ONE NOTICE THIS SPRINT ADDS, HAVING DELETED THREE, and the difference is what the
+ * operator can do about it. The three that went described a file the plugin was still writing
+ * to; this one describes a file the plugin has FINISHED with and could not delete - which on
+ * nginx is the exposure this whole revision exists to remove, still sitting under the document
+ * root. Round 1 of this sprint sent that fact only to the PHP error log, on the same commit
+ * that removed the notice machinery, so on exactly the host the change is for the file survived
+ * and nobody was told.
+ */
+define('WPMCP_TRACE_FILE_OPTION', 'wpmcp_trace_file_left');
+
 /* ============================================================
  * Activation / upgrade: create the tokens table, migrate data
  * ========================================================== */
@@ -551,10 +565,13 @@ function wpmcp_install() {
     // `logged_at` IS INDEXED because the sweep reads it every hour (wpmcp_trace_sweep), and
     // an hourly full scan of this table is the one cost the file era did not have.
     //
-    // `message`, `data` and `stack` are the only three fields that can be long. The first two
-    // are cut at 2,000 characters by wpmcp_trace_field() and the stack at 200 frames, so a
-    // `text` column would hold all three - `longtext` is there for the two that a host with
-    // a wider filter could make longer, and costs nothing while they are short.
+    // EVERY COLUMN'S WIDTH IS ALSO A CAP IN trace.php, and that is what makes the row's size a
+    // CEILING rather than an average (round 2). `method`, `tool`, `class` and `at` are cut to
+    // exactly the widths below, `message` and `data` to 2,000 bytes and `stack` to 8 KiB, so one
+    // row is at most 12,960 bytes of column data - which is the number the changelog, the README
+    // and ARCHITECTURE.md all quote, and tests/unit/TraceRowBoundTest.php checks the caps against
+    // these widths so the two cannot drift. See WPMCP_TRACE_STACK_BYTES and
+    // WPMCP_TRACE_METHOD_BYTES.
     $traces = "CREATE TABLE " . $wpdb->prefix . WPMCP_TRACES_TABLE . " (
   id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   trace_id char(8) NOT NULL DEFAULT '',
@@ -1075,29 +1092,56 @@ function wpmcp_migrate_remove_trace_file() {
 
     $dir = WP_CONTENT_DIR . '/wpmcp';
 
-    // Named rather than globbed, with one glob for the random log name, because this plugin
-    // does not own the whole of wp-content and a blind unlink would take somebody else's file.
-    $known = array($dir . '/trace.log', $dir . '/index.php', $dir . '/.htaccess');
+    // A SYMLINK IS NOT DESCENDED INTO, IT IS REPORTED (round 2). `wp-content/wpmcp` being a
+    // link is the shape where acting is worse than not acting: `glob()` and `unlink()` follow
+    // it, so the plugin would delete files somewhere it has never written - a volume mount, a
+    // shared directory, somebody's backup target - and `rmdir()` would remove the LINK while
+    // leaving every exposed byte where it is. The same rule the code tools' jail applies to a
+    // caller's path: a migration walking a tree unattended is not the place to relax it.
+    //
+    // The OPTIONS still go: nothing reads them, they describe a file this version does not
+    // write, and leaving them would be a second thing to clean up later. What the operator is
+    // told is that the FILE is still there and why the plugin would not touch it.
+    $linked = is_link($dir);
 
-    foreach (glob($dir . '/trace-*.log') ?: array() as $log) { $known[] = $log; }
+    if ($linked) {
+        $tally['failed'][] = 'wp-content/wpmcp/ (a symlink - not followed)';
+    } else {
+        // Named rather than globbed, with one glob for the random log name, because this plugin
+        // does not own the whole of wp-content and a blind unlink would take somebody else's
+        // file.
+        $known = array($dir . '/trace.log', $dir . '/index.php', $dir . '/.htaccess');
 
-    foreach ($known as $file) {
-        if (!is_file($file)) { continue; }
+        foreach (glob($dir . '/trace-*.log') ?: array() as $log) { $known[] = $log; }
 
-        // BEFORE the unlink, for the reason code-delete gives: opcache_invalidate() resolves
-        // the path on disk first, so after the unlink it answers false and the entry for the
-        // deleted path survives. index.php is the one file here PHP ever compiled.
-        if (substr($file, -4) === '.php') { wpmcp_opcache_invalidate($file); }
+        foreach ($known as $file) {
+            if (!is_file($file)) { continue; }
 
-        if (@unlink($file)) {
-            $tally['removed'][] = basename($file);
-        } else {
-            $tally['failed'][] = basename($file);
+            // A linked FILE inside a real directory is the same decision at one level down:
+            // unlink() would take the link and leave the bytes, and the operator would be told
+            // the log was removed when it was not.
+            if (is_link($file)) {
+                $tally['failed'][] = basename($file) . ' (a symlink - not followed)';
+                continue;
+            }
+
+            // BEFORE the unlink, for the reason code-delete gives: opcache_invalidate()
+            // resolves the path on disk first, so after the unlink it answers false and the
+            // entry for the deleted path survives. index.php is the one file here PHP ever
+            // compiled.
+            if (substr($file, -4) === '.php') { wpmcp_opcache_invalidate($file); }
+
+            if (@unlink($file)) {
+                $tally['removed'][] = basename($file);
+            } else {
+                $tally['failed'][] = basename($file);
+            }
         }
-    }
 
-    // Fails, silently and correctly, when anything else is still in there.
-    if (is_dir($dir) && @rmdir($dir)) { $tally['removed'][] = 'wp-content/wpmcp/'; }
+        // Fails, silently and correctly, when anything else is still in there - a file another
+        // plugin put beside ours, which is not ours to remove and not a failure to report.
+        if (is_dir($dir) && @rmdir($dir)) { $tally['removed'][] = 'wp-content/wpmcp/'; }
+    }
 
     foreach (array(
         'wpmcp_trace_log_name',
@@ -1116,7 +1160,79 @@ function wpmcp_migrate_remove_trace_file() {
         ));
     }
 
+    wpmcp_note_trace_file_left($tally['failed'], $dir);
+
     return $tally;
+}
+
+/**
+ * Record what the upgrade could not remove, so the operator is TOLD rather than logged at.
+ *
+ * SAID ON THREE SURFACES, which is the wpmcp_note_client_columns() shape: the PHP error log for
+ * whoever reads logs, an option for the admin notice, and the notice itself on every admin
+ * screen. It is an ERROR rather than a warning, because unlike the client columns this is not a
+ * cosmetic gap - the file holds stack traces, absolute paths and, when a database call failed,
+ * SQL, and on nginx it is served to anybody who knows the URL. That is the whole reason the
+ * revision exists, so an upgrade that did not manage it must not look like one that did.
+ *
+ * THE OPTION IS CLEARED WHEN THE FILE GOES, so an operator who removes it by hand and
+ * reactivates the plugin stops being warned without anybody deleting a row. `wpmcp_install()`
+ * runs this on every attempt, and the deactivate/reactivate cycle calls the installer directly
+ * rather than through the revision stamp - the one action that retries.
+ */
+function wpmcp_note_trace_file_left(array $failed, $dir) {
+    if ($failed === array()) {
+        if (get_option(WPMCP_TRACE_FILE_OPTION, '') !== '') {
+            delete_option(WPMCP_TRACE_FILE_OPTION);
+        }
+
+        return true;
+    }
+
+    $left = implode(', ', $failed);
+
+    update_option(WPMCP_TRACE_FILE_OPTION, $left);
+    error_log(
+        'wp-mcp: the upgrade to the trace TABLE could not remove the old trace log from '
+        . $dir . ' - left behind: ' . $left . '. That file holds stack traces, absolute paths'
+        . ' and sometimes SQL, and on nginx it is served over HTTP to anybody who knows its'
+        . ' name (.htaccess is an Apache file). The plugin no longer writes to it. Delete it by'
+        . ' hand, then deactivate and reactivate the plugin to clear the warning.'
+    );
+
+    return false;
+}
+
+/** What the upgrade left in wp-content/wpmcp/, or '' when it took everything. */
+function wpmcp_trace_file_left() {
+    return (string) get_option(WPMCP_TRACE_FILE_OPTION, '');
+}
+
+/**
+ * SITE-WIDE, not on the plugin's own settings page, for the reason the deleted trace notices
+ * were: an operator who never opens Settings > WP MCP is exactly the operator whose log is
+ * still public. Not dismissible - dismissing would not delete the file.
+ */
+add_action('admin_notices', 'wpmcp_trace_file_notice');
+function wpmcp_trace_file_notice() {
+    if (!current_user_can('manage_options')) { return; }
+
+    $left = wpmcp_trace_file_left();
+
+    if ($left === '') { return; }
+
+    echo '<div class="notice notice-error"><p><strong>WP MCP: the old trace log is still on'
+        . ' disk.</strong></p><p>This version records failures in a database table, and the'
+        . ' upgrade could not remove what the previous version wrote to'
+        . ' <code>' . esc_html(WP_CONTENT_DIR . '/wpmcp') . '</code> &mdash; left behind:'
+        . ' <code>' . esc_html($left) . '</code>. That file holds stack traces, absolute file'
+        . ' paths and, when a database call failed, SQL. <strong>On nginx it is served over'
+        . ' HTTP to anybody who knows its name</strong>, because the <code>.htaccess</code>'
+        . ' beside it is an Apache file nginx never reads &mdash; which is why the log moved'
+        . ' into the database.</p><p>Nothing writes to it any more, so it is safe to delete:'
+        . ' remove that directory, then deactivate and reactivate this plugin to clear this'
+        . ' notice. A symlink is reported rather than followed, so if the path is a link the'
+        . ' plugin has deliberately left it alone.</p></div>';
 }
 
 /**

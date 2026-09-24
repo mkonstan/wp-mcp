@@ -1997,6 +1997,115 @@ final class Fixtures
     }
 
     /**
+     * The trace rows this site is holding, split into the two buckets debris-check reports.
+     *
+     * @return array{ours: int, others: list<string>}
+     */
+    public static function traceBuckets(): array
+    {
+        $raw = WpCli::evaluate(
+            'global $wpdb; $t = wpmcp_traces_table();'
+            . ' if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t)) !== $t) { echo "NOTABLE"; return; }'
+            . ' $ours = 0;'
+            . ' foreach ($wpdb->get_results("SELECT id, logged_at, tool, method, class, message FROM " . $t . " ORDER BY id DESC LIMIT 200") as $r) {'
+            . ' $hay = (string) $r->tool . " " . (string) $r->message;'
+            . ' if (strpos($hay, "wpmcp-test-") !== false) { $ours++; continue; }'
+            . ' echo "OTHER\t", (int) $r->id, "\t", $r->logged_at, "\t",'
+            . ' ($r->tool === "" ? $r->method : $r->tool), "\t", $r->class, "\n"; }'
+            . ' echo "OURS\t", $ours, "\n";'
+        );
+
+        $ours   = 0;
+        $others = [];
+
+        foreach (preg_split('/\r\n|\r|\n/', $raw) as $line) {
+            $line = trim($line);
+
+            if ($line === '' || $line === 'NOTABLE') { continue; }
+
+            $parts = explode("\t", $line);
+
+            if ($parts[0] === 'OURS') {
+                $ours = (int) ($parts[1] ?? 0);
+                continue;
+            }
+
+            if ($parts[0] === 'OTHER') {
+                $others[] = sprintf(
+                    'id %s  %s UTC  %s  %s',
+                    $parts[1] ?? '?',
+                    $parts[2] ?? '?',
+                    ($parts[3] ?? '') === '' ? '(no tool)' : $parts[3],
+                    $parts[4] ?? '?'
+                );
+            }
+        }
+
+        return ['ours' => $ours, 'others' => $others];
+    }
+
+    /**
+     * What debris-check prints about the trace table. A NOTICE, never a verdict.
+     *
+     * A BLIND SPOT RATHER THAN A PRECEDENT, and that is the whole reason this exists (sprint
+     * TRACE-TABLE round 2). The traces were a FILE until 1.1.2, nothing ever read it after a
+     * run, and the implementer's first answer was that the file era had the same property - which
+     * names the gap instead of defending it. An UNEXPECTED trace during a GREEN run has never
+     * been visible to us: a tool that swallowed a failure, a deprecation that became a throwable
+     * on one PHP, a third-party plugin erroring inside our boundary. The suite passes and
+     * something broke, and nobody looks.
+     *
+     * TWO BUCKETS, AND ONLY THE SECOND IS A SIGNAL. A row whose tool or message carries the test
+     * prefix was caused on purpose by a class that proves the boundary works; it is bounded (at
+     * most 2,000 rows, at most ~13 KB each) and swept within seven days, so failing a run over it
+     * would be failing over the feature working. A row WITHOUT the prefix is one nobody asked
+     * for, and it is named - id, time, tool, class - so it can be pasted into the lookup on
+     * Settings > WP MCP.
+     *
+     * IT DOES NOT CHANGE THE VERDICT, deliberately. This script's exit code answers "did the
+     * suite leave fixtures behind", and an unexpected trace is not a leftover - it is a fact to
+     * read, on a site an operator also uses by hand. Failing on it would red every run after
+     * somebody poked the endpoint in a browser, which is how a check gets ignored.
+     *
+     * $keepDays is read from the SITE (wpmcp_trace_keep_days()) rather than repeated here, so the
+     * sentence cannot drift from the number the plugin is actually honouring - a filter can move it.
+     *
+     * @param list<string> $others rows with no test prefix, each already formatted.
+     */
+    public static function traceReport(int $ours, array $others, int $keepDays): string
+    {
+        $out = '';
+
+        if ($others !== []) {
+            $out .= 'NOTICE: ' . count($others) . " trace row(s) on this site were NOT caused by a test.\n"
+                . "  Each is a failure something on this site actually hit. The suite's own traces carry\n"
+                . "  " . self::PREFIX . " in the tool, the message, the data or the stack; these do not:\n"
+                . '    ' . implode("\n    ", $others) . "\n"
+                . "  Look one up in Settings > WP MCP > Look up a trace id, or\n"
+                . "  `wp eval 'echo wpmcp_trace_entry(wpmcp_trace_find(\"<id>\")[0]);'`.\n"
+                . "  KNOWN FALSE POSITIVE, so read the timestamps first: a failure the suite caused
+"
+                . "  through a BUILT-IN tool carries the prefix nowhere - sql-select refusals
+"
+                . "  (class=WP_Error:wpmcp_sql_server) are the case, and no run marker survives on a trace
+"
+                . "  row to tell them apart. A row from OUTSIDE a run window is the one worth opening.
+"
+                . "  This does NOT change the verdict below: an unexpected trace is a fact to read, not a\n"
+                . "  fixture a run left behind.\n";
+        }
+
+        if ($ours > 0) {
+            $out .= 'NOTICE: ' . $ours . " trace row(s) were caused by this suite on purpose.\n"
+                . "  The error-boundary classes break things over HTTP and then look the trace id up again,\n"
+                . "  so these rows ARE the test passing. They are bounded (2,000 rows, ~13 KB each) and the\n"
+                . "  hourly sweep removes them within " . $keepDays . " days, so they are not debris.\n";
+        }
+
+        return $out;
+    }
+
+    /**
      * What bin/debris-check.php prints, and its exit code. Notices come first and never
      * change the verdict; foreign fixtures or switch debris make it 1.
      *

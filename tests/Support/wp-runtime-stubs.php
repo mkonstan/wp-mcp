@@ -211,6 +211,20 @@ if (!function_exists('delete_option')) {
     }
 }
 
+if (!function_exists('esc_html')) {
+    /**
+     * ADDED FOR SPRINT TRACE-TABLE ROUND 2. wpmcp_trace_file_notice() is the first admin notice
+     * the unit tier renders, and the claim under test is that the path it prints is ESCAPED - so
+     * the stub has to escape, not merely pass through. Core's own implementation is
+     * `_wp_specialchars($text, ENT_QUOTES)` after the translation filter; this is that, without
+     * the filter, which is the part no unit test here has an opinion about.
+     */
+    function esc_html($text)
+    {
+        return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
+    }
+}
+
 if (!function_exists('delete_transient')) {
     /**
      * ADDED FOR SPRINT TRACE-TABLE, for the same reason WP_CONTENT_DIR above was: revision 7's

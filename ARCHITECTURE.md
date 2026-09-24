@@ -153,10 +153,17 @@ not running to log anything; the realistic case is a SINGLE query failing - bad 
 **The two costs of a table were designed against, not discovered.** (1) A trace now rides in
 every database backup, export and staging clone, where a file did not - so retention is DAYS:
 seven of them, and at most 2,000 rows, swept on the hourly `wpmcp_flush_expired` event that
-already clears dead tokens, oldest first for the same reason the file's cap cut that way. At the
-measured mean entry of 2,283 bytes that is a hard ceiling of about 4.6 MB added to a backup; a
-development site under continuous suite load wrote 69 failures a day, which fills 486 rows in
-seven days. Both numbers are filterable and a useless value is ignored rather than obeyed.
+already clears dead tokens, oldest first for the same reason the file's cap cut that way. The
+sweep deletes in batches of 500 with a round cap, because the site that most needs it is the
+site whose cron died a month ago, and an unbounded `DELETE` is one transaction inside somebody's
+page load. **A ROW CAP IS NOT A SIZE CAP UNLESS THE ROW IS BOUNDED, which round 1 of this sprint
+got wrong and documented wrongly:** every field is now capped in bytes against its own column
+and the stack at 8 KiB as well as 200 frames, so one row is at most 12,960 bytes and 2,000 rows
+is **under 26 MB** - where a count cap over a `longtext` bounded only in frames put the real
+worst case in the hundreds of megabytes, because the runaway recursion a frame cap exists for
+writes 40-400 KB rows. The measured mean entry is 2,283 bytes, so a development site's 69
+failures a day fills 486 rows, about 1.1 MB, in seven days. Both retention numbers are
+filterable and a useless value is ignored rather than obeyed.
 (2) `sql-select` must refuse this table, and does - it is the third name in
 `wpmcp_sql_denied_identifiers()` beside the tokens and the file-version tables. A trace row is
 exactly the detail the boundary withholds, so leaving it readable would undo the boundary
@@ -171,7 +178,12 @@ fails still sends the whole entry to `error_log()`, exactly as an unwritable dir
 **The upgrade DELETES an existing site's log, its directory and its three options.** That is the
 only way the exposure goes away; the old entries are not migrated, because they would then ride
 in every backup, and the changelog tells an operator with a live support case to take a copy
-first.
+first. **An upgrade that could not manage it says so on every admin screen** - the one notice
+this change adds, having deleted three, and the difference is that this one describes a file the
+plugin has FINISHED with and could not delete, which on nginx is still being served. A symlinked
+`wp-content/wpmcp` is reported the same way and deliberately not followed: `glob()` and
+`unlink()` follow a link, so acting would delete files somewhere the plugin has never written
+and would take the link while leaving every exposed byte in place.
 
 ## Five error codes and no more
 

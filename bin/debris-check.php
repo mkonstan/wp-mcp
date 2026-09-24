@@ -64,9 +64,24 @@ $switches = Fixtures::switchState();
 // when it is missing, and then it is debris and the exit code is 1.
 $cron = wpmcp_debris_sweep_report();
 
+// A FOURTH KIND, AND IT IS THE ONLY ONE THAT IS NOT ABOUT FIXTURES AT ALL (sprint TRACE-TABLE
+// round 2). Traced failures became rows in 1.1.2, so for the first time a suite run's failures
+// are somewhere this script can read. It reports them in two buckets - caused by a test, and
+// NOT caused by a test - and the second is the one worth reading: an unexpected trace during a
+// GREEN run is a failure nobody asked for, and it has never been visible to us before. The file
+// era had the same blind spot, which names the gap rather than excusing it.
+//
+// NEITHER BUCKET CHANGES THE VERDICT. See Fixtures::traceReport() for why: this script's exit
+// code answers "did the suite leave fixtures behind", and a trace is not a fixture.
+$traces = Fixtures::traceBuckets();
+
 [$code, $output] = Fixtures::debrisVerdict(
     Fixtures::foreignDebris() . $cron,
-    $switches['notices'],
+    Fixtures::traceReport(
+        $traces['ours'],
+        $traces['others'],
+        (int) WpCli::evaluate('echo (int) wpmcp_trace_keep_days();')
+    ) . $switches['notices'],
     $switches['debris']
 );
 

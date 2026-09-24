@@ -105,4 +105,82 @@ final class DebrisVerdictTest extends TestCase
         self::assertStringContainsString('FOREIGN FIXTURE DEBRIS', $out);
         self::assertStringNotContainsString('debris-check: clean', $out);
     }
+
+    /**
+     * A trace nobody asked for is REPORTED and named, and it does not fail the check.
+     *
+     * THE BLIND SPOT THIS CLOSES (sprint TRACE-TABLE round 2). Traced failures became rows in
+     * 1.1.2, so for the first time a green run's unexpected failures are somewhere a check can
+     * read. The suite's own traces are caused on purpose and carry the test prefix; a row
+     * without it is a failure something on the site actually hit, and until now nothing looked.
+     *
+     * IT IS A NOTICE AND NOT A VERDICT, which is the half worth pinning: this script's exit code
+     * answers "did the suite leave fixtures behind", a trace is not a fixture, and a check that
+     * went red because somebody opened the endpoint in a browser is a check that gets ignored.
+     *
+     * @group sprint-14d
+     */
+    public function testAnUnexpectedTraceIsReportedByNameAndDoesNotFailTheCheck(): void
+    {
+        $others = ['id 41  2026-09-24 12:00:00 UTC  list-posts  TypeError'];
+        $report = Fixtures::traceReport(3, $others, 7);
+
+        self::assertStringContainsString('were NOT caused by a test', $report);
+        self::assertStringContainsString('id 41', $report, 'The unexpected row is not named, so it cannot be looked up.');
+        self::assertStringContainsString('list-posts', $report);
+        self::assertStringContainsString('3 trace row(s) were caused by this suite on purpose', $report);
+        self::assertStringContainsString(
+            'KNOWN FALSE POSITIVE',
+            $report,
+            'The report does not name the case where the split is wrong. The FIRST live run found'
+            . ' it: a suite-caused failure through a BUILT-IN tool carries the prefix nowhere, so'
+            . ' six sql-select refusals landed in the second bucket. A reader who is not told that'
+            . ' goes looking for a bug that is a passing test.'
+        );
+        self::assertStringContainsString('within 7 days', $report, 'The retention number comes from the site, not from a literal here.');
+
+        [$code, $out] = Fixtures::debrisVerdict('', $report, '');
+
+        self::assertSame(0, $code, 'An unexpected trace failed the debris check. It is a signal to read, not a leftover.');
+        self::assertStringContainsString('debris-check: clean', $out);
+        self::assertLessThan(
+            strpos($out, 'debris-check: clean'),
+            strpos($out, 'NOT caused by a test'),
+            'The trace report must come before the verdict it does not change.'
+        );
+    }
+
+    /**
+     * No traces at all: nothing printed, and the clean sentence is untouched.
+     *
+     * @group sprint-14d
+     */
+    public function testNoTracesPrintsNothing(): void
+    {
+        self::assertSame('', Fixtures::traceReport(0, [], 7));
+
+        [$code, $out] = Fixtures::debrisVerdict('', Fixtures::traceReport(0, [], 7), '');
+
+        self::assertSame(0, $code);
+        self::assertStringStartsWith('debris-check: clean', $out);
+    }
+
+    /**
+     * The suite's OWN traces alone print a notice that says why they are not debris, and the
+     * check still passes - which is the case every green run actually produces.
+     *
+     * @group sprint-14d
+     */
+    public function testTheSuitesOwnTracesAreANoticeAndStillClean(): void
+    {
+        $report = Fixtures::traceReport(13, [], 7);
+
+        self::assertStringNotContainsString('NOT caused by a test', $report);
+        self::assertStringContainsString('13 trace row(s) were caused by this suite on purpose', $report);
+
+        [$code, $out] = Fixtures::debrisVerdict('', $report, '');
+
+        self::assertSame(0, $code, 'Traces the suite caused on purpose failed the debris check.');
+        self::assertStringContainsString('debris-check: clean', $out);
+    }
 }

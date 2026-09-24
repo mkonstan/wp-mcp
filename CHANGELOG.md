@@ -36,10 +36,29 @@ surface split out of `tools.php` behind a declared seam.
   event that already clears dead tokens, oldest first. The file was never swept at all: two
   development sites reached 1.7 MB and 1.5 MB in eleven days, and on a customer host nothing ever
   came along to clean it up. Retention is now days rather than for ever for a cost the file did
-  not have - a row rides in every database backup, export and staging clone. At the measured mean
-  entry of 2,283 bytes, 2,000 rows is about 4.6 MB, and that is the hard ceiling this adds to a
-  backup. Both numbers are filterable, `wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows`, and a
-  value under 1 day or 100 rows is ignored rather than obeyed.
+  not have - a row rides in every database backup, export and staging clone. Both numbers are
+  filterable, `wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows`, and a value under 1 day or
+  100 rows is ignored rather than obeyed.
+- **The sweep deletes in batches of 500, at most 20 batches per cap per run.** A site whose cron
+  has not fired for a month would otherwise delete a month of rows in one statement - one
+  transaction, with a `longtext` per row in the undo log, inside an ordinary page load. It clears
+  over the next few hourly runs instead.
+- **Every field of a trace is capped in bytes against its own column, and the stack is capped at
+  8 KiB as well as at 200 frames** - so what the table can cost a backup is a MAXIMUM and not an
+  average. One row is at most 12,960 bytes (`method` 64, `tool` 191, `class` 191, `at` 255,
+  `message` and `data` 2,000 each, `stack` 8,192), which puts **2,000 rows under 26 MB**; the
+  measured mean entry is 2,283 bytes, so seven days at a development site's rate of 69 failures a
+  day is 486 rows, about 1.1 MB. A cap on the NUMBER of rows is not a cap on their SIZE unless the
+  row is bounded too: with the stack bounded only in frames, the runaway recursion a frame cap
+  exists for wrote 40-400 KB rows, and 2,000 of those is not 4.6 MB.
+- **An upgrade that could NOT remove the old log raises an error notice on every admin screen**,
+  naming what is left. On nginx that file is still being served, which is the whole reason the
+  log moved, so an upgrade that did not manage it must not look like one that did. Deleting the
+  path by hand and reactivating the plugin clears it.
+- **A symlinked `wp-content/wpmcp` is reported and not followed.** `glob()` and `unlink()` follow
+  a link, so the upgrade would delete files somewhere the plugin has never written - a volume
+  mount, a shared directory, a backup target - and removing the link would leave every exposed
+  byte where it is while reporting success.
 - **A new auth event, `trace_file_removed`,** fires once on the upgrade request with what it
   deleted and what it could not - the latter being the sites where the file is still readable.
 - **`sql-select` refuses the new table by name**, exactly as it already refuses the token and

@@ -69,9 +69,17 @@ if (!defined('ABSPATH')) { exit; }
  * operator's next backup carries all of them. MEASURED 2026-09-24 (analysis/62): mean entry
  * 2,283 bytes, and 763 entries in eleven days on a development site under continuous suite
  * load - 69 failures a day, far more than a real site sees. Seven days at that rate is 486
- * rows, about 1.1 MB. The row cap bites at 286 failures a day, four times that rate, and
- * holds the worst case at 2,000 rows - about 4.6 MB, which is the hard ceiling this feature
- * adds to a backup.
+ * rows, about 1.1 MB.
+ *
+ * AND A ROW CAP IS NOT A SIZE CAP UNLESS THE ROW IS BOUNDED TOO. This is the correction that
+ * round 2 of this sprint owes: 2,000 rows at the measured MEAN is 4.6 MB, and the mean is not
+ * a ceiling. `stack` is a `longtext`, and until round 2 it was bounded only in FRAMES - so the
+ * runaway recursion a frame cap exists for wrote 40-400 KB rows, and 2,000 of those is 80-800
+ * MB, not 4.6 MB. Every field now has a BYTE cap as well, so the row itself has a ceiling:
+ * see WPMCP_TRACE_STACK_BYTES and wpmcp_trace_record()'s per-column caps. At most 12,960
+ * bytes of column data per row, which puts the hard ceiling at the row cap under **26 MB**
+ * (24.7 MiB) rather than under 5 MB, and leaves the typical figure where it was - a real site
+ * writes the measured mean, so 486 rows in seven days is still about 1.1 MB.
  *
  * AND IT IS THE OLDEST ROWS THAT GO, for the reason the file's cap was cut the same way: the
  * newest entry is the one whose id was issued a moment ago and is about to be quoted.
@@ -84,17 +92,95 @@ define('WPMCP_TRACE_KEEP_DAYS', 7);
 define('WPMCP_TRACE_KEEP_ROWS', 2000);
 
 /**
- * The most stack frames one row stores.
+ * How many rows one DELETE removes, and how many DELETEs one sweep runs.
  *
- * THE ONE VALUE THE FILE'S BYTE CAP USED TO BOUND AND A COLUMN DOES NOT. Every other field
- * is cut at 2,000 characters by wpmcp_trace_field(); the stack was not, because the file had
- * a 2 MiB ceiling over the whole thing. A runaway recursion produces thousands of frames, so
- * without this one row could be a megabyte - and it would ride in every backup 2,000 times
- * over. Two hundred frames is far past the depth anybody reads and is about 30 KB at the
- * measured frame length; what is dropped is the MIDDLE of the call chain, and the line saying
- * so is in the stack itself.
+ * AN UNBOUNDED DELETE IS ONE TRANSACTION, AND THE SITE THAT NEEDS THE SWEEP IS THE SITE THAT
+ * CANNOT AFFORD IT (round 2). WP-Cron is driven by page loads, so a quiet or broken-cron site
+ * does not sweep for a month and then sweeps everything at once: `DELETE FROM ... WHERE
+ * logged_at < ...` over a hundred thousand rows is one statement holding one transaction, with
+ * a `longtext` per row in the undo log, inside an ordinary front-end request. Five hundred rows
+ * a statement keeps each one short, and the loop keeps the total work per sweep bounded.
+ *
+ * TWENTY ROUNDS, SO AT MOST 10,000 ROWS PER CAP PER SWEEP. That is five times the row cap, so
+ * a site at its cap clears in one sweep; a site with a month of backlog clears over the next
+ * few hourly runs instead of in one request. The bound is deliberately on the WORK and not on
+ * the outcome: the sweep is idempotent and the hook fires again in an hour, so stopping early
+ * costs nothing but a little more retention than the policy names, and the alternative is a
+ * cron callback whose cost has no upper bound at all.
+ */
+define('WPMCP_TRACE_SWEEP_BATCH', 500);
+define('WPMCP_TRACE_SWEEP_ROUNDS', 20);
+
+/**
+ * TWO BOUNDS ON THE STACK, AND THEY BOUND DIFFERENT THINGS. Round 1 of this sprint shipped
+ * only the first and then claimed a size ceiling the second is what actually provides.
+ *
+ * WPMCP_TRACE_STACK_FRAMES bounds the WORK. A runaway recursion produces tens of thousands of
+ * frames, and building a string for each one - with its argument shapes - costs CPU and memory
+ * on a request that has already failed. Two hundred is far past the depth anybody reads.
+ *
+ * WPMCP_TRACE_STACK_BYTES bounds the ROW, which is the thing that rides in every database
+ * backup. A frame line carries an absolute path, a class, a function and up to eight argument
+ * keys of forty characters each, so a frame is not a fixed size: 200 frames of a deep
+ * WordPress stack measured ~80 bytes each, and 200 frames of a pathological one reach two
+ * kilobytes each. A count cap over a variable-width row is not a size cap - the arithmetic in
+ * wpmcp_trace_keep_rows()'s docblock says what that cost.
+ *
+ * EIGHT KIBIBYTES, and the number is the measurement: the measured MEAN ENTRY is 2,283 bytes
+ * in total, of which the stack is the bulk, so 8 KiB is roughly four times a normal stack and
+ * keeps every frame of one intact. It is the largest of the eleven caps by an order of
+ * magnitude, which is right - the stack is the field an operator actually reads.
+ *
+ * WHAT IS DROPPED IS THE MIDDLE, under both bounds, and for the same reason: the frames worth
+ * reading are the ENDS. The innermost say where it broke; the outermost say how the request
+ * got there; a recursion storm is the same few frames repeated in between. Each bound writes
+ * its own line into the stack saying what it took, so a shortened stack is never mistaken for
+ * a complete one - see wpmcp_trace_stack_fit().
  */
 define('WPMCP_TRACE_STACK_FRAMES', 200);
+define('WPMCP_TRACE_STACK_BYTES', 8192);
+
+/**
+ * The bytes reserved inside WPMCP_TRACE_STACK_BYTES for the line that says what was dropped.
+ *
+ * RESERVED RATHER THAN MEASURED, because the line's own length depends on the two numbers it
+ * has not counted yet - how many frames went and how many bytes they were. A hundred and
+ * twenty bytes is comfortably over the longest form of that sentence, and spending it means
+ * the budget is never exceeded by the explanation of the budget.
+ */
+define('WPMCP_TRACE_STACK_NOTE_BYTES', 120);
+
+/**
+ * The byte cap on every other field, keyed to the column that holds it.
+ *
+ * THE FIRST REASON IS THE CEILING, and it is the whole of round 2's blocker: a cap on the
+ * NUMBER of rows is not a cap on their SIZE unless every field is bounded too. Round 1 cut
+ * every field at 2,000 bytes - under `message` and `data`'s columns, far OVER the four
+ * varchars', and absent entirely on `stack` - and then documented 2,000 rows as "about 4.6 MB",
+ * which is 2,000 times the measured MEAN. With these caps the row has a maximum and the
+ * arithmetic in wpmcp_trace_keep_rows() is a maximum too.
+ *
+ * THE SECOND REASON IS THAT MYSQL'S OWN TRUNCATION IS SILENT AND OURS IS NOT. A value wider
+ * than its column is cut either way; cut here it ends in `...` and the operator can see that
+ * something was removed, cut by the server it arrives looking complete. What is NOT the reason,
+ * and was written as one before it was checked: a refused INSERT. WordPress's
+ * `wpdb::set_sql_mode()` REMOVES `STRICT_TRANS_TABLES` from the session on every connection, so
+ * on WordPress an over-wide value is a warning and not an error - MEASURED 2026-09-24 on both
+ * development sites, whose `@@SESSION.sql_mode` is
+ * `NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`. On a `$wpdb` replacement
+ * that does not strip it, the same value refuses the INSERT and the trace goes to error_log()
+ * instead - so the cap covers that host as well, but it is not the case it exists for.
+ *
+ * The numbers ARE the column widths in wpmcp_install()'s third CREATE TABLE, checked against
+ * them by tests/unit/TraceRowBoundTest.php so the two cannot drift. The two `longtext`/`text`
+ * fields keep 2,000 - not because the column is that narrow, but because one event must not
+ * become a megabyte of backup.
+ */
+define('WPMCP_TRACE_METHOD_BYTES', 64);
+define('WPMCP_TRACE_TOOL_BYTES', 191);
+define('WPMCP_TRACE_CLASS_BYTES', 191);
+define('WPMCP_TRACE_AT_BYTES', 255);
+define('WPMCP_TRACE_TEXT_BYTES', 2000);
 
 /** Eight hex digits. Short enough to read out loud, long enough to grep for. */
 function wpmcp_trace_new_id() {
@@ -202,17 +288,26 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     $id      = wpmcp_trace_new_id();
     $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
 
+    // EVERY FIELD CAPPED TO ITS OWN COLUMN, and the caps are what make the row's size a
+    // ceiling rather than an average - see WPMCP_TRACE_METHOD_BYTES, which is also where the
+    // reason NOT to state (a refused INSERT) is written down, because WordPress strips strict
+    // mode from the session and round 2 nearly shipped that sentence.
+    //
+    // THE TOTAL IS THEREFORE 12,960 BYTES OF COLUMN DATA AT WORST: 8 + 19 + 64 + 191 + 20 +
+    // 20 + 191 + 2,000 + 255 + 2,000 + 8,192. That number is quoted in the changelog, the
+    // README and wpmcp_trace_keep_rows(), and it is the only honest way to state what this
+    // feature costs a backup: 2,000 of them is under 26 MB.
     $row = array(
         'trace_id'  => $id,
         'logged_at' => gmdate('Y-m-d H:i:s'),
-        'method'    => wpmcp_trace_field($method),
-        'tool'      => wpmcp_trace_field($tool),
+        'method'    => wpmcp_trace_field($method, WPMCP_TRACE_METHOD_BYTES),
+        'tool'      => wpmcp_trace_field($tool, WPMCP_TRACE_TOOL_BYTES),
         'user_id'   => $session ? (int) $session->user_id : 0,
         'token_id'  => $session ? (int) $session->id : 0,
-        'class'     => wpmcp_trace_field($class),
-        'message'   => wpmcp_trace_field($e->getMessage()),
-        'at'        => wpmcp_trace_field($e->getFile() . ':' . $e->getLine()),
-        'data'      => $data === '' ? '' : wpmcp_trace_field($data),
+        'class'     => wpmcp_trace_field($class, WPMCP_TRACE_CLASS_BYTES),
+        'message'   => wpmcp_trace_field($e->getMessage(), WPMCP_TRACE_TEXT_BYTES),
+        'at'        => wpmcp_trace_field($e->getFile() . ':' . $e->getLine(), WPMCP_TRACE_AT_BYTES),
+        'data'      => $data === '' ? '' : wpmcp_trace_field($data, WPMCP_TRACE_TEXT_BYTES),
         'stack'     => implode("\n", wpmcp_trace_stack($e)),
     );
 
@@ -335,19 +430,53 @@ function wpmcp_trace_sweep() {
 
     $table = wpmcp_traces_table();
 
-    $gone = (int) $wpdb->query($wpdb->prepare(
-        'DELETE FROM ' . $table . ' WHERE logged_at < (UTC_TIMESTAMP() - INTERVAL %d DAY)',
-        wpmcp_trace_keep_days()
+    $gone = wpmcp_trace_sweep_batched($wpdb->prepare(
+        'DELETE FROM ' . $table . ' WHERE logged_at < (UTC_TIMESTAMP() - INTERVAL %d DAY)'
+        . ' LIMIT %d',
+        wpmcp_trace_keep_days(),
+        (int) WPMCP_TRACE_SWEEP_BATCH
     ));
 
     $newest = (int) $wpdb->get_var('SELECT MAX(id) FROM ' . $table);
     $cut    = $newest - wpmcp_trace_keep_rows();
 
     if ($cut > 0) {
-        $gone += (int) $wpdb->query($wpdb->prepare(
-            'DELETE FROM ' . $table . ' WHERE id <= %d',
-            $cut
+        $gone += wpmcp_trace_sweep_batched($wpdb->prepare(
+            'DELETE FROM ' . $table . ' WHERE id <= %d LIMIT %d',
+            $cut,
+            (int) WPMCP_TRACE_SWEEP_BATCH
         ));
+    }
+
+    return $gone;
+}
+
+/**
+ * Run one bounded DELETE until it stops removing a full batch, or until the round cap.
+ *
+ * The statement is prepared by the caller and already carries its own `LIMIT`, so this decides
+ * only how many times to run it - see WPMCP_TRACE_SWEEP_BATCH for why an unbounded DELETE is
+ * the wrong shape for a cron callback on the site that most needs it.
+ *
+ * A round that removes FEWER than the batch has reached the end of what matches, so the loop
+ * stops rather than running one more statement to be told nothing is left. A `false` return -
+ * the table is missing, the query failed - stops it too: retrying a broken statement twenty
+ * times inside a front-end request is the cost this function exists to avoid.
+ */
+function wpmcp_trace_sweep_batched($sql) {
+    global $wpdb;
+
+    $batch = (int) WPMCP_TRACE_SWEEP_BATCH;
+    $gone  = 0;
+
+    for ($round = 0; $round < (int) WPMCP_TRACE_SWEEP_ROUNDS; $round++) {
+        $removed = $wpdb->query($sql);
+
+        if ($removed === false) { break; }
+
+        $gone += (int) $removed;
+
+        if ((int) $removed < $batch) { break; }
     }
 
     return $gone;
@@ -420,7 +549,90 @@ function wpmcp_trace_stack(Throwable $e) {
 
     $lines[] = '#' . $total . ' {main}';
 
-    return $lines;
+    return wpmcp_trace_stack_fit($lines);
+}
+
+/**
+ * Hold the built stack under WPMCP_TRACE_STACK_BYTES, dropping frames from the MIDDLE.
+ *
+ * THE SECOND OF THE TWO BOUNDS, AND THE ONE THAT MAKES THE ROW A CEILING. The frame cap above
+ * bounds how many lines get built; this bounds how many BYTES are stored, which is what a
+ * database backup carries. Without it a count cap over variable-width lines is not a size cap
+ * at all, and the size this sprint claimed in its own changelog was a mean rather than a
+ * maximum.
+ *
+ * THE ENDS SURVIVE AND THE MIDDLE GOES, exactly as the frame cap cuts, and frames are taken
+ * ALTERNATELY - innermost, outermost, next innermost, next outermost - so a budget that only
+ * fits three lines spends them on the two most useful frames rather than on three consecutive
+ * ones. `{main}` is the last line and is therefore among the first kept: it is how a reader
+ * knows the stack reached the bottom rather than being cut off there.
+ *
+ * AND IT SAYS WHAT IT TOOK, in a line that carries no `trace=` field for the reason the file's
+ * truncation marker carried none: a marker that reads like an event could come back from a grep
+ * by id. The line names the frames dropped, the bytes they were and the cap, so a stack that
+ * is shorter than a reader expects is never mistaken for a complete one.
+ *
+ * ONE FRAME CAN BE BIGGER THAN THE WHOLE BUDGET - a single call with eight long argument keys
+ * under a deep path. Then there is nothing to keep whole, so that line is cut and says so.
+ * Answering with an empty stack would be worse: the file:line is in another column, but the
+ * frame is the only thing that says which call it was.
+ *
+ * @param list<string> $lines the frame lines, innermost first, `{main}` last.
+ * @return list<string>
+ */
+function wpmcp_trace_stack_fit(array $lines) {
+    $budget = (int) WPMCP_TRACE_STACK_BYTES;
+    $bytes  = 0;
+
+    // +1 per line for the newline implode() will put between them, so the budget is measured
+    // against the string that actually reaches the column.
+    foreach ($lines as $line) { $bytes += strlen($line) + 1; }
+
+    if ($bytes <= $budget || $lines === array()) { return $lines; }
+
+    $room = $budget - (int) WPMCP_TRACE_STACK_NOTE_BYTES;
+    $head = array();
+    $tail = array();
+    $used = 0;
+    $i    = 0;
+    $j    = count($lines) - 1;
+
+    while ($i <= $j) {
+        $len = strlen($lines[$i]) + 1;
+
+        if ($used + $len > $room) { break; }
+
+        $head[] = $lines[$i];
+        $used  += $len;
+        $i++;
+
+        if ($i > $j) { break; }
+
+        $len = strlen($lines[$j]) + 1;
+
+        if ($used + $len > $room) { break; }
+
+        array_unshift($tail, $lines[$j]);
+        $used += $len;
+        $j--;
+    }
+
+    if ($head === array() && $tail === array()) {
+        // The innermost frame alone is over budget. Keep as much of it as fits and say so.
+        return array(substr($lines[0], 0, $room) . ' ...[frame cut at ' . $budget . ' bytes]');
+    }
+
+    $dropped = $j - $i + 1;
+    $lost    = 0;
+
+    for ($k = $i; $k <= $j; $k++) { $lost += strlen($lines[$k]) + 1; }
+
+    return array_merge(
+        $head,
+        array('#.. ' . $dropped . ' frames omitted, ' . $lost . ' bytes over the '
+            . $budget . '-byte stack cap'),
+        $tail
+    );
 }
 
 /**
@@ -460,17 +672,30 @@ function wpmcp_trace_arg_shape($arg) {
 }
 
 /**
- * One field: newlines flattened, bounded.
+ * One field: newlines flattened, cut to $max BYTES.
  *
  * A WP_Error's data, and a throwable's message, can both be arbitrarily long, and every one
  * of these now rides in a database backup. One event must not be able to become a megabyte
  * of it. Newlines go because the rendered entry is one line per event and every consumer
  * keys on that - see wpmcp_trace_entry().
+ *
+ * $max IS THE COLUMN'S OWN WIDTH, AND IT IS REQUIRED RATHER THAN DEFAULTED (round 2). One
+ * shared cap of 2,000 was over four of the six columns and absent on the seventh, which is what
+ * made the documented row ceiling an average rather than a maximum. A value cut HERE says it was
+ * cut; the same value cut by MySQL arrives looking complete. See WPMCP_TRACE_METHOD_BYTES.
+ *
+ * THE CUT IS IN BYTES, and the `...` goes INSIDE the budget rather than past it, because the
+ * point of the number is that the column can hold the result. A byte cut can land mid-sequence
+ * in UTF-8; that is why the three dots are ASCII and why the value is not re-validated as
+ * text - it is an opaque diagnostic string, not something a client parses.
  */
-function wpmcp_trace_field($value) {
+function wpmcp_trace_field($value, $max) {
     $value = str_replace(array("\r", "\n"), ' ', (string) $value);
+    $max   = (int) $max;
 
-    if (strlen($value) > 2000) { $value = substr($value, 0, 2000) . '...'; }
+    if ($max > 3 && strlen($value) > $max) {
+        $value = substr($value, 0, $max - 3) . '...';
+    }
 
     return $value;
 }

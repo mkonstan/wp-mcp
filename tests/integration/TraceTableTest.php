@@ -35,6 +35,7 @@ namespace WpMcp\Tests\Integration;
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
 use WpMcp\Tests\Support\MuPlugin;
+use WpMcp\Tests\Support\RepoFile;
 use WpMcp\Tests\Support\TraceLog;
 use WpMcp\Tests\Support\WpCli;
 
@@ -42,6 +43,9 @@ final class TraceTableTest extends FixtureIntegrationTestCase
 {
     /** The mu-plugin that registers the throwing tool. */
     private const THROWING = 'trace-table-thrower';
+
+    /** Where the symlinked wp-content/wpmcp points, relative to wp-content. */
+    private const SYMLINK_TARGET = 'wpmcp-test-trace-symlink-target';
 
     /** The message the TypeError carries. It must reach the table and never the wire. */
     private const THROWN_MESSAGE = 'wpmcp trace table probe: this message must not reach a client';
@@ -89,6 +93,8 @@ final class TraceTableTest extends FixtureIntegrationTestCase
         // a readable file full of stack traces under the document root.
         TraceLog::forgetPlanted();
         TraceLog::forgetLegacyFile();
+        TraceLog::forgetSymlinkedDir(self::SYMLINK_TARGET);
+        TraceLog::forgetFileLeft();
 
         // Unconditionally, for the reason StaleBackupSweepMigrationTest gives: a crash between
         // moving the revision back and the request that upgrades it would leave the site
@@ -461,6 +467,119 @@ final class TraceTableTest extends FixtureIntegrationTestCase
             TraceLog::contains('wpmcp-test planted by the upgrade test'),
             'The upgrade migrated the old file\'s entries into the table. They were left out on'
             . ' purpose: every one of them would then ride in every database backup.'
+        );
+    }
+
+    /**
+     * Two rows under one id are BOTH shown, and the screen says so.
+     *
+     * `trace_id` is a KEY and not a UNIQUE KEY on purpose - a duplicate must not make the INSERT
+     * fail and lose the entry whose id has just gone out on the wire - so two rows can carry one
+     * id. It is about one per two million traces, which at the measured rate is decades; the cost
+     * of NOT saying so is that an operator reads the newest match as "the" trace and diagnoses the
+     * wrong failure, and that cost does not scale with the odds.
+     *
+     * @group sprint-14d
+     */
+    public function testAnIdSharedByTwoTracesIsLabelledRatherThanSilentlyDisambiguated(): void
+    {
+        $shared = 'aaaaaa03';
+
+        self::assertSame('1', TraceLog::plantDuplicate($shared), 'Could not plant the first row.');
+        self::assertSame('1', TraceLog::plantDuplicate($shared), 'Could not plant the second row.');
+
+        [$code, $html] = self::renderLookup($shared, 1);
+
+        self::assertSame(0, $code, 'The settings screen did not render: ' . $html);
+        self::assertStringContainsString(
+            '2 traces share this id',
+            $html,
+            'Two rows carry that id and the screen showed them unlabelled, so an operator reads'
+            . ' the newest as the one they were told about. HTML: ' . $html
+        );
+        self::assertSame(
+            2,
+            substr_count($html, 'trace=' . $shared),
+            'The screen did not render BOTH rows, so a collision hides the one being asked about.'
+        );
+    }
+
+    /**
+     * A SYMLINKED wp-content/wpmcp is reported and NOT acted on.
+     *
+     * THE SHAPE WHERE ACTING IS WORSE THAN NOT ACTING. `glob()` and `unlink()` follow a link, so
+     * the migration would delete files somewhere it has never written - a volume mount, a shared
+     * directory, somebody's backup target - and `rmdir()` would take the LINK while leaving every
+     * exposed byte where it is. The same rule the code tools' jail applies to a caller's path.
+     *
+     * AND IT MUST BE REPORTED, not merely skipped: a link is a host where the log is still
+     * readable, so the operator has to be told, through the same option and notice a failed
+     * unlink uses.
+     *
+     * WINDOWS MAY REFUSE TO CREATE THE LINK - `symlink()` needs SeCreateSymbolicLinkPrivilege or
+     * Developer Mode - and that is STATED rather than skipped, the same way ErrorBoundaryTest
+     * handles `0600` on a filesystem that cannot express it. Where the link can be made, which is
+     * every Linux host and CI, the assertions have teeth.
+     *
+     * @group sprint-14d
+     */
+    public function testASymlinkedTraceDirectoryIsReportedAndNotFollowed(): void
+    {
+        TraceLog::forgetFileLeft();
+
+        if (!TraceLog::plantSymlinkedDir(self::SYMLINK_TARGET)) {
+            // NOT A SKIP, for the reason a test that can skip must never sit in a gate group: a
+            // skip is green and the fact vanishes. This host cannot create the link, so the
+            // weaker check runs instead and SAYS it is weaker - the guard is asserted in the
+            // shipped source, and CI, which is Linux, runs the real one.
+            $source = RepoFile::read('wp-mcp.php');
+
+            self::assertFalse(
+                TraceLog::dirIsSymlink(),
+                'symlink() reported failure and the path IS a link, so the fixture is confused.'
+            );
+            self::assertStringContainsString(
+                'is_link($dir)',
+                $source,
+                'This host refuses symlink() - on Windows that needs'
+                . ' SeCreateSymbolicLinkPrivilege or Developer Mode - so the behaviour could not'
+                . ' be exercised, and the migration does not even GUARD on is_link($dir). That'
+                . ' guard is the only thing between the upgrade and unlinking files somewhere it'
+                . ' has never written.'
+            );
+            self::assertStringContainsString(
+                'is_link($file)',
+                $source,
+                'A linked FILE inside a real directory is the same decision one level down, and'
+                . ' the migration does not guard on it.'
+            );
+
+            return;
+        }
+
+        self::assertTrue(TraceLog::dirIsSymlink(), 'The fixture did not leave a symlink behind.');
+
+        $tally = WpCli::evaluate(
+            '$t = wpmcp_migrate_remove_trace_file();'
+            . ' echo implode("|", $t["failed"]), "\t", implode("|", $t["removed"]);'
+        );
+
+        self::assertStringContainsString(
+            'symlink',
+            $tally,
+            'The migration did not report the symlink, so an operator is never told why the log is'
+            . ' still there. Tally: ' . $tally
+        );
+        self::assertTrue(
+            TraceLog::dirIsSymlink(),
+            'The migration REMOVED the symlink. That takes the link and leaves every exposed byte'
+            . ' where it is, while telling the operator the log was removed.'
+        );
+        self::assertStringContainsString(
+            'symlink',
+            TraceLog::fileLeft(),
+            'The symlink is not recorded in the option the admin notice reads, so the report went'
+            . ' to the PHP error log and nowhere an operator looks.'
         );
     }
 

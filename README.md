@@ -818,8 +818,13 @@ because a client that renders only `error.message` would otherwise show you a de
 
 The stack carries each argument's SHAPE and never its value: an array's keys, a string's
 length, an object's class. PHP's own formatter prints the first fifteen characters of every
-string argument, which is enough to be somebody's data. It is stored at most 200 frames deep,
-and a runaway recursion says how many it dropped.
+string argument, which is enough to be somebody's data.
+
+The stack is bounded twice: at **200 frames**, which bounds the work of building it, and at
+**8 KiB**, which bounds the row that ends up in your backups. Both drop the MIDDLE of the call
+chain - the frames worth reading are the innermost, where it broke, and the outermost, which say
+how the request got there - and each writes a line into the stack saying how many it took, so a
+shortened stack is never mistaken for a complete one.
 
 **Since 1.1.2 it is a database table, `wp_wpmcp_traces`, and not a file.** Until then it was
 `wp-content/wpmcp/trace-<32 hex>.log` behind an `.htaccess` - and `.htaccess` is an Apache
@@ -835,12 +840,16 @@ row is precisely the detail the error boundary keeps from a caller.
 
 **Traces are kept 7 days and at most 2,000 of them**, swept hourly on the same event that
 clears dead tokens - oldest first, because a trace id is quoted shortly after it is issued.
-Retention is days rather than for ever for one reason a file did not have: a row rides in every
-database backup, export and staging clone you take. At the measured mean entry of 2,283 bytes,
-2,000 rows is about 4.6 MB, and that is the hard ceiling this feature adds to a backup; a
-development site under continuous suite load wrote 69 failures a day, which fills 486 rows -
-about 1.1 MB - in seven days. Both numbers are filterable, and a useless value is ignored
-rather than obeyed:
+Retention is days rather than for ever for one reason a file did not have: a
+row rides in every database backup, export and staging clone you take.
+
+**How much that costs, as a maximum rather than an average.** Every field of a trace is capped
+in bytes against the column that holds it - `method` 64, `tool` 191, `class` 191, `at` 255,
+`message` and the `WP_Error` data 2,000 each, and the **stack 8 KiB** - so one row is at most
+12,960 bytes and **2,000 rows is under 26 MB**. In practice it is far less: the measured mean
+entry is 2,283 bytes, and a development site under continuous suite load wrote 69 failures a
+day, which fills 486 rows - about **1.1 MB** - in seven days. Both retention numbers are
+filterable, and a useless value is ignored rather than obeyed:
 
 ```php
 add_filter('wpmcp_trace_keep_days', fn() => 14);   // under 1 day is ignored
@@ -856,10 +865,20 @@ If a trace cannot be stored at all, the whole entry goes to the PHP error log pr
 `wp-mcp trace (could not be stored)`, so the trace id you were given still resolves to
 something.
 
+The hourly sweep deletes in batches of 500, at most 20 batches per cap per run, so a site whose
+cron has not fired for a month clears over the next few hourly runs instead of in one enormous
+transaction inside somebody's page load.
+
 **Upgrading from 1.1.1 or earlier deletes the log file, `wp-content/wpmcp/` and the three
 options that went with it.** That is the only way the exposure actually goes away. The old
 entries are NOT copied into the table - they would then ride in every backup - so if you have a
 live support case against an old trace id, take a copy of the file before you update.
+
+**If the upgrade cannot remove it, you get an error notice on every admin screen** naming what
+is left, because on nginx that file is still being served. It is also what you see when
+`wp-content/wpmcp` is a **symlink**: the upgrade reports a link and refuses to follow it, rather
+than unlinking files somewhere the plugin has never written. Delete the path by hand, then
+deactivate and reactivate the plugin to clear the notice.
 
 ## Code editing (opt-in)
 

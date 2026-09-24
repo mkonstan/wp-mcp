@@ -219,6 +219,70 @@ final class TraceLog
         );
     }
 
+    /**
+     * Plant a SECOND row carrying an id that already exists, so the lookup's collision label has
+     * something to label. Returns '1' when the row landed.
+     *
+     * `trace_id` is a KEY and not a UNIQUE KEY on purpose, so this is a state the table allows -
+     * about one per two million traces, which is decades at the measured rate. A test is the only
+     * way it will ever be seen.
+     */
+    public static function plantDuplicate(string $traceId): string
+    {
+        return self::plant($traceId, 0);
+    }
+
+    /**
+     * Turn `wp-content/wpmcp` into a SYMLINK pointing at $target, and say whether it worked.
+     *
+     * IT CAN FAIL, AND THAT IS REPORTED RATHER THAN SKIPPED. Windows refuses `symlink()` to a
+     * process without SeCreateSymbolicLinkPrivilege or Developer Mode, so on this workstation the
+     * answer may be false - the same shape as "0600, or a host that cannot express it" in
+     * ErrorBoundaryTest. The caller states the fact instead of going quietly green.
+     */
+    public static function plantSymlinkedDir(string $target): bool
+    {
+        return trim(WpCli::evaluate(
+            '$dir = WP_CONTENT_DIR . "/wpmcp"; $t = WP_CONTENT_DIR . "/" . ' . self::php($target) . ';'
+            . ' if (is_dir($dir) && !is_link($dir)) { foreach (glob($dir . "/*") ?: array() as $f) { @unlink($f); } @rmdir($dir); }'
+            . ' if (is_link($dir)) { echo 1; return; }'
+            . ' wp_mkdir_p($t);'
+            . ' file_put_contents($t . "/trace-" . str_repeat("a", 32) . ".log", "wpmcp-test symlinked trace");'
+            . ' echo (int) @symlink($t, $dir);'
+        )) === '1';
+    }
+
+    /** Is wp-content/wpmcp a symlink right now? */
+    public static function dirIsSymlink(): bool
+    {
+        return trim(WpCli::evaluate('echo (int) is_link(WP_CONTENT_DIR . "/wpmcp");')) === '1';
+    }
+
+    /** Remove a symlinked wp-content/wpmcp and the directory it pointed at. Teardown only. */
+    public static function forgetSymlinkedDir(string $target): void
+    {
+        WpCli::tryEvaluate(
+            '$dir = WP_CONTENT_DIR . "/wpmcp"; $t = WP_CONTENT_DIR . "/" . ' . self::php($target) . ';'
+            . ' if (is_link($dir)) { @unlink($dir); @rmdir($dir); }'
+            . ' foreach (glob($t . "/*") ?: array() as $f) { @unlink($f); }'
+            . ' if (is_dir($t)) { @rmdir($t); } echo 1;'
+        );
+    }
+
+    /** What the upgrade recorded that it could not remove, or '' when it took everything. */
+    public static function fileLeft(): string
+    {
+        $encoded = WpCli::evaluate('echo base64_encode(wpmcp_trace_file_left());');
+
+        return trim($encoded) === '' ? '' : (string) base64_decode(trim($encoded), true);
+    }
+
+    /** Clear that record, so a later class does not inherit this one's notice. */
+    public static function forgetFileLeft(): void
+    {
+        WpCli::tryEvaluate('echo (int) delete_option("wpmcp_trace_file_left");');
+    }
+
     /** A PHP single-quoted literal, for a `wp eval` snippet that must stay one line. */
     private static function php(string $value): string
     {
