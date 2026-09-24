@@ -289,8 +289,14 @@ jobs:
 
       - name: Start WordPress at the declared floor
         env:
+          # 8.4, NOT 8.2, AND THE 8.2 HERE WAS A REAL HOLE (sprint LOG+FLOOR round 2). Four
+          # things name the pair this leg proves - this variable, the `case` below, the job name
+          # and the error string - and three of them said 8.4 while this one said 8.2. So the
+          # release gate ran the floor on a PHP the README does not claim, and the guard written
+          # to catch exactly that went green on it. Left over from 14741eb, which moved the floor
+          # and updated ci.yml only. FloorConsistencyTest now pins BOTH workflows.
           WP_ENV_CORE: WordPress/WordPress#6.9
-          WP_ENV_PHP_VERSION: '8.2'
+          WP_ENV_PHP_VERSION: '8.4'
         run: npx --yes @wordpress/env start --debug
 
       - name: Enable pretty permalinks
@@ -307,13 +313,17 @@ jobs:
           esac
           # AND THE OTHER HALF OF THE PAIR. The README says "WordPress 6.9 on PHP 8.4" and
           # FloorConsistencyTest pins that sentence to WP_ENV_PHP_VERSION - but until now
-          # nothing asserted what the CONTAINER actually got. wp-env builds from
-          # `wordpress:php8.2` today; if it ever stopped honouring the variable the README
-          # sentence would go false with this job still green (analysis/58 §5).
+          # nothing asserted what the CONTAINER actually got - and, since sprint LOG+FLOOR round
+          # 2, FloorConsistencyTest pins this `case` as well, in BOTH workflows. It has to be
+          # both: a guard that accepts a value the variable no longer sets passes on the very
+          # drift it was written for, which is what this one did at 8.2 while its own error
+          # string said 8.4. wp-env builds from `wordpress:php8.4` today; if it ever stopped
+          # honouring the variable the README sentence would go false with this job still green
+          # (analysis/58 §5).
           php_version=$(npx --yes @wordpress/env run cli wp eval 'echo PHP_VERSION;' | tr -d '\r' | tail -1)
           echo "container PHP: $php_version"
           case "$php_version" in
-            8.2|8.2.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
+            8.4|8.4.*) echo "The container is on the PHP the README claims this pair is tested at." ;;
             *) echo "::error::This leg claims WordPress 6.9 on PHP 8.4 and the container is on PHP ${php_version}. WP_ENV_PHP_VERSION did not take, and the README sentence is now false."; exit 1 ;;
           esac
           npx --yes @wordpress/env run cli wp plugin list --status=active | tee active.txt
