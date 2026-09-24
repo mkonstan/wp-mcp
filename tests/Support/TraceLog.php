@@ -13,6 +13,12 @@
  * never "the log contains only this". That also means the tests stay correct when run
  * twice in a row, which clearing would not.
  *
+ * THE PLUGIN ITSELF TRUNCATES IT SINCE 1.1.1, at 2 MiB, oldest entries first - which does not
+ * change the rule above, it is the reason for it. `contents()` can therefore begin with a
+ * `truncated=1` marker line, and an entry that was in the file a moment ago may be gone. The one
+ * class that exercises that on purpose (tests/integration/TraceLogCapTest.php) points the SITE at
+ * a throwaway log file name for its duration rather than truncating the operator's.
+ *
  * THE FILE NAME IS A SECRET AND IS ASKED FOR, NEVER BUILT. It is `trace-<32 hex>.log`,
  * generated once per site and kept in the `wpmcp_trace_log_name` option, so the test has to
  * read it from the site the same way the plugin does. A test that hardcoded the old
@@ -38,8 +44,9 @@ final class TraceLog
      * The log's size in bytes, or 0 when it is not there yet.
      *
      * FOR "DID THE LOG GROW", WHICH IS THE ONLY QUESTION contents() WAS EVER ASKED FOR THAT DOES
-     * NOT NEED THE BYTES (round 3). This log is append-only and never rotated, so on a machine
-     * that has run the suite for weeks it is over a megabyte - and a growth check written as
+     * NOT NEED THE BYTES (round 3). This log is append-only and, until 1.1.1, never trimmed, so on
+     * a machine that has run the suite for weeks it is over a megabyte - the cap holds it at 2 MiB
+     * now, which is still a megabyte. A growth check written as
      * `assertNotSame($before, contents())` then ships two megabyte-long strings through a wp-cli
      * subprocess AND hands one of them to a PHPUnit constraint. The queen's full-suite run died
      * inside PHPUnit's own failure formatting at exactly that assertion, on both sites, with the

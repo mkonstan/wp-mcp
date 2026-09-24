@@ -820,6 +820,24 @@ The stack in that log carries each argument's SHAPE and never its value: an arra
 string's length, an object's class. PHP's own formatter prints the first fifteen characters of
 every string argument, which is enough to be somebody's data.
 
+**The log is capped at 2 MiB, and it trims its OLDEST entries.** Before 1.1.1 it grew for ever;
+two development sites reached 1.7 MB and 1.5 MB in eleven days and nothing rotated or aged any
+of it out. When a write takes the file over the cap, the plugin keeps the newest three quarters
+of it and discards the rest, cutting between entries rather than through one, and writes a line
+at the top of the file saying so - so a file that is suddenly shorter is not a mystery:
+
+```
+2026-09-24T01:17:39+00:00 truncated=1 cap=2097152 removed=549120 kept=1572864
+    wp-mcp trimmed this log, and this is not a corrupted file. The OLDEST entries were
+    discarded so the file stays under its cap; ...
+```
+
+The newest entries are the ones that survive, deliberately: a trace id is quoted to you shortly
+after it is issued, so a cap that discarded the newest would throw away exactly the id somebody
+is asking about. A host that wants a different ceiling can raise it -
+`add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES);` - and a value below 64 KiB is
+ignored rather than obeyed.
+
 The log lives at `wp-content/wpmcp/trace-<32 hex>.log`. The random name is generated once
 per site and kept in an option, so the URL cannot be derived from anything a client sees.
 Once a day the plugin fetches that URL itself, and if the web server answers `200` it

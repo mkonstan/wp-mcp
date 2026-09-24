@@ -37,6 +37,34 @@ where the ecosystem is.
   `{closure}(array{source_url,filename}, string(41), stdClass)`: an array's keys, a string's
   length, an object's class.
 
+### Changed: the trace log stops growing for ever
+
+**You will notice this on a site that has been running a while: the file gets shorter.** That is
+the plugin trimming it, and it says so in the file.
+
+- **The private trace log is capped at 2 MiB**, and it discards its OLDEST entries to stay there.
+  Until now it only grew: measured on two development sites, 1,743,937 bytes over 763 entries and
+  1,504,358 over 660, written in eleven days, with nothing rotating, truncating or ageing any of it
+  out. On a customer host nothing ever comes along to clean it up.
+- **The NEWEST entries are the ones that survive**, and that is the whole design rather than a
+  detail. A failure hands the caller a trace id and tells it to quote that id to you, so a cap
+  that discarded the newest entries would throw away exactly the id somebody is about to ask about
+  - which is worse than no cap at all. A test pushes the log past the cap, breaks something over
+  HTTP, and looks the brand-new id up in the file.
+- **A trimmed file announces itself on its first line** -
+  `truncated=1 cap=2097152 removed=549120 kept=1572864`, with a sentence indented under it - and
+  the cut is made BETWEEN entries, never through one. So a shorter file does not read as a
+  corrupted one, no entry begins part-way through, and the marker carries no `trace=` field, so
+  grepping for an id can never return it.
+- **2 MiB is about 900 traced failures** at the measured mean entry of 2,283 bytes, and it is just
+  above both measured files - so installing 1.1.1 does not by itself throw away the log you have.
+  A busy host can raise the ceiling with
+  `add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES)`; a value below 64 KiB is
+  ignored, because a cap smaller than one entry would truncate the entry it had just written.
+- **Enforcing it costs one `fstat()` per traced failure**, on the descriptor the write already has
+  open, and traces are only written when something has already broken. The rewrite itself happens
+  once per quarter-cap of new log - roughly every 230 failures - not on every write.
+
 ### Changed: titles are stored the way wp-admin stores them
 
 - **`create-post` and `update-post` no longer strip tags from a title.** A title typed
@@ -196,6 +224,15 @@ None of this is visible on a site. It is recorded because it changes what a gree
   merge refuses a missing, truncated, empty or duplicated shard rather than reporting a smaller
   suite as a complete one, and it found a real defect on its first run: one test depended on how
   much other work had populated the database before it.
+- **The WordPress-6.9 floor leg is sharded too, six ways.** It was the one unsharded leg and
+  therefore the one that decided the whole run's wall clock - 95 minutes. Two numbers from run
+  35886384855 settled why: WP 6.9 on PHP 8.4 costs only +4.7% over the old 6.4 baseline (5734 s
+  against 5478 s), so the VERSION is not the cost; and the eight current-core shards spent 7220 s
+  of machine time doing what this leg did in 5751 s on one machine. It was slow only because
+  nobody had sharded it. Same planner, same merge, same `needs:` without `always()` so a shard that
+  DIES reds the run instead of vanishing - six rather than eight only because both tiers now shard
+  at once and GitHub runs twenty jobs concurrently. The earlier plan (move the floor to
+  releases-only) was dropped: it rested on believing 6.x was inherently slow, and it is not.
 - **A release reuses that verdict instead of re-running the gate.** Publishing still requires
   a green full run for the code being published; what changed is that the run may be the one
   CI already did. A one-word changelog commit used to get a 90-minute release gate.

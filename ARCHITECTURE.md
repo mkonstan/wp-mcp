@@ -136,6 +136,19 @@ anything a client sees. Once a day the plugin fetches that URL and, on a `200`, 
 error notice on every admin screen. The first version of this used an `.htaccess` and the
 name `trace.log`, which nginx happily served to anybody.
 
+**The log is bounded at 2 MiB since 1.1.1, and it is the OLDEST entries that go.** It used to grow
+for ever - 1.7 MB and 1.5 MB measured on two development sites in eleven days, nothing rotating or
+ageing it out - which on a customer host has no end. The direction of the cut is the contract, not
+an implementation detail: this boundary hands a caller an id and tells it to quote that id, so the
+file is read by id and the ids most likely to be asked about are the newest. A cap that dropped
+the newest entries would discard an id in the same millisecond it went out on the wire, which is
+worse than no cap. So the newest three quarters of the cap survive, the cut lands between entries
+rather than through one, and the first line of a trimmed file says `truncated=1` with the cap, the
+bytes removed and the bytes kept - a shorter file must not read as a damaged one. The ceiling is
+`wpmcp_trace_log_max_bytes`, filterable and floored at one entry's worth; enforcing it costs one
+`fstat()` on the descriptor the append already holds, on a path that only runs when something has
+already broken.
+
 ## Five error codes and no more
 
 `-32700` for a body that is valid JSON but not an object, `-32600` for a batch or an
@@ -161,7 +174,8 @@ kilobyte of and which in the measured case was a whole HTML error page.
 Three surfaces, and each answers a different question without the plugin inventing a log format:
 
 - **the auth events** (`wpmcp_auth_event`) - was a credential accepted, and whose;
-- **the trace log** - what broke, keyed by the id the caller was given;
+- **the trace log** - what broke, keyed by the id the caller was given, newest kept when the 2 MiB
+  cap trims it;
 - **`do_action('wpmcp_tool_call', $tool, $ok, $context)`**, since 1.1.1 - what a token is
   actually DOING. One firing per `tools/call`, in a `finally` so a crash fires it too, with `ok`
   read off the response so a scope refusal, a schema failure, a tool's own error and a thrown
