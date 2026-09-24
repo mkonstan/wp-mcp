@@ -12,6 +12,12 @@
  * a filter that distinguishes two classes whose short names are identical - which this suite
  * really has (`ToolContractTest` exists in both `Unit` and `Integration`).
  *
+ * TWO TIERS SHARD AS OF 1.1.1 (D24 item 3), through this one planner: the current-core tier eight
+ * ways over both suites, and the declared-floor leg six ways over the integration suite alone. So
+ * the workflow assertions at the end of this file come in pairs, and one of them is new: the two
+ * tiers in flight together must stay under GitHub's 20 concurrent jobs, or they queue and the
+ * sharding silently stops buying anything.
+ *
  * @group sprint-0
  */
 
@@ -287,6 +293,84 @@ final class CiShardsTest extends TestCase
             array_values(array_unique($declared[1])),
             'WPMCP_SHARDS and the length of the shard matrix disagree, or WPMCP_SHARDS is'
             . ' spelled differently in different jobs.'
+        );
+    }
+
+    /**
+     * THE SAME TWO-PLACES RULE FOR THE FLOOR LEG, which is sharded as of 1.1.1 (D24 item 3).
+     *
+     * The floor leg deliberately does NOT reuse the current-core matrix: it runs the integration
+     * suite only and it runs six ways rather than eight, so it carries its own matrix key and its
+     * own `WPMCP_FLOOR_SHARDS`. Two independent pairs means two ways to drift, and drift here is
+     * the same silence as before - six jobs dividing the suite seven ways leaves a seventh of the
+     * declared floor untested while every shard is green.
+     *
+     * @group sprint-14d
+     */
+    public function testTheFloorShardMatrixAndItsDeclaredCountAgree(): void
+    {
+        $yaml = RepoFile::read('.github/workflows/ci.yml');
+
+        self::assertMatchesRegularExpression(
+            '/^        floor: \[([0-9, ]+)\]$/m',
+            $yaml,
+            'ci.yml has no floor shard matrix. The floor leg is supposed to be sharded (D24 item'
+            . ' 3); unsharded it is the 95-minute job that made the whole run wait.'
+        );
+        preg_match('/^        floor: \[([0-9, ]+)\]$/m', $yaml, $m);
+
+        $matrix = array_map('intval', array_map('trim', explode(',', $m[1])));
+
+        self::assertSame(
+            range(1, count($matrix)),
+            $matrix,
+            'The floor matrix must be 1..n with no gaps: bin/ci-shards.php numbers its bins that way.'
+        );
+
+        preg_match_all("/WPMCP_FLOOR_SHARDS: '(\\d+)'/", $yaml, $declared);
+
+        self::assertNotEmpty($declared[1], 'ci.yml never declares WPMCP_FLOOR_SHARDS.');
+        self::assertSame(
+            [(string) count($matrix)],
+            array_values(array_unique($declared[1])),
+            'WPMCP_FLOOR_SHARDS and the length of the floor matrix disagree, or WPMCP_FLOOR_SHARDS'
+            . ' is spelled differently in the shard job and in the merge job.'
+        );
+    }
+
+    /**
+     * BOTH TIERS SHARD AT ONCE NOW, AND GITHUB RUNS 20 JOBS AT A TIME (D20 note 3).
+     *
+     * Once `decide` is done, lint, the unit matrix, the current-core shards and the floor shards
+     * are all in flight together. Past twenty they do not fail - they QUEUE, which converts the
+     * whole point of sharding into waiting in a different place, and does it invisibly. So the
+     * arithmetic is asserted here rather than left in a comment: a future sprint adding a PHP
+     * version or two more shards is told at commit time.
+     *
+     * @group sprint-14d
+     */
+    public function testTheTwoShardedTiersTogetherStayUnderGitHubsConcurrentJobCeiling(): void
+    {
+        $yaml = RepoFile::read('.github/workflows/ci.yml');
+
+        preg_match('/^        shard: \[([0-9, ]+)\]$/m', $yaml, $current);
+        preg_match('/^        floor: \[([0-9, ]+)\]$/m', $yaml, $floor);
+        preg_match("/^        php: \\[([^\\]]+)\\]$/m", $yaml, $php);
+
+        self::assertNotEmpty($current[1] ?? '', 'No current-core shard matrix in ci.yml.');
+        self::assertNotEmpty($floor[1] ?? '', 'No floor shard matrix in ci.yml.');
+        self::assertNotEmpty($php[1] ?? '', 'No unit PHP matrix in ci.yml.');
+
+        $jobs = count(explode(',', $current[1]))
+            + count(explode(',', $floor[1]))
+            + count(explode(',', $php[1]))
+            + 1; // lint, which runs beside all of them
+
+        self::assertLessThanOrEqual(
+            20,
+            $jobs,
+            "This run starts {$jobs} jobs at once and GitHub runs 20. The rest queue, the sharded"
+            . ' tiers stop being parallel, and nothing in the run says so.'
         );
     }
 

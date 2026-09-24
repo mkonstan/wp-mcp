@@ -242,7 +242,12 @@ jobs:
     # took 21 m 03 s against the 14 m the per-group arithmetic had predicted. With the weights
     # corrected against those six measurements, eight shards model out at a slowest shard of
     # 690 s, +2.3% against the ideal, which is about 14 m with a container start. Eight is also
-    # the top of the range D18 allows and leaves the run inside GitHub's 20 concurrent jobs.
+    # the top of the range D18 allows.
+    #
+    # AND SINCE 1.1.1 THESE EIGHT SHARE THE RUN WITH SIX FLOOR SHARDS. Eight here, six there,
+    # four unit legs and lint is nineteen jobs in flight against GitHub's twenty - which is why
+    # the floor leg is sharded six ways and not eight, and why
+    # tests/unit/CiShardsTest.php now asserts the total rather than trusting this comment.
     name: Integration shard ${{ matrix.shard }} of 8 (wp-env)
     runs-on: ubuntu-latest
     needs: decide
@@ -493,17 +498,41 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-  integration-floor:
-    # THE DECLARED FLOOR, EXECUTED (analysis/53-open-decisions.md, D2; analysis/52 §10).
-    # `Requires at least:` is not a hint - core's validate_plugin_requirements() refuses
-    # ACTIVATION below it - and until this job existed the number in the header had never
-    # been run: .wp-env.json pins `"core": null`, so the only WordPress ever tested was
-    # whatever was current on the day.
+  floor-shard:
+    # THE DECLARED FLOOR, EXECUTED (analysis/53-open-decisions.md, D2; analysis/52 §10) - AND
+    # SINCE 1.1.1 SHARDED, WHICH IS D24 ITEM 3.
     #
-    # A SEPARATE JOB, NOT A MATRIX LEG on `integration`. A matrix renames the job to
-    # "PHPUnit integration (wp-env) (…)", and release.yml gates on job ids of its own
-    # copies; the scout that measured this (analysis/52 §10.2) names the rename as the way
-    # to break the release gate without noticing.
+    # `Requires at least:` is not a hint - core's validate_plugin_requirements() refuses
+    # ACTIVATION below it - and until this leg existed the number in the header had never been
+    # run: .wp-env.json pins `"core": null`, so the only WordPress ever tested was whatever was
+    # current on the day.
+    #
+    # WHY IT IS SHARDED NOW, and the evidence is two numbers from one run, 35886384855. WP 6.9 on
+    # PHP 8.4 cost +4.7% over the old 6.4 baseline (5734 s against 5478 s), so the VERSION is not
+    # what makes this leg slow. And the eight current-core shards spent 7220 s of machine time
+    # doing what this leg does in 5751 s on ONE machine - more total work, a fifth of the waiting.
+    # The floor leg was slow only because it was the one leg nobody had sharded. The earlier
+    # leaning (D20: move it to releases only) was rejected with that measurement, because it was
+    # built on believing 6.x was inherently slow.
+    #
+    # THE SAME MECHANISM AS THE CURRENT-CORE TIER, deliberately not a second one:
+    # bin/ci-shards.php splits by measured class time, bin/ci-merge-junit.php merges before the
+    # check, and `needs:` WITHOUT `always()` means a shard that DIES reds the run instead of
+    # disappearing. The one difference is the CLASS LIST: this leg runs the integration suite
+    # only (the unit tier has its own PHP matrix and is not a WordPress question at all), so the
+    # map is built with `--testsuite integration` and the merge's class-coverage check is over
+    # exactly those classes.
+    #
+    # SIX, NOT EIGHT, AND THE CONSTRAINT IS GITHUB'S 20 CONCURRENT JOBS. With `decide` done,
+    # lint + the four unit legs + the eight current-core shards are already 13 jobs in flight;
+    # six here makes 19 and leaves one job of slack for a re-run. Modelled slowest shard 1040 s
+    # (+3.8% against the ideal) against a 6007 s total, so about 18 minutes with the floor's own
+    # +4.7% and a container start, against 95 minutes unsharded. Seven shards model at 903 s and
+    # would sit exactly ON the ceiling, where anything extra queues.
+    #
+    # THE WEIGHTS ARE THE CURRENT-CORE TIER'S, and that is correct rather than convenient: they
+    # are RELATIVE costs, and the floor's +4.7% applies to every class about equally. A per-leg
+    # weights file would be two files to refresh for a 5% correction to a balancing heuristic.
     #
     # PHP 8.4, NOT 8.5, and that pairing is stated in the README beside the requirement:
     # WordPress 6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so 8.4 is the
@@ -513,15 +542,20 @@ jobs:
     # `wordpress:php8.4` is a current official image (checked 2026-09-23), so wp-env can
     # build it. Declaring a combination nobody can execute is the exact mistake the old
     # "5.5 + PHP 8.1" claim made. WP_ENV_PHP_VERSION sets the container's PHP; the 8.2 in
-    # the setup step above is the RUNNER's, which only runs PHPUnit and Guzzle.
-    #
-    # NO per-group step here, deliberately. "Did every gate group run" is a property of the
-    # test suite, which the current-core leg already proves; asking it twice would add
-    # another 1 h 38 m for nothing (analysis/52 §10.3).
-    name: PHPUnit integration (floor WP 6.9 / PHP 8.4)
+    # the setup step is the RUNNER's, which only runs PHPUnit and Guzzle.
+    name: Floor shard ${{ matrix.floor }} of 6 (WP 6.9 / PHP 8.4)
     runs-on: ubuntu-latest
     needs: decide
     if: needs.decide.outputs.reuse != 'true'
+    strategy:
+      # NEVER fail-fast, for the reason the current-core matrix gives: a cancelled shard produces
+      # no log, and the merge then reports a missing shard rather than the failure that was
+      # actually there.
+      fail-fast: false
+      matrix:
+        # Keep this list and WPMCP_FLOOR_SHARDS in step - tests/unit/CiShardsTest.php fails if
+        # they drift, and the merge below would fail anyway because the filenames carry the count.
+        floor: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v5
 
@@ -555,9 +589,10 @@ jobs:
         run: npx --yes @wordpress/env run cli wp rewrite structure '/%postname%/' --hard
 
       - name: Confirm this really is the floor, and that the plugin activated on it
-        # THE FIRST ASSERTION OF THIS JOB, and the one that makes the rest mean anything: a
-        # WP_ENV_CORE that wp-env quietly ignored would leave this leg testing current core
-        # twice and reporting a floor it never touched.
+        # ON EVERY SHARD, NOT ON ONE. Each shard starts its OWN container, so "the container is
+        # at the floor" is a per-shard fact: a single shard whose WP_ENV_CORE did not take would
+        # otherwise run its sixth of the suite against current core and report it as a floor
+        # result. This is three wp-cli calls against a container that is already up.
         run: |
           set -euo pipefail
           version=$(npx --yes @wordpress/env run cli wp core version | tr -d '\r' | tail -1)
@@ -583,11 +618,58 @@ jobs:
             exit 1
           }
 
-      - name: Integration suite on the floor
+      - name: Work out what this shard runs
+        id: plan
+        env:
+          WPMCP_FLOOR_SHARDS: '6'
+        run: |
+          set -euo pipefail
+          # `--testsuite integration` IS THE DIFFERENCE FROM THE CURRENT-CORE PLANNER, and it has
+          # to be on the MAP as well as on the run: bin/ci-shards.php partitions whatever the map
+          # names, so a map carrying the unit classes would put a sixth of this leg's machine time
+          # on tests that need no WordPress and are already covered by the PHP matrix.
+          vendor/bin/phpunit --testsuite integration --list-tests-xml junit-map.xml
+
+          if [ "${{ matrix.floor }}" = "1" ]; then
+            echo "::group::the whole floor plan"
+            php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
+              --shards="$WPMCP_FLOOR_SHARDS" --plan
+            echo "::endgroup::"
+          fi
+
+          filter=$(php bin/ci-shards.php --map=junit-map.xml --timings=tests/class-timings.txt \
+            --shards="$WPMCP_FLOOR_SHARDS" --shard=${{ matrix.floor }})
+          echo "filter: $filter"
+          echo "filter=$filter" >> "$GITHUB_OUTPUT"
+          echo "log=junit-floor-${{ matrix.floor }}-of-${WPMCP_FLOOR_SHARDS}.xml" >> "$GITHUB_OUTPUT"
+
+      - name: This shard's slice of the integration suite, on the floor
         env:
           WPMCP_TEST_URL: http://localhost:8888
+          # WordPress is inside a Docker container, so a host-side wp-cli.phar --path= cannot see
+          # its filesystem. Without this every fixture-bearing test skips - and a skip is green.
           WPMCP_WP_ENV: '1'
-        run: composer test:integration
+        # `--fail-on-empty-test-suite` IS LOAD-BEARING. PHPUnit 10.5 exits 0 and writes
+        # `<testsuites/>` for a filter that matches nothing unless that flag is set - measured -
+        # so a shard whose filter was subtly wrong would otherwise be GREEN.
+        run: >-
+          vendor/bin/phpunit --testsuite integration --fail-on-empty-test-suite
+          --filter "${{ steps.plan.outputs.filter }}"
+          --log-junit "${{ steps.plan.outputs.log }}"
+
+      - name: Upload this shard's log
+        # NOT `if: always()`. A shard that failed has a log missing whatever it never reached, and
+        # the merge must see a MISSING shard rather than a SHORT one: the first is an error it
+        # reports, the second is a smaller suite that looks complete.
+        uses: actions/upload-artifact@v4
+        with:
+          # NO `run_attempt` IN THE NAME, and `overwrite` instead, so "re-run failed jobs" works:
+          # artifacts belong to the run, not to the attempt.
+          name: floor-log-${{ matrix.floor }}
+          path: ${{ steps.plan.outputs.log }}
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
 
       - name: WordPress logs (on failure)
         if: failure()
@@ -597,6 +679,102 @@ jobs:
       - name: Stop WordPress
         if: always()
         run: npx --yes @wordpress/env stop || true
+
+  integration-floor:
+    # THE JOB ID IS UNCHANGED ON PURPOSE, exactly as it was when the current-core tier was
+    # sharded: `seal` needs this id, release.yml gates on the same id in its own copy, and the
+    # whole D17 machinery is keyed on "integration-floor was green". What changed is what the job
+    # DOES - it no longer runs WordPress at all. It collects the floor shards' logs, merges them,
+    # and refuses anything that is not six complete logs covering every integration class.
+    #
+    # `needs: [decide, floor-shard]` WITHOUT `always()` is the load-bearing line, and it is the
+    # property that makes sharding trustworthy at all: a shard that failed, was cancelled, or
+    # never started skips this job, which skips `seal`, and the RUN is red. A dead shard cannot
+    # produce a smaller green picture, because there is no picture at all.
+    #
+    # A SEPARATE JOB, NOT A MATRIX LEG on `integration`. A matrix would rename the job, and
+    # release.yml gates on job ids; the scout that measured this (analysis/52 §10.2) names the
+    # rename as the way to break the release gate without noticing.
+    #
+    # NO per-group step here, deliberately, and that is unchanged. "Did every gate group run" is
+    # a property of the test suite, which the current-core leg already proves; asking it twice
+    # would add another 1 h 38 m for nothing (analysis/52 §10.3). What IS asked here is the
+    # narrower question sharding introduces - did every class run SOMEWHERE - which is
+    # bin/ci-merge-junit.php's `--map` refusal and costs seconds.
+    name: PHPUnit integration (floor WP 6.9 / PHP 8.4, merged shards)
+    runs-on: ubuntu-latest
+    needs: [decide, floor-shard]
+    if: needs.decide.outputs.reuse != 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dev dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Ask PHPUnit which integration classes exist
+        # The SAME map the shards planned from, built the same way. `--list-tests-xml` executes
+        # nothing, which is why this job needs no container.
+        run: vendor/bin/phpunit --testsuite integration --list-tests-xml junit-map.xml
+
+      - name: Collect every floor shard's log
+        uses: actions/download-artifact@v4
+        with:
+          # Every attempt's shards: the five that passed on attempt 1 are still here, and the one
+          # that was re-run has overwritten its own name.
+          pattern: floor-log-*
+          path: floor-shards
+          merge-multiple: true
+
+      - name: Merge the floor shards, and refuse anything short of all of them
+        env:
+          WPMCP_FLOOR_SHARDS: '6'
+        run: |
+          set -euo pipefail
+          ls -l floor-shards/
+          # `--map` and `--config` add the refusal that does not depend on luck: every class the
+          # map names must appear in the merged log, unless every one of its methods is in a group
+          # phpunit.xml.dist EXCLUDES (which is how InfraTrustTest is correctly absent). A shard
+          # can lose a CLASS without losing a LOG, and on this leg there is no per-group check
+          # downstream to notice it, so this is the only thing that does.
+          php bin/ci-merge-junit.php --out=junit-floor.xml --expect="$WPMCP_FLOOR_SHARDS" \
+            --map=junit-map.xml --config=phpunit.xml.dist \
+            floor-shards/junit-floor-*-of-"$WPMCP_FLOOR_SHARDS".xml
+
+      - name: Per-class wall clock on the floor, from the merged log
+        # Free measurement, and the input to the next refresh of tests/class-timings.txt. Read it
+        # knowing what it does NOT include: PHPUnit attributes only the time inside test methods,
+        # so class fixture building - about three quarters of this tier - is missing from every row.
+        if: always()
+        run: |
+          php -r '
+            $x = simplexml_load_file("junit-floor.xml");
+            $rows = [];
+            foreach ($x->xpath("//testcase") as $c) {
+              $rows[(string) $c["class"]] = ($rows[(string) $c["class"]] ?? 0) + (float) $c["time"];
+            }
+            arsort($rows);
+            printf("%-58s %9s\n", "class", "seconds");
+            foreach ($rows as $n => $t) { printf("%-58s %9.1f\n", $n, $t); }
+            printf("%-58s %9.1f\n", "TOTAL (inside test methods only)", array_sum($rows));
+          ' || true
+
+      - name: Upload the merged floor log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: floor-log-merged-${{ github.run_attempt }}
+          path: |
+            junit-floor.xml
+            junit-map.xml
+          retention-days: 14
+          if-no-files-found: warn
 
   seal:
     # HALF OF WHAT MAKES A REUSE HONEST, and only half. This job uploads an artifact whose
