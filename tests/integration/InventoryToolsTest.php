@@ -534,6 +534,8 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
      * G4. An Administrator's list-plugins matches get_plugins() on the site, file by
      * file, and makes no outbound request while it runs - with a third-party fixture making a
      * request from inside every update, auto-update, option and header filter it could run.
+     * The one hook the registry now runs deliberately is declared in
+     * assertNoUnexpectedOutbound().
      *
      * @group sprint-14
      */
@@ -542,7 +544,7 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
         [$result, $count, $hosts] = $this->watched(self::$adminToken, 'list-plugins');
 
         self::assertFalse($result->isError, $result->text);
-        self::assertSame(0, $count, "list-plugins made {$count} outbound HTTP request(s) while it ran, to: {$hosts}");
+        $this->assertNoUnexpectedOutbound('list-plugins', $count, $hosts);
 
         $site = self::decode(WpCli::evaluate(
             'require_once ABSPATH . "wp-admin/includes/plugin.php"; $o = array();'
@@ -584,7 +586,7 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
         [$result, $count, $hosts] = $this->watched(self::$adminToken, 'list-themes');
 
         self::assertFalse($result->isError, $result->text);
-        self::assertSame(0, $count, "list-themes made {$count} outbound HTTP request(s) while it ran, to: {$hosts}");
+        $this->assertNoUnexpectedOutbound('list-themes', $count, $hosts);
         self::assertNotEmpty($result->data()['themes'] ?? [], 'list-themes listed no themes.');
     }
 
@@ -814,6 +816,48 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     private static function hookHost(string $hook): string
     {
         return str_replace('_', '-', $hook) . '.hook.wpmcp-test.invalid';
+    }
+
+    /** Has the operator turned the theme-code tools on, on the site under test? */
+    private static function codeToolsEnabled(): bool
+    {
+        return trim(WpCli::evaluate('echo get_option("wpmcp_code_enabled") ? "1" : "0";')) === '1';
+    }
+
+    /**
+     * No hooked filter reached the network while $tool ran - with ONE exception, and it is
+     * declared rather than tolerated.
+     *
+     * `file_mod_allowed` MOVED INTO THIS LIST IN 1.1.1, on a site that has turned the theme-code
+     * tools on and nowhere else. The tool registry is rebuilt on every request, and it decides
+     * whether the six code tools may be LISTED by asking `wp_is_file_mod_allowed()` - which is
+     * the call core itself makes for `edit_themes` (`capabilities.php:607-611`), and the swap
+     * that made a hardening plugin's answer switch the listing off instead of letting all six be
+     * advertised and then refused. PHP short-circuits the condition, so the question is asked
+     * only where `wpmcp_code_enabled()` is already true: an operator who turned that surface on
+     * has asked us to answer "may this site modify files?".
+     *
+     * THE ASSERTION STILL HAS TEETH IN BOTH DIRECTIONS. Any OTHER hooked filter reaching the
+     * network fails, as before; and `file_mod_allowed` reaching it on a site with the code switch
+     * OFF fails too, because it would mean the registry is asking a question it has no reason to.
+     */
+    private function assertNoUnexpectedOutbound(string $tool, int $count, string $hosts): void
+    {
+        $allowed = self::codeToolsEnabled() ? [self::hookHost('file_mod_allowed')] : [];
+        $reached = array_values(array_filter(array_map('trim', explode(',', $hosts))));
+
+        self::assertSame(
+            [],
+            array_values(array_diff($reached, $allowed)),
+            "{$tool} made {$count} outbound HTTP request(s) while it ran, to: {$hosts}."
+            . ' Allowed on this site: ' . ($allowed ? implode(',', $allowed) : 'none')
+        );
+        self::assertLessThanOrEqual(
+            count($allowed),
+            $count,
+            "{$tool} reached only allowed hosts but made {$count} requests, so one of them fired"
+            . ' more than once per call. Hosts: ' . $hosts
+        );
     }
 
     /**

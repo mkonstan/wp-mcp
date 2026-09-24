@@ -13,10 +13,14 @@
  * claude_code_memory/fail-loud-explicit-scope.md.
  *
  * THIS IS THE ONLY FILE ALLOWED TO INTROSPECT A THROWABLE. getMessage, getFile, getLine,
- * getTraceAsString, __toString, a (string) cast - all of them put the filesystem layout
- * and often the arguments somewhere, and every one of them is banned from endpoint.php,
+ * getTrace, getTraceAsString, __toString, a (string) cast - all of them put the filesystem
+ * layout and often the arguments somewhere, and every one of them is banned from endpoint.php,
  * tools.php and wp-mcp.php by tests/unit/NoDisclosureTest.php. The single thing that may
  * cross back out to a caller is wpmcp_throwable_line(), below, and it is one integer.
+ *
+ * AND THIS FILE DOES NOT USE getTraceAsString() EITHER, since 1.1.1: PHP's own formatter prints
+ * the first fifteen characters of every string argument, which is a value. wpmcp_trace_stack()
+ * builds the stack from getTrace() and writes each argument's SHAPE instead - see there.
  *
  * WHY THE FILE NAME IS RANDOM. The first version wrote wp-content/wpmcp/trace.log behind
  * an .htaccess and checked over HTTP whether that worked. It did not: .htaccess is an
@@ -33,6 +37,11 @@
  * only thing between a stranger and the log - .htaccess and index.php stay, the self-check
  * stays (it now probes the real name, so it catches a directory listing), and the operator
  * warning is raised site-wide rather than on one settings page nobody has to visit.
+ *
+ * THE FILE IS BOUNDED SINCE 1.1.1, at 2 MiB, and the direction it is cut in is not a detail:
+ * the newest entries survive and the oldest go, because this boundary hands a caller a trace id
+ * and tells it to quote that id. See wpmcp_trace_log_max_bytes() for the measurement behind the
+ * number and wpmcp_trace_cap_file() for why the opposite choice would be worse than no cap.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -58,6 +67,36 @@ define('WPMCP_TRACE_CHECK_TRANSIENT', 'wpmcp_trace_checked');
 
 /** The name the log used to have, before it was made unguessable. Deleted on sight. */
 define('WPMCP_TRACE_LEGACY_NAME', 'trace.log');
+
+/**
+ * The log's size cap in bytes: two mebibytes. See wpmcp_trace_log_max_bytes() for the
+ * measurement behind the number and for how an operator moves it.
+ */
+define('WPMCP_TRACE_LOG_MAX_BYTES', 2097152);
+
+/**
+ * A filtered cap below this is REJECTED and the default stands. 64 KiB is about twenty-eight
+ * entries at the measured mean: small enough to be a deliberate choice, large enough that the
+ * entry being written can never be the thing a truncation discards.
+ *
+ * NAMED FOR REJECTING, NOT FOR CLAMPING, and it was called `WPMCP_TRACE_LOG_MIN_CAP` until round 2
+ * of this sprint - a name that promises a floor the code does not implement. A filter returning
+ * 1,024 does not get a 64 KiB log, it gets the 2 MiB default, which is the wpmcp_file_versions_keep
+ * rule: a useless value is far likelier to be a mistake than a decision, and quietly honouring a
+ * mistake is worse than ignoring it. The behaviour is the one we want and the README already
+ * described it correctly, so the NAME moved rather than the code.
+ */
+define('WPMCP_TRACE_LOG_CAP_REJECT_BELOW', 65536);
+
+/**
+ * How much of the cap survives a truncation, as a percentage.
+ *
+ * NOT 100. Cutting back to exactly the cap would put the file one entry under it, and the very
+ * next traced failure would rewrite the whole thing again - a megabyte read and a megabyte
+ * written per failure, for ever. Seventy-five per cent leaves a quarter of the cap as headroom,
+ * which at the measured 2.3 KB mean entry is about 230 failures between rewrites.
+ */
+define('WPMCP_TRACE_LOG_KEEP_PERCENT', 75);
 
 /** The directory the log and its two guard files live in. */
 function wpmcp_trace_dir() {
@@ -263,6 +302,9 @@ function wpmcp_trace_wp_error($error, $method = '', $tool = '') {
  * the stack is the only thing allowed more than one line, and every one of its lines is
  * indented four spaces so the "an event starts at column 0" rule holds.
  *
+ * THE STACK CARRIES ARGUMENT SHAPES AND NOT ARGUMENT VALUES (1.1.1) - see
+ * wpmcp_trace_stack(), which replaced getTraceAsString() for exactly that reason.
+ *
  * NEVER THE RAW TOKEN. The token is identified by its ROW ID, which is what the admin table
  * already shows, exactly as the auth events do.
  *
@@ -273,6 +315,10 @@ function wpmcp_trace_wp_error($error, $method = '', $tool = '') {
  * private on every host by default and is already where the auth events go, so the trace
  * survives, and an option turns the site-wide admin notice on so somebody fixes the
  * directory.
+ *
+ * THE APPEND ITSELF LIVES IN wpmcp_trace_append() SINCE 1.1.1, because it now also holds the
+ * file under a size cap - and the cap reads the size off the descriptor the write already has
+ * open, which is the whole reason the write is no longer one file_put_contents() call.
  */
 function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $data = '') {
     $id      = wpmcp_trace_new_id();
@@ -295,7 +341,7 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     $line  = implode(' ', $fields);
     $stack = '';
 
-    foreach (explode("\n", $e->getTraceAsString()) as $frame) {
+    foreach (wpmcp_trace_stack($e) as $frame) {
         $stack .= '    ' . $frame . "\n";
     }
 
@@ -303,7 +349,7 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     $written = false;
 
     if (wpmcp_trace_ensure_dir()) {
-        $written = (@file_put_contents(wpmcp_trace_path(), $entry, FILE_APPEND | LOCK_EX) !== false);
+        $written = wpmcp_trace_append($entry);
     }
 
     if ($written) {
@@ -317,6 +363,403 @@ function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $dat
     }
 
     return $id;
+}
+
+/**
+ * The log's size cap in bytes. 2 MiB by default, filterable, floored.
+ *
+ * WHY THERE IS A CAP AT ALL, MEASURED 2026-09-24 on the two development sites: 1,743,937 bytes
+ * over 763 entries and 1,504,358 over 660, both written in eleven days and neither ever rotated,
+ * truncated or aged out. That is the SHIPPED behaviour on every site this plugin is installed on,
+ * and on a customer host nothing ever comes along to clean it up. D24 chose a size cap with
+ * truncation over rotate-N (three files instead of one, and the operator has to know which) and
+ * over age-out (a quiet site keeps a year, a loud one fills the disk in a day).
+ *
+ * TWO MEBIBYTES, AND THE NUMBER IS THE MEASUREMENT. At the measured mean entry of 2,283 bytes it
+ * holds about 900 traced failures. The two development sites above are sites under continuous
+ * suite load - a real site producing traces at that rate has a bug storm - and 2 MiB is just
+ * ABOVE both of them, so installing 1.1.1 does not by itself throw away anybody's current log;
+ * the cap starts biting on the next megabyte, which is the growth it exists to stop.
+ *
+ * A FILTER RATHER THAN A CONSTANT, and rather than a settings field. The precedent is
+ * wpmcp_file_versions_keep(): a retention number that one host in fifty wants to move, where a
+ * screen would cost a field, a label, a sanitiser and a row in the options table for a decision
+ * almost nobody makes. The operator-visible part of this feature is not the number, it is the
+ * line the truncation writes into the file itself - see wpmcp_trace_cap_file().
+ *
+ * A USELESS VALUE IS IGNORED RATHER THAN OBEYED, the same way the version cap ignores "keep
+ * zero". A cap below one entry's worth would make every write truncate the entry it had just
+ * written, which is the exact failure this whole item is shaped to avoid.
+ */
+function wpmcp_trace_log_max_bytes() {
+    $max = apply_filters('wpmcp_trace_log_max_bytes', WPMCP_TRACE_LOG_MAX_BYTES);
+    $max = is_numeric($max) ? (int) $max : 0;
+
+    return $max >= WPMCP_TRACE_LOG_CAP_REJECT_BELOW ? $max : WPMCP_TRACE_LOG_MAX_BYTES;
+}
+
+/**
+ * Append one entry to the log and hold the file under its cap. True when the bytes landed.
+ *
+ * WHY fopen/flock/fwrite AND NOT file_put_contents(FILE_APPEND|LOCK_EX), which is what this was.
+ * The cap has to know the file's size, and the cheapest place to learn it is the descriptor the
+ * write already has open: fstat() on an open handle costs one syscall and no path resolution,
+ * where filesize() or a bare stat() resolves the path again and is subject to PHP's stat cache.
+ * `ftell()` would be cheaper still and is NOT usable - measured on this project's PHP (8.2.29):
+ * in append mode ftell() returns 4 after a 4-byte write to a 1,000-byte file, because O_APPEND
+ * writes at the end while the stream's own position does not follow. fstat() returned 1,004.
+ *
+ * THE COST PER WRITE, STATED PLAINLY, because this runs on every traced failure: one fstat() on
+ * a descriptor that is already open and already locked, added to the open, the lock, the write
+ * and the close that the append cost before. There is no sampling and none is needed - a trace
+ * is written when something has already broken, never on a healthy request, and the failure that
+ * produced it cost orders of magnitude more than a stat. The REWRITE is the expensive part, and
+ * it happens once per quarter-cap of new log (about 230 failures), never per write.
+ *
+ * LOCK_EX IS HELD ACROSS THE WHOLE THING, so no second writer can append into a file that is
+ * being rewritten. A READER can still see the file mid-rewrite, and that is the accepted cost of
+ * rewriting in place rather than writing a temp file and renaming: a rename would put a new inode
+ * under every other writer's lock, which is worse than a reader seeing a short file for a few
+ * milliseconds once every few hundred failures.
+ *
+ * AND THE LOCK IS NOT ASSUMED TO WORK. `flock` succeeds and protects nothing on NFS and on some
+ * shared hosting, so wpmcp_trace_cap_file() re-checks the file's size immediately before it cuts
+ * and absorbs anything that arrived rather than discarding it. That is round 2 of this sprint, and
+ * it is there because the cap changed the cost of the race: without a cap a lock-less host could
+ * tear an entry, with one it could lose an entry whose id was already quoted.
+ */
+function wpmcp_trace_append($entry) {
+    // 'ab+' rather than 'ab': the cap has to READ the tail it is going to keep, and a handle
+    // opened write-only cannot. Writes still always land at the end - that is what O_APPEND
+    // means - so seeking to read cannot make the next append overwrite anything.
+    $handle = @fopen(wpmcp_trace_path(), 'ab+');
+
+    if (!$handle) { return false; }
+
+    if (!flock($handle, LOCK_EX)) {
+        fclose($handle);
+
+        return false;
+    }
+
+    $written = @fwrite($handle, $entry);
+    $ok      = ($written === strlen($entry));
+
+    if ($ok) {
+        $stat = fstat($handle);
+        $size = (is_array($stat) && isset($stat['size'])) ? (int) $stat['size'] : 0;
+        $max  = wpmcp_trace_log_max_bytes();
+
+        if ($size > $max) {
+            $incomplete = false;
+
+            wpmcp_trace_cap_file($handle, $size, $max, strlen($entry), $incomplete);
+
+            // A REWRITE THAT COULD NOT BE FINISHED UNWRITES THE ENTRY (round 2). The bytes went in
+            // and the trim then truncated the file and could not put them all back, so the entry
+            // this call was made for is no longer whole in the log - and its id is already on its
+            // way to a caller. Answering false is not a lie about the append, it is the truth about
+            // the LOG: wpmcp_trace_record() then sends the whole entry to error_log() and raises
+            // the operator notice, through the fallback that has existed for an unwritable
+            // directory. Reusing that path rather than adding one is deliberate - there is exactly
+            // one place in this file that decides what happens when the log cannot hold a trace.
+            if ($incomplete) { $ok = false; }
+        }
+    }
+
+    flock($handle, LOCK_UN);
+    fclose($handle);
+
+    return $ok;
+}
+
+/**
+ * Bring an over-cap log back under its cap by discarding its OLDEST entries. Returns bytes
+ * discarded, 0 when nothing was.
+ *
+ * **THE DIRECTION IS THE WHOLE DESIGN, AND IT IS EASY TO GET BACKWARDS.** The boundary hands a
+ * caller an eight-hex trace id and tells it to quote that id to the operator. A cap that kept the
+ * head of the file and dropped the tail would therefore be WORSE THAN NO CAP: the entry it threw
+ * away would be the newest one, which is precisely the one somebody is about to ask about, and it
+ * would throw it away in the same millisecond the id was issued. So the tail survives and the
+ * head goes, and tests/integration/TraceLogCapTest.php proves it the only way that counts - by
+ * pushing the file past the cap, breaking something over HTTP, and looking the brand-new id up in
+ * the file afterwards.
+ *
+ * THE CUT LANDS ON AN ENTRY BOUNDARY, never at an arbitrary byte. An entry is a header line at
+ * column 0 plus its stack indented four spaces under it, and every consumer keys on exactly that:
+ * `grep trace=<id>` finds the header, a log shipper parses the header's `key=value` fields, and
+ * tests/Support/TraceLog::entry() reads until the next line at column 0. A file that began
+ * part-way through an entry would open with a run of orphan stack frames that reads as corruption
+ * and that attaches itself to whatever entry comes next. So the keep window is scanned for the
+ * first header - an ISO timestamp at column 0 - and the cut is made there.
+ *
+ * AND IT SAYS SO, in the log's own shape. The first line of a truncated file is a header at
+ * column 0 with the cap, the bytes removed and the bytes kept, and an indented explanation under
+ * it, so an operator meeting a file that is shorter than yesterday's can tell "the plugin trimmed
+ * it" from "something ate it" without opening a support ticket. It deliberately carries NO
+ * `trace=` field: a marker that looked like a trace event could be returned by `grep trace=` and
+ * could in principle collide with an id somebody was given.
+ *
+ * ONE ENTRY CAN BE BIGGER THAN THE WHOLE KEEP WINDOW. Every field is bounded at 2,000 characters
+ * by wpmcp_trace_field(), but the stack is not, and a runaway recursion produces thousands of
+ * frames. When no header starts inside the window, or when the first one that does would leave
+ * less than the entry just written, the window is taken to start at that entry instead - its own
+ * start IS a boundary, and it is the one entry that must not be lost.
+ *
+ * TWO THINGS IT REFUSES TO DO, both added in round 2 of this sprint and both about the same
+ * promise - that an id already handed to a caller still resolves:
+ *
+ *   it never truncates away bytes it has not READ, so an entry appended during the rewrite on a
+ *   host where `flock` does nothing is absorbed rather than discarded;
+ *   it never treats a SHORT write as a finished one, so the file cannot be left ending inside the
+ *   newest entry with nobody told.
+ *
+ * @param resource $handle     open on the log in append mode, holding LOCK_EX.
+ * @param int      $size       the file's size in bytes right now.
+ * @param int      $max        the cap.
+ * @param int      $newest     the length of the entry just appended, which must survive.
+ * @param bool     $incomplete set true when the file was truncated and the kept part could not all
+ *                             be written back. The log then ends inside an entry, so the caller
+ *                             must treat the append as failed - see wpmcp_trace_append().
+ */
+function wpmcp_trace_cap_file($handle, $size, $max, $newest, &$incomplete = null) {
+    $incomplete = false;
+
+    $size   = (int) $size;
+    $max    = (int) $max;
+    $newest = (int) $newest;
+
+    if ($size <= $max) { return 0; }
+
+    $keep = (int) ($max * WPMCP_TRACE_LOG_KEEP_PERCENT / 100);
+
+    if ($keep < $newest) { $keep = $newest; }
+
+    $from = $size - $keep;
+
+    if ($from < 0) { $from = 0; }
+
+    if (fseek($handle, $from) !== 0) { return 0; }
+
+    $tail = (string) stream_get_contents($handle);
+
+    if ($tail === '') { return 0; }
+
+    // Bytes of the file this function has actually READ, which is where the read started plus how
+    // much came back - NOT $size, which was measured before the read and may already be stale.
+    $held = $from + strlen($tail);
+
+    $header = '/^\d{4}-\d\d-\d\dT/';
+    $at     = null;
+
+    if (preg_match($header, $tail) === 1) {
+        $at = 0;
+    } elseif (preg_match('/\n(\d{4}-\d\d-\d\dT)/', $tail, $m, PREG_OFFSET_CAPTURE) === 1) {
+        $at = (int) $m[1][1];
+    }
+
+    if ($at === null || strlen($tail) - $at < $newest) {
+        $at = strlen($tail) - $newest;
+
+        if ($at < 0) { $at = 0; }
+    }
+
+    $tail = substr($tail, $at);
+
+    /*
+     * NEVER TRUNCATE AWAY BYTES THIS FUNCTION HAS NOT READ (round 2 of this sprint).
+     *
+     * THE HOST THIS IS ABOUT. wpmcp_trace_append() holds LOCK_EX across the whole thing, and on
+     * NFS and some shared hosting `flock` SUCCEEDS AND PROTECTS NOTHING. There another request can
+     * append an entry between the read above and the ftruncate below - and that entry's trace id
+     * has already gone out on the wire to a caller we told to quote it. The weakness is inherited
+     * (a torn entry was always possible without a lock); the CONSEQUENCE is new and is the one
+     * thing this whole item exists to prevent, because the cap turns a torn entry into a LOST one.
+     *
+     * So the file is re-stat'ed and anything that arrived is ABSORBED into the tail rather than
+     * merely deferring the cut - the promise is kept AND the file still comes down under its cap,
+     * which matters because a host busy enough to hit the race is the host that needs the cap.
+     * Abandoning is the FALLBACK, for a file that will not hold still: nothing is truncated, and
+     * the next traced failure tries again (the file is still over its cap, so one will).
+     *
+     * THREE ROUNDS, NOT A LOOP WITHOUT END. Each round costs one fstat and, at most, a read of
+     * whatever arrived. A file that is still moving after three is a file where no size is safe.
+     *
+     * WHAT THIS CANNOT CLOSE, AND IT IS STATED RATHER THAN IMPLIED: the OS can still schedule an
+     * append between the last fstat and the ftruncate. Without a working lock that window is
+     * irreducible. What changes is its WIDTH - from the whole tail read, which is up to a
+     * megabyte and a half of I/O, down to two adjacent syscalls.
+     */
+    $settled = false;
+
+    for ($round = 0; $round < 3; $round++) {
+        $stat = fstat($handle);
+        $live = (is_array($stat) && isset($stat['size'])) ? (int) $stat['size'] : -1;
+
+        if ($live === $held) { $settled = true; break; }
+
+        // Smaller than what we read means somebody else is already rewriting this file. Two
+        // rewriters is not a case to win; it is a case to leave alone.
+        if ($live < $held) { return 0; }
+
+        if (fseek($handle, $held) !== 0) { return 0; }
+
+        $extra = (string) stream_get_contents($handle);
+
+        if ($extra === '') { return 0; }
+
+        $tail .= $extra;
+        $held += strlen($extra);
+    }
+
+    if (!$settled) { return 0; }
+
+    $removed = $held - strlen($tail);
+
+    if ($removed <= 0) { return 0; }
+
+    $note = gmdate('c')
+        . ' truncated=1 cap=' . $max
+        . ' removed=' . $removed
+        . ' kept=' . strlen($tail) . "\n"
+        . "    wp-mcp trimmed this log, and this is not a corrupted file. The OLDEST entries were\n"
+        . "    discarded so the file stays under its cap; everything below this line is the NEWEST\n"
+        . "    part of it, so a trace id issued at any time since is still here. The cut was made\n"
+        . "    on an entry boundary, so no entry below begins part-way through.\n";
+
+    $out   = $note . $tail;
+    $total = strlen($out);
+
+    // TRUNCATE THEN WRITE, in that order, because O_APPEND puts every write at the end of the
+    // file and the end of a zero-length file is offset 0. The window between the two is the one
+    // place this function can lose data if the process dies inside it; it is one fwrite wide, it
+    // is entered once per few hundred failures, and the alternative - a temp file and a rename -
+    // would hand every other writer a lock on an inode that is no longer the log.
+    if (!ftruncate($handle, 0)) { return 0; }
+
+    /*
+     * A SHORT fwrite IS NOT A SUCCESSFUL ONE (round 2 of this sprint).
+     *
+     * fwrite returns the number of bytes it actually took, and on a full disk that is fewer than it
+     * was handed. The first version of this compared it against `false` alone, so a short write
+     * read as a completed one and left the file ending INSIDE the newest entry - the exact entry
+     * the cap exists to keep, with its stack and its file:line gone.
+     *
+     * So the remainder is retried while it makes PROGRESS, which is what repairs the transient case
+     * (an interrupted write) and is exactly how PHP's own fwrite treats a userland stream. A write
+     * that returns false or takes nothing is the end of it: there is no un-truncating a file, so
+     * the honest move is to REPORT it. $incomplete is what wpmcp_trace_append() reads to answer
+     * false, which sends the whole entry to error_log() through the fallback that already exists
+     * and raises the operator notice. The id the caller holds still resolves to something.
+     */
+    $put = 0;
+
+    for ($attempt = 0; $attempt < 5 && $put < $total; $attempt++) {
+        $n = @fwrite($handle, substr($out, $put));
+
+        if ($n === false || (int) $n <= 0) { break; }
+
+        $put += (int) $n;
+    }
+
+    if ($put < $total) {
+        $incomplete = true;
+
+        return 0;
+    }
+
+    return $removed;
+}
+
+/**
+ * The stack, one line per frame, with each argument reduced to its SHAPE.
+ *
+ * WHY NOT getTraceAsString(), WHICH THIS REPLACES (1.1.1). PHP's own formatter prints the
+ * first 15 characters of every string argument and `Array` for every array - VERIFIED on the
+ * PHP this project runs (8.2.29, `zend.exception_ignore_args=0`):
+ * `#0 file(3): f('SECRETSECRETSEC...', Array, Object(stdClass))`. Fifteen characters is
+ * plenty to be a value: the start of a `source_url`, of a post title, of an SQL statement, of
+ * whatever a caller passed. The trace log is private and unguessable, and it is still not the
+ * place for caller data - what an operator needs from a frame is which call it was and what
+ * SORT of thing it was given, and that is all this writes.
+ *
+ * AN ARRAY'S KEYS ARE THE ONE EXCEPTION, and they are what makes a frame readable: the tool
+ * closure's frame is `{closure}(array{source_url,filename,title})`, which names the arguments
+ * the caller actually sent without printing one of them. Keys are bounded in number, and
+ * anything outside word characters is dropped, because a key can be caller-supplied too (a
+ * meta key, a taxonomy name).
+ *
+ * The frame numbering, the `{main}` sentinel and the `[internal function]` marker are PHP's
+ * own spellings, kept so that a log a reader has seen before still reads the same.
+ *
+ * @return list<string>
+ */
+function wpmcp_trace_stack(Throwable $e) {
+    $lines  = array();
+    $frames = $e->getTrace();
+
+    foreach ($frames as $i => $frame) {
+        $where = isset($frame['file'])
+            ? $frame['file'] . '(' . (isset($frame['line']) ? (int) $frame['line'] : 0) . ')'
+            : '[internal function]';
+
+        $call = (isset($frame['class']) ? (string) $frame['class'] . (isset($frame['type']) ? (string) $frame['type'] : '::') : '')
+            . (isset($frame['function']) ? (string) $frame['function'] : '{closure}');
+
+        // `args` is ABSENT, not empty, on a host with zend.exception_ignore_args=1 (PHP's own
+        // production default), so "no arguments" and "arguments withheld by php.ini" are two
+        // different frames and the log says which.
+        if (!array_key_exists('args', $frame)) {
+            $args = '...';
+        } else {
+            $shapes = array();
+            foreach ((array) $frame['args'] as $arg) { $shapes[] = wpmcp_trace_arg_shape($arg); }
+            $args = implode(', ', $shapes);
+        }
+
+        $lines[] = '#' . (int) $i . ' ' . $where . ': ' . $call . '(' . $args . ')';
+    }
+
+    $lines[] = '#' . count($frames) . ' {main}';
+
+    return $lines;
+}
+
+/**
+ * One argument, as its shape and never as its value.
+ *
+ * A scalar becomes its type - a string also its length, which is the one number worth having
+ * when a payload turns out to be a megabyte. An array becomes its KEYS, at most eight of them,
+ * each stripped to word characters and 40 characters; a list's integer keys say nothing, so a
+ * list is reported by its size instead. An object becomes its class name, which is code rather
+ * than data.
+ */
+function wpmcp_trace_arg_shape($arg) {
+    if (is_array($arg)) {
+        if ($arg !== array() && array_keys($arg) === range(0, count($arg) - 1)) {
+            return 'list(' . count($arg) . ')';
+        }
+
+        $keys = array();
+
+        foreach (array_keys($arg) as $key) {
+            if (count($keys) >= 8) { $keys[] = '...'; break; }
+            $keys[] = substr(preg_replace('/[^A-Za-z0-9_-]/', '', (string) $key), 0, 40);
+        }
+
+        return 'array{' . implode(',', $keys) . '}';
+    }
+
+    if (is_object($arg))   { return get_class($arg); }
+    if ($arg === null)     { return 'null'; }
+    if (is_bool($arg))     { return 'bool'; }
+    if (is_int($arg))      { return 'int'; }
+    if (is_float($arg))    { return 'float'; }
+    if (is_string($arg))   { return 'string(' . strlen($arg) . ')'; }
+    if (is_resource($arg)) { return 'resource'; }
+
+    return gettype($arg);
 }
 
 /** One field: newlines flattened, bounded, empty written as "" so the shape stays parseable. */
@@ -404,9 +847,14 @@ function wpmcp_trace_selfcheck() {
 /**
  * Is this response body the log file?
  *
- * Compared against the head of the file rather than all of it, because the log is unbounded
- * and this runs on an admin page load. An empty log is the case a prefix check gets wrong -
- * every string starts with '' - so it is required to be exactly empty.
+ * Compared against the head of the file rather than all of it, because this runs on an admin
+ * page load and the cap still allows two megabytes. An empty log is the case a prefix check gets
+ * wrong - every string starts with '' - so it is required to be exactly empty.
+ *
+ * A TRUNCATED LOG DOES NOT CONFUSE IT, which is the one thing worth checking here now that the
+ * file can be rewritten under it: the head of a truncated file is the truncation marker, and the
+ * comparison is against whatever the head is at the time it is read, not against a remembered
+ * one. The cut is on an entry boundary, so the head is never a fragment either.
  */
 function wpmcp_trace_body_is_the_log($body) {
     $path = wpmcp_trace_path();
@@ -546,10 +994,15 @@ function wpmcp_trace_admin_notices() {
     }
 
     if (wpmcp_trace_log_is_unwritable()) {
+        // TWO CAUSES, ONE NOTICE, and the wording covers both since round 2 of the LOG+FLOOR
+        // sprint: the directory is not writable, or a write into it did not complete - which on a
+        // full disk is what a trim of the log looks like. Both end the same way for the operator:
+        // the trace went to the PHP error log and the directory needs attention.
         echo '<div class="notice notice-error"><p><strong>WP MCP: the trace log could not'
             . ' be written.</strong></p><p>A failure was recorded to the PHP error log'
             . ' instead, because <code>' . esc_html(wpmcp_trace_dir()) . '</code> is not'
-            . ' writable. Trace ids handed to clients are still findable there, but fix the'
+            . ' writable, or a write into it could not be completed &mdash; a full disk does'
+            . ' that. Trace ids handed to clients are still findable there, but fix the'
             . ' directory so they go back to one file.</p></div>';
     }
 }

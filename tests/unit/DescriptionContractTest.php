@@ -33,15 +33,59 @@ final class DescriptionContractTest extends TestCase
     }
 
     /**
-     * G4. Every description of every built-in tool states what the tool returns.
+     * Every `description` string a tool serves, run together: its own, and every one inside
+     * its outputSchema.
+     *
+     * WHY THE SCHEMA COUNTS AS PROSE (1.1.1). The four piloted read tools moved their field
+     * list out of the 1,000-character description and into `outputSchema`, a description per
+     * field - which is the point of the pilot (D19: the description budget is the scarce
+     * thing). A test that looked only at `description` would then read "the sentence is gone"
+     * where a client reads "the sentence is over there", and the guard would be pushing the
+     * information out of the server rather than holding it in.
+     */
+    private static function servedProse(array $tool): string
+    {
+        $prose = (string) $tool['description'];
+
+        $walk = function ($node) use (&$walk, &$prose) {
+            if (!is_array($node)) { return; }
+            if (isset($node['description']) && is_string($node['description'])) {
+                $prose .= ' ' . $node['description'];
+            }
+            foreach ($node as $child) { $walk($child); }
+        };
+
+        $walk($tool['outputSchema'] ?? null);
+
+        return $prose;
+    }
+
+    /**
+     * G4. Every built-in tool states what it returns - in its description, or in an
+     * outputSchema that describes every field it returns.
+     *
+     * TWO WAYS TO SATISFY IT, AND THE SECOND IS STRICTER. A tool without an outputSchema must
+     * still carry the word in its description, exactly as before. A tool WITH one is exempt
+     * from that sentence and owes something harder instead: a `description` on every property
+     * of the schema, so moving the field list out of the description cannot quietly lose it.
      *
      * @group sprint-14d
      */
     public function testEveryToolDescriptionSaysWhatItReturns(): void
     {
-        $missing = [];
+        $missing    = [];
+        $undescribed = [];
 
         foreach (WireSerializationTest::catalog() as $name => $tool) {
+            if (isset($tool['outputSchema']['properties'])) {
+                foreach ($tool['outputSchema']['properties'] as $field => $node) {
+                    if (!isset($node['description']) || trim((string) $node['description']) === '') {
+                        $undescribed[] = $name . '.' . $field;
+                    }
+                }
+                continue;
+            }
+
             if (preg_match('/\bReturns\b/', (string) $tool['description']) !== 1) {
                 $missing[] = $name;
             }
@@ -52,6 +96,12 @@ final class DescriptionContractTest extends TestCase
             $missing,
             'These tools do not say what they return, so a client has to call them to find'
             . ' out and then guess which fields mean what: ' . implode(', ', $missing)
+        );
+        self::assertSame(
+            [],
+            $undescribed,
+            'These outputSchema fields carry no description. A field list moved out of a tool'
+            . ' description has to arrive somewhere: ' . implode(', ', $undescribed)
         );
     }
 
@@ -126,8 +176,11 @@ final class DescriptionContractTest extends TestCase
     {
         $catalog = WireSerializationTest::catalog();
 
+        // ACROSS THE WHOLE SERVED PROSE, not the description alone: get-post's `link`
+        // sentence now lives in its outputSchema, where the field it describes is. See
+        // servedProse().
         foreach (['list-posts', 'get-post', 'create-post', 'update-post'] as $name) {
-            $description = (string) $catalog[$name]['description'];
+            $description = self::servedProse($catalog[$name]);
 
             self::assertStringContainsString('?p=ID', $description, "{$name} does not say what link is on an unpublished post.");
             foreach (['draft', 'pending', 'future', 'trash'] as $status) {

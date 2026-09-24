@@ -76,6 +76,18 @@ WPMCP_CAINFO="${WPMCP_CAINFO:-}"
 
 # Local's PHP build loads imagick from a DLL it does not ship; the resulting startup
 # warning pollutes stdout and would trip beStrictAboutOutputDuringTests. Silence it.
+#
+# AND THE PRICE OF error_reporting=0, WHICH COST A CI RUN (sprint LOG+FLOOR round 2): this shell
+# CANNOT SEE A PHP DEPRECATION. phpunit.xml.dist sets failOnDeprecation="true", so a test that
+# triggers one is GREEN here and RED on every CI leg above 8.1 - which is exactly what happened to a
+# stream wrapper that let PHP create `$context` dynamically. Before trusting a green unit tier on a
+# change that touches PHP the runtime introspects (a stream wrapper, a magic method, a dynamic
+# property), re-run it with reporting on:
+#
+#   "$PHP" -d display_startup_errors=0 -d error_reporting=32767 #       vendor/phpunit/phpunit/phpunit --testsuite unit --display-deprecations
+#
+# error_reporting is NOT simply raised here, because the imagick warning it hides is real and would
+# trip beStrictAboutOutputDuringTests on every run.
 WPMCP_PHP_QUIET="-d display_startup_errors=0 -d error_reporting=0"
 
 # Composer's scripts shell out to a bare `php` (vendor/bin/phpunit.bat does), so a

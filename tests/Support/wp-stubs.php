@@ -50,6 +50,21 @@ if (!function_exists('add_filter')) {
     }
 }
 
+if (!class_exists('Walker')) {
+    /**
+     * A LOAD-TIME CLASS DEPENDENCY, and the first one: tools.php declares
+     * `class WpMcp_Menu_Collector extends Walker` at file scope (1.1.1, the menu-tree swap
+     * to core's walker), so `require wp-mcp.php` fatals without a parent class to extend.
+     *
+     * Empty on purpose. The stub has to satisfy the EXTENDS and nothing more: no unit test
+     * calls walk(), because what the walker does with a menu is a fact about WordPress and
+     * is measured against a real site (tests/integration/MenuToolsTest.php). A stub that
+     * reimplemented walk() would be a second implementation of the very thing the swap
+     * exists to stop maintaining.
+     */
+    class Walker {}
+}
+
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path($file)
     {

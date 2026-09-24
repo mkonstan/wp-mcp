@@ -49,11 +49,51 @@ if ($reason !== '') {
 // verdict clean (sprint 14b). See Fixtures::switchState().
 $switches = Fixtures::switchState();
 
+// A THIRD KIND, and it is the opposite shape to the other two: not something a run LEFT
+// BEHIND but something a run TOOK AWAY. Five integration classes unschedule the plugin's
+// hourly sweep for their duration, because a dead token row is exactly what the sweep
+// deletes and those classes need one to survive (see Fixtures::suspendTokenSweep). Every
+// one of them puts it back in destroy(). A run killed between the two - Ctrl-C, a cancelled
+// gate, a crashed runner - leaves the site with no sweep at all, and the site then keeps
+// dead token rows for ever with nothing saying why. This script is the project's answer to
+// "did a killed run leave something behind", so it has to be able to answer this too
+// (analysis/58 §6).
+//
+// It is NOT in the "clean" sentence's list, deliberately: that sentence enumerates things
+// that should not be there, and a missing cron event is the other direction. It prints only
+// when it is missing, and then it is debris and the exit code is 1.
+$cron = wpmcp_debris_sweep_report();
+
 [$code, $output] = Fixtures::debrisVerdict(
-    Fixtures::foreignDebris(),
+    Fixtures::foreignDebris() . $cron,
     $switches['notices'],
     $switches['debris']
 );
 
 echo $output;
 exit($code);
+
+/**
+ * '' when the plugin's hourly sweep is scheduled, a debris report when it is not.
+ *
+ * Tolerant on purpose: this script already exits 2 when wp-cli cannot be reached, so by the
+ * time it runs the site answers. A malformed answer is reported rather than guessed at,
+ * because "I could not tell" and "it is scheduled" must not look the same here.
+ */
+function wpmcp_debris_sweep_report(): string
+{
+    $answer = trim(WpCli::tryEvaluate(
+        'echo wp_next_scheduled("wpmcp_flush_expired") ? "SCHEDULED " . gmdate("Y-m-d H:i:s", wp_next_scheduled("wpmcp_flush_expired")) . " UTC" : "MISSING";'
+    ));
+
+    if (strpos($answer, 'SCHEDULED') === 0) {
+        return '';
+    }
+
+    return "DEBRIS: the hourly token sweep (wpmcp_flush_expired) is NOT scheduled on this site.\n"
+        . "  Five integration classes take it off the schedule for their duration and put it back\n"
+        . "  in destroy(); a run killed in between leaves it off, and the site then keeps dead\n"
+        . "  token rows for ever. wp-cli said: " . ($answer === '' ? '(no answer)' : $answer) . "\n"
+        . "  Put it back by deactivating and reactivating the plugin, which is what schedules it,\n"
+        . "  or: wp eval 'wp_schedule_event(time() + HOUR_IN_SECONDS, \"hourly\", \"wpmcp_flush_expired\");'\n";
+}

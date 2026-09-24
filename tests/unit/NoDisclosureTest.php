@@ -4,7 +4,8 @@
  * else can enforce it.
  *
  * WHAT THIS DEFENDS. Sprint 3 replaced every ad-hoc "report what went wrong" path with
- * one catch-all: a generic -32603, message "Internal error", an eight-hex trace id, and
+ * one catch-all: a generic -32603, message "Internal error (trace <id>)", the same eight-hex
+ * id in `error.data.trace_id`, and
  * the whole throwable in wp-content/wpmcp/trace.log. That holds exactly as long as
  * nobody adds `$e->getMessage()` back into the request path - and the next person to do
  * it will be trying to be helpful, in a catch block, with a tool that is failing in

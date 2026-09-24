@@ -32,6 +32,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
  * wpmcp_trace_log_name      this site's random trace-log file name
  * wpmcp_trace_log_readable  set when the self-check found the log served over HTTP
  * wpmcp_trace_log_unwritable set when a trace went to error_log() instead
+ * wpmcp_client_columns_missing set when revision 6's two optional columns could not be added
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
  * wpmcp_sql_enabled         the sql-select switch
@@ -42,6 +43,7 @@ $wpmcp_options = array(
     'wpmcp_trace_log_name',
     'wpmcp_trace_log_readable',
     'wpmcp_trace_log_unwritable',
+    'wpmcp_client_columns_missing',
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
     'wpmcp_sql_enabled',

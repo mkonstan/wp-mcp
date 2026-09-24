@@ -1017,8 +1017,10 @@ function wpmcp_protocol_version_gate(WP_REST_Request $req, $id, $method) {
  *                            (`isError: true`, the failures as text), because the
  *                            envelope was fine and the agent's recovery is to fix the
  *                            call. See the validation block in wpmcp_dispatch().
- *   -32603  Internal error   ANYTHING unexpected. One message, "Internal error", plus
- *                            data.trace_id. The detail is in trace.php's log.
+ *   -32603  Internal error   ANYTHING unexpected. One message, "Internal error (trace
+ *                            <id>)", and the same id in data.trace_id - see
+ *                            wpmcp_internal_error() for why it is in both. The detail is
+ *                            in trace.php's log.
  *
  * Adding a sixth code means a client would have to act differently on it. None does, so
  * there is no sixth - see claude_code_memory/fail-loud-explicit-scope.md.
@@ -1030,12 +1032,24 @@ function wpmcp_protocol_version_gate(WP_REST_Request $req, $id, $method) {
  * those paths at once, including the ones nobody enumerated, which is the point.
  *
  * The id, the method and the tool name are read BEFORE the try, because the error
- * response needs them and the log line wants them. json_decode cannot throw without
- * JSON_THROW_ON_ERROR, so that read is itself safe.
+ * response needs them and the log line wants them. Reading a decoded parameter cannot
+ * throw, so that read is itself safe.
+ *
+ * THE BODY IS DECODED ONCE, BY CORE, AND NOT AGAIN HERE (1.1.1). `WP_REST_Server::dispatch()`
+ * has already called `$request->has_valid_params()` -> `parse_json_params()` on any
+ * `application/json` body before the permission callback ran (KB 0.9), so
+ * `$req->get_json_params()` hands back the array core already built and our own
+ * `json_decode()` was a second parse of the same bytes. Genuinely malformed JSON never gets
+ * this far: core answers it 400 `rest_invalid_json` before dispatch.
+ *
+ * THE RAW BODY IS STILL READ, FOR ONE BYTE. `json_decode('[]')` and `json_decode('{}')` are
+ * the same PHP value, so the decoded parameters cannot tell a zero-length batch from an
+ * empty object and the batch refusal has to look at the first non-whitespace character. That
+ * is the one thing get_json_params() cannot answer - see wpmcp_dispatch().
  */
 function wpmcp_handle(WP_REST_Request $req) {
     $raw  = (string) $req->get_body();
-    $body = json_decode($raw, true);
+    $body = $req->get_json_params();
 
     $id     = (is_array($body) && array_key_exists('id', $body)) ? $body['id'] : null;
     $method = (is_array($body) && isset($body['method'])) ? (string) $body['method'] : '';
@@ -1049,9 +1063,7 @@ function wpmcp_handle(WP_REST_Request $req) {
         return wpmcp_dispatch($req, $raw, $body, $id, $method);
     } catch (\Throwable $e) {
         // Nothing from $e reaches the wire. The trace id is the only thing that crosses.
-        return wpmcp_rpc_err($id, -32603, 'Internal error', array(
-            'trace_id' => wpmcp_trace($e, $method, $tool),
-        ));
+        return wpmcp_internal_error($id, wpmcp_trace($e, $method, $tool));
     }
 }
 
@@ -1077,13 +1089,15 @@ function wpmcp_handle(WP_REST_Request $req) {
  * sent no id cannot read a 400 anyway.
  *
  * @param WP_REST_Request $req    the request, for the MCP-Protocol-Version header.
- * @param string     $raw    the request body as sent.
- * @param mixed      $body   json_decode($raw, true).
+ * @param string     $raw    the request body as sent - read for its first byte only.
+ * @param mixed      $body   the decoded body, from WP_REST_Request::get_json_params().
  * @param mixed      $id     the request id, or null when there is none.
  * @param string     $method the JSON-RPC method, or ''.
  */
 function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
     // A JSON array body: a batch. One refusal, named, so a client stops guessing.
+    // ON THE RAW BODY, and this is the one test that cannot move to get_json_params():
+    // `[]` and `{}` decode to the same PHP value.
     if (substr(ltrim($raw), 0, 1) === '[') {
         return wpmcp_rpc_err(null, -32600, 'Batch requests are not supported');
     }
@@ -1119,6 +1133,11 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             // initialize result. Sprint 4 fixed that here with a literal stdClass;
             // Sprint 5 replaced it with the guard, so the same rule now holds for every
             // schema too and there is one implementation rather than two.
+            // WHO IS CONNECTING, onto the token row (1.1.1). The one message that carries
+            // `clientInfo`, and the only state this server keeps about a connection - see
+            // wpmcp_record_client_info().
+            wpmcp_record_client_info($params);
+
             return wpmcp_rpc_ok($id, array(
                 'protocolVersion' => wpmcp_negotiated_protocol_version($params),
                 'capabilities'    => wpmcp_objectify_object_map(array('tools' => array())),
@@ -1147,13 +1166,23 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             $out = array();
             foreach (wpmcp_tools() as $name => $t) {
                 if (!empty($t['write']) && !$is_admin) { continue; }
-                $out[] = array(
+                $entry = array(
                     'name'        => $name,
                     'description' => $t['description'],
                     // The guard, on the way out. See wpmcp_objectify_schema().
                     'inputSchema' => wpmcp_objectify_schema($t['inputSchema']),
                     'annotations' => $t['annotations'],
                 );
+
+                // ABSENT UNLESS THE TOOL DECLARES ONE (1.1.1, the pilot - see
+                // wpmcp_result_schema() in tools.php). `outputSchema` is optional in every
+                // revision this server speaks, and a tool that sent an empty one would be
+                // promising a shape it has not described. Four read tools have it today.
+                if (isset($t['outputSchema']) && is_array($t['outputSchema'])) {
+                    $entry['outputSchema'] = wpmcp_objectify_schema($t['outputSchema']);
+                }
+
+                $out[] = $entry;
             }
 
             $page   = array_slice($out, $offset, WPMCP_TOOLS_PAGE_SIZE);
@@ -1168,61 +1197,150 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
             return wpmcp_rpc_ok($id, $result);
 
         case 'tools/call':
-            // THE SHAPE OF THE REQUEST ITSELF IS -32602, which is what that code is
-            // reserved for here: an unknown tool, and a CallToolRequest that is not one.
-            // `arguments` silently becoming array() when it is a string or a list is how
-            // a caller's mistake turns into a tool running on defaults.
-            if (isset($params['name']) && !is_string($params['name'])) {
-                return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.name must be a string');
-            }
-            if (array_key_exists('arguments', $params)
-                && !(is_array($params['arguments'])
-                    && ($params['arguments'] === array() || !array_is_list($params['arguments'])))) {
-                return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.arguments must be an object');
-            }
+            // ONE OBSERVATION POINT PER CALL, and it wraps every outcome (1.1.1). See
+            // wpmcp_dispatch_tool_call() for the call itself and wpmcp_tool_call_event() for
+            // what the action carries.
+            $started = microtime(true);
+            $called  = null;
 
-            $name  = isset($params['name']) ? (string) $params['name'] : '';
-            $args  = isset($params['arguments']) && is_array($params['arguments']) ? $params['arguments'] : array();
-            $tools = wpmcp_tools();
-            if (!isset($tools[$name])) {
-                return wpmcp_rpc_err($id, -32602, 'Unknown tool: ' . $name);
+            try {
+                $called = wpmcp_dispatch_tool_call($params, $id, $method);
+                return $called;
+            } finally {
+                wpmcp_tool_call_event($params, $called, $started);
             }
-            // Scope gate - gate 8 of wpmcp_authorize()'s sequence, enforced here
-            // because it is the first point at which the tool name exists.
-            $session = $GLOBALS['wpmcp_session'];
-            if (!empty($tools[$name]['write']) && (!$session || $session->scope !== 'admin')) {
-                wpmcp_auth_event('scope_deny', array(
-                    'token_id' => $session ? (int) $session->id : 0,
-                    'user_id'  => $session ? (int) $session->user_id : 0,
-                    'scope'    => $session ? (string) $session->scope : '',
-                    'tool'     => $name,
-                ));
-                return wpmcp_rpc_ok($id, wpmcp_tool_result('This tool requires an admin-scope token.', true));
-            }
-
-            // ALWAYS-ON INPUT VALIDATION, and it runs here: after the scope gate, so a
-            // token that may not call this tool at all is not handed a critique of its
-            // arguments, and before the run, so the tool never sees a value of the wrong
-            // type. The refusal is an MCP tool error - `isError: true` with the failures
-            // as text - and NOT -32602: the request is well-formed JSON-RPC naming a tool
-            // that exists, and an agent recovers from a tool error by fixing the call.
-            $failures = SchemaValidator::validateArguments($args, $tools[$name]['inputSchema']);
-            if ($failures !== array()) {
-                return wpmcp_rpc_ok($id, wpmcp_tool_result(
-                    'Invalid arguments for ' . $name . ":\n" . implode("\n", $failures),
-                    true
-                ));
-            }
-
-            $result = call_user_func($tools[$name]['run'], $args);
-            if (is_wp_error($result)) {
-                return wpmcp_tool_error_response($id, $result, $method, $name);
-            }
-            return wpmcp_rpc_ok($id, wpmcp_tool_result(wp_json_encode($result), false));
 
         default:
             return wpmcp_rpc_err($id, -32601, 'Method not found: ' . $method);
     }
+}
+
+/**
+ * ONE `do_action` PER tools/call, WHATEVER HAPPENED (1.1.1).
+ *
+ * WHY AN ACTION AND NOT A LOG. An operator asking "what is this token doing?" had two
+ * answers, and neither was usage: the auth events (a credential was accepted) and the trace
+ * log (something broke). Inventing a third log format would mean choosing its location, its
+ * rotation, its retention and its disclosure rules for everybody. A `do_action` chooses
+ * none of those: whoever wants the data writes the four lines that suit their site, and a
+ * site that wants nothing pays one empty hook call.
+ *
+ * IN A `finally`, so a throwable inside a tool - the case an operator most wants to see -
+ * fires it too, with `ok` false and no response to read a result out of.
+ *
+ * ARGUMENT KEYS, NEVER ARGUMENT VALUES, for the same reason the trace log stopped carrying
+ * them: a listener is an ordinary plugin callback and this is somebody's content. The keys
+ * say which arguments a call used, which is what a usage question is actually about.
+ *
+ * `ok` IS READ OFF THE RESPONSE rather than tracked through the branches, so it cannot
+ * disagree with what the caller was told: a JSON-RPC `error` member or `result.isError` is
+ * not ok, and everything else is. A refusal by the scope gate, a schema failure, a tool's
+ * own WP_Error and a thrown TypeError therefore all report ok false without four call sites
+ * having to remember to.
+ */
+function wpmcp_tool_call_event($params, $response, $started) {
+    $name = (isset($params['name']) && is_scalar($params['name'])) ? (string) $params['name'] : '';
+    $args = (isset($params['arguments']) && is_array($params['arguments'])) ? $params['arguments'] : array();
+    $data = ($response instanceof WP_REST_Response) ? (array) $response->get_data() : array();
+
+    $ok = !isset($data['error'])
+        && isset($data['result'])
+        && empty($data['result']['isError']);
+
+    $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
+
+    /**
+     * A tool call finished - successfully or not.
+     *
+     * @since 1.1.1
+     *
+     * @param string $tool    The tool name as the client sent it, '' when it sent none.
+     * @param bool   $ok      False for any refusal, tool error or crash.
+     * @param array  $context {
+     *     @type list<string> $arg_keys    The argument NAMES the call carried. Never values.
+     *     @type int          $token_id    The token row id, 0 when there is no session.
+     *     @type int          $user_id     The WordPress user the call ran as.
+     *     @type string       $scope       'read' or 'admin'.
+     *     @type float        $duration_ms Wall-clock milliseconds, one decimal place.
+     * }
+     */
+    do_action('wpmcp_tool_call', $name, $ok, array(
+        'arg_keys'    => array_values(array_map('strval', array_keys($args))),
+        'token_id'    => $session ? (int) $session->id : 0,
+        'user_id'     => $session ? (int) $session->user_id : 0,
+        'scope'       => $session ? (string) $session->scope : '',
+        'duration_ms' => round((microtime(true) - (float) $started) * 1000, 1),
+    ));
+}
+
+/**
+ * One tools/call, from the request's shape to the result on the wire.
+ *
+ * SPLIT OUT OF wpmcp_dispatch() so that the observation action above can wrap every one of
+ * its exits at once (1.1.1). The body is unchanged; the five `return`s are the five answers
+ * a call can get, and they are documented where they stand.
+ */
+function wpmcp_dispatch_tool_call($params, $id, $method) {
+    // THE SHAPE OF THE REQUEST ITSELF IS -32602, which is what that code is
+    // reserved for here: an unknown tool, and a CallToolRequest that is not one.
+    // `arguments` silently becoming array() when it is a string or a list is how
+    // a caller's mistake turns into a tool running on defaults.
+    if (isset($params['name']) && !is_string($params['name'])) {
+        return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.name must be a string');
+    }
+    if (array_key_exists('arguments', $params)
+        && !(is_array($params['arguments'])
+            && ($params['arguments'] === array() || !array_is_list($params['arguments'])))) {
+        return wpmcp_rpc_err($id, -32602, 'Invalid CallToolRequest: params.arguments must be an object');
+    }
+
+    $name  = isset($params['name']) ? (string) $params['name'] : '';
+    $args  = isset($params['arguments']) && is_array($params['arguments']) ? $params['arguments'] : array();
+    $tools = wpmcp_tools();
+    if (!isset($tools[$name])) {
+        return wpmcp_rpc_err($id, -32602, 'Unknown tool: ' . $name);
+    }
+    // Scope gate - gate 8 of wpmcp_authorize()'s sequence, enforced here
+    // because it is the first point at which the tool name exists.
+    $session = $GLOBALS['wpmcp_session'];
+    if (!empty($tools[$name]['write']) && (!$session || $session->scope !== 'admin')) {
+        wpmcp_auth_event('scope_deny', array(
+            'token_id' => $session ? (int) $session->id : 0,
+            'user_id'  => $session ? (int) $session->user_id : 0,
+            'scope'    => $session ? (string) $session->scope : '',
+            'tool'     => $name,
+        ));
+        return wpmcp_rpc_ok($id, wpmcp_tool_result('This tool requires an admin-scope token.', true));
+    }
+
+    // ALWAYS-ON INPUT VALIDATION, and it runs here: after the scope gate, so a
+    // token that may not call this tool at all is not handed a critique of its
+    // arguments, and before the run, so the tool never sees a value of the wrong
+    // type. The refusal is an MCP tool error - `isError: true` with the failures
+    // as text - and NOT -32602: the request is well-formed JSON-RPC naming a tool
+    // that exists, and an agent recovers from a tool error by fixing the call.
+    $failures = SchemaValidator::validateArguments($args, $tools[$name]['inputSchema']);
+    if ($failures !== array()) {
+        return wpmcp_rpc_ok($id, wpmcp_tool_result(
+            'Invalid arguments for ' . $name . ":\n" . implode("\n", $failures),
+            true
+        ));
+    }
+
+    $result = call_user_func($tools[$name]['run'], $args);
+    if (is_wp_error($result)) {
+        return wpmcp_tool_error_response($id, $result, $method, $name);
+    }
+
+    // BOTH HALVES, AND THE TEXT BLOCK IS NOT OPTIONAL. A tool with an `outputSchema` also
+    // sends `structuredContent`, because the specification says a client MAY read either and
+    // requires the text block to stay for compatibility - so the data goes out twice, which is
+    // exactly the cost the pilot is measuring (D19). Only the four piloted read tools pay it.
+    return wpmcp_rpc_ok($id, wpmcp_tool_result(
+        wp_json_encode($result),
+        false,
+        isset($tools[$name]['outputSchema'])
+    ));
 }
 
 /**
@@ -1240,12 +1358,20 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
  *   comment_flood      too fast. Wait, then resend - the one case where retrying IS right,
  *                      and the agent cannot know that from "Internal error".
  *   empty_content      an empty comment. Fix the arguments.
- *   http_request_failed  upload-media could not fetch `source_url`. Overwhelmingly a URL
- *                      the agent typed wrong, and the message says what went wrong with it.
+ *
+ * `http_request_failed` WAS ON THIS LIST AND CAME OFF IT IN 1.1.1. Its message is whatever
+ * the HTTP transport said, and cURL's failure sentence names the host it could not reach -
+ * which on a site with `WP_PROXY_HOST` set is the operator's internal proxy, a name no
+ * caller is owed ("Failed to connect to proxy.internal port 8080"). A connection failure is
+ * now generic, with the trace id in the message, so the operator reads the transport's own
+ * sentence in the private log and the caller reads an id to quote. The case the list was
+ * really protecting - a remote server that ANSWERS and refuses - is code `http_404`, which
+ * was never on this list at all; upload-media now turns that one into a relayable
+ * `wpmcp_fetch_failed` naming the status. See wpmcp_fetch_error() in tools.php.
  *
  * This does not reopen the "no named error cases" rule - it applies it. The rule is "do
  * not add a named error case unless the client must act differently on it", and the client
- * acts differently on all five. Everything else core produces stays generic.
+ * acts differently on all four. Everything else core produces stays generic.
  *
  * These are relayed and NOT logged: a non-bug does not belong in a log of bugs.
  */
@@ -1255,7 +1381,6 @@ function wpmcp_relayable_core_error_codes() {
         'comment_duplicate',
         'comment_flood',
         'empty_content',
-        'http_request_failed',
     );
 }
 
@@ -1291,13 +1416,61 @@ function wpmcp_tool_error_response($id, $error, $method, $tool) {
         return wpmcp_rpc_ok($id, wpmcp_tool_result('Error: ' . $error->get_error_message(), true));
     }
 
-    return wpmcp_rpc_err($id, -32603, 'Internal error', array(
-        'trace_id' => wpmcp_trace_wp_error($error, $method, $tool),
+    return wpmcp_internal_error($id, wpmcp_trace_wp_error($error, $method, $tool));
+}
+
+/**
+ * THE ONE GENERIC FAILURE, AND IT SAYS THE TRACE ID TWICE: in the message and in
+ * `error.data.trace_id`.
+ *
+ * The id has been in `data` since sprint 6 and that was not enough. MEASURED with a cold
+ * client, 2026-09-21: the client rendered `error.message` and nothing else, so the operator
+ * was shown "Internal error" with no way to find the event in the trace log - the one
+ * identifier that makes a deliberately empty message actionable was invisible. Putting it in
+ * the message costs eight hex digits and survives any client that renders only the message.
+ *
+ * IT STAYS IN `data` AS WELL. That is where a programmatic consumer reads it, it is what the
+ * tests have asserted since sprint 3, and a key something already parses is not moved.
+ *
+ * The message still discloses nothing: a trace id is eight random hex digits, generated per
+ * event, and means nothing to anybody without the site's private trace log.
+ */
+function wpmcp_internal_error($id, $trace_id) {
+    $trace_id = (string) $trace_id;
+
+    return wpmcp_rpc_err($id, -32603, 'Internal error (trace ' . $trace_id . ')', array(
+        'trace_id' => $trace_id,
     ));
 }
 
-function wpmcp_tool_result($text, $isError) {
-    return array('content' => array(array('type' => 'text', 'text' => (string) $text)), 'isError' => (bool) $isError);
+/**
+ * A CallToolResult: the text block always, and `structuredContent` when the tool declared an
+ * outputSchema to describe it.
+ *
+ * THE STRUCTURED HALF IS DECODED FROM THE TEXT BLOCK, and that is the whole trick. The
+ * specification wants both, so the data goes out twice; deriving the second from the first
+ * means they cannot disagree about anything - not a value, not a type, not which of an empty
+ * map and an empty list a field is. Building it from the result array separately would have
+ * re-opened exactly the drift the single field declaration closed (tools.php,
+ * wpmcp_result_schema()), one layer further out.
+ *
+ * ONLY AN OBJECT IS ATTACHED. `structuredContent` is an object in the schema, and a result
+ * that encoded to a JSON array or failed to encode at all gets the text block alone rather
+ * than a member that would fail its own validation.
+ */
+function wpmcp_tool_result($text, $isError, $structured = false) {
+    $result = array(
+        'content' => array(array('type' => 'text', 'text' => (string) $text)),
+        'isError' => (bool) $isError,
+    );
+
+    if ($structured) {
+        $decoded = json_decode((string) $text);
+
+        if ($decoded instanceof stdClass) { $result['structuredContent'] = $decoded; }
+    }
+
+    return $result;
 }
 function wpmcp_rpc_ok($id, $result) {
     return new WP_REST_Response(array('jsonrpc' => '2.0', 'id' => $id, 'result' => $result), 200);

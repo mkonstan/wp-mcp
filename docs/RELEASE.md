@@ -80,12 +80,33 @@ Then tag and push:
 git tag v1.1.0 && git push origin v1.1 --tags
 ```
 
-The tag push triggers `.github/workflows/release.yml`. It lints every PHP file, runs the
-unit suite on PHP 8.1 through 8.4, runs the integration suite against a `wp-env`
-container, and re-runs each closed sprint's gate group on its own, checking that every
-test in it ran rather than skipped. Only then does the `release` job build `wp-mcp.zip`,
-unzip it, compare every file against the source, lint the extracted copies, and publish a
-GitHub Release with the zip attached.
+**Immediately after the tag is pushed, open the next version.** The first commit on the
+branch after a release bumps `Version:` and `WPMCP_VER` to the next number and adds a
+CHANGELOG section for it marked `**Unreleased.**` - patch for a fix cycle, minor when the
+cycle adds features. Without that step every dev zip cut during the cycle reports the
+version just RELEASED, which is false: those builds are not that release, they are what
+comes after it. With it, a dev zip reads as the version it will become plus its own build,
+and cutting the next release means deleting the word "Unreleased". Decided 2026-09-21
+(`analysis/53-open-decisions.md`, D15).
+
+The tag push triggers `.github/workflows/release.yml`, and the first thing it does is ask
+whether this code has already been proved. See **What the gate is now** below. When it has
+not, it lints every PHP file, runs the unit suite on PHP 8.1 through 8.4, runs the integration
+suite against a `wp-env` container on current WordPress and again on the declared floor, and
+checks from that run's JUnit log that every test in every closed sprint group executed rather
+than skipped. Only then does the `release` job build `wp-mcp.zip`, unzip it, compare every file
+against the source, lint the extracted copies, and publish a GitHub Release with the zip attached.
+
+**In `ci.yml` that current-WordPress run is SHARDED across eight machines** (D18): eight
+containers, each running a disjoint set of test classes balanced by measured cost, each writing
+its own JUnit log, and a merge job assembling them into the one log the per-group check reads.
+It brings the tier from about seventy minutes down to about fifteen, and costs about 30% more
+total test time because each shard builds its own fixtures. The merge refuses rather than
+improvises: a missing log, a truncated one, one with no tests in it, the same test in two shards,
+or a class that is in the test map and in nobody's log - each an error that names itself.
+`bin/ci-shards.php --plan` prints the whole partition. `release.yml`'s fallback gate is
+deliberately NOT sharded: it runs only when no green run exists at all, which is rare, and one
+machine is simpler there.
 
 That job stages the install set with `cp`, so it takes `build.txt` from
 `git archive HEAD build.txt` instead - the one file in the zip that is deliberately *not*
@@ -105,6 +126,94 @@ file that differs from its source, a `build.txt` that was not substituted, and a
 of its places (the definition, `code-write`, `code-restore`) and
 `wpmcp_code_version_current` in all four (the definition, `code-write`, `code-delete`,
 `code-restore`) - the second being "every mutation versions first", which is what the
-version table exists for. The `release` job has `needs: [lint, phpunit-unit,
-integration]`, so a red suite makes publishing impossible rather than inadvisable.
-Nothing here is run by hand, and the tag is the only trigger.
+version table exists for. The `release` job has `needs: [decide, lint, phpunit-unit,
+integration, integration-floor]`, so a red suite makes publishing impossible rather than
+inadvisable. Nothing here is run by hand, and a tag is the only trigger.
+
+## What the gate is now
+
+**The gate used to be "we ran the suite twice on this commit". It is now "a green full run
+exists for this code and this suite".** The same strength, in words that are about the code
+rather than about the number of times somebody pressed a button. `release.yml` used to
+re-run the whole gate on every tag with the reasoning that `ci.yml` does not run on a tag
+push, so there was no run to depend on - which is true of the COMMIT and not of the CODE.
+
+**The code fingerprint.** `bin/code-fingerprint.sh` prints three numbers for a commit:
+
+| | What it hashes | What a change to it means |
+|---|---|---|
+| `code` | the git blob ids of exactly the PHP that goes into the zip - `wp-mcp.php`, `endpoint.php`, `tools.php`, `trace.php`, `admin.php`, `uninstall.php`, `src/*.php` | the shipped code moved; everything runs |
+| `env` | both workflows, the gate-group list, `.wp-env.json`, `composer.json`, `composer.lock`, `phpunit.xml.dist`, `.gitattributes`, `tests/`, `bin/` | the suite or the container moved; everything runs |
+| `key` | the two together | what a green run is filed under |
+
+Run it yourself before pushing if you want to know what CI will do:
+
+```bash
+bin/code-fingerprint.sh          # HEAD
+bin/code-fingerprint.sh <ref>    # any commit in which every listed path exists
+```
+
+It **refuses** a ref that is missing one of the paths in the table above, rather than hashing
+what is left: `git ls-tree` prints nothing and exits 0 for a path that is not there, so a
+renamed path would otherwise drop out of the hash in silence and the fingerprint would quietly
+stop covering it. The cost is that it does not answer for old history - in this repository it
+answers from `fc75a58` on, and refuses `fc39f72` and earlier, which predate
+`.github/sprint-gate-groups.txt`. If you need a number for an older commit, use the version of
+the script that shipped with that commit.
+
+**How a verdict is stored, and what makes it trustworthy.** A `ci.yml` run in which lint, the
+unit matrix, the current-core integration leg and the floor leg were ALL green uploads an
+artifact named `wpmcp-green-<key>`. That artifact is the verdict. It cannot be written by a run
+that skipped a tier, and it lives 90 days.
+
+**But an artifact NAME is not a proof**, and this repository is public: a pull request runs its
+own copy of `ci.yml`, and fork-PR artifacts are stored here. So `bin/reusable-green-run.sh` is
+what both workflows actually call, and it checks the RUN the artifact claims to come from:
+
+| Check | What it closes |
+|---|---|
+| `head_repository_id == repository_id` | anything that ran from a fork |
+| the run's `path` is `.github/workflows/ci.yml` | a seal from some other workflow |
+| its `conclusion` is `success` | a verdict from a run that was not green |
+| it was sealed within **14 days** | a verdict about a WordPress two minors old |
+| **its head commit's own fingerprint equals this key** | everything else |
+
+The last one is the one that does not trust a label: a forged artifact name would have to be
+accompanied by a commit **in this repository** whose shipped PHP and whose test suite are
+byte-identical to the one being released - at which point it is not a forgery, it is the same
+code. When a candidate is accepted the run id is printed in the log and in the run summary;
+when one is rejected, the reason is printed too. **A skip is never silent** - a gate nobody can
+see skipping is how a gate stops gating.
+
+*Why fourteen days.* The current-core leg runs against `"core": null`, so its verdict means
+"whatever WordPress was current that day", and GitHub runs the Monday schedule on the default
+branch only - a release branch's seal is never re-proved. A fortnight is shorter than the gap
+between WordPress minor releases, so a reused verdict is at most one generation behind and
+usually zero; it is far longer than the case reuse exists for (a documentation commit minutes
+after a green run); and it is far shorter than the 90 days the artifact lives, so the cap, not
+the expiry, is what decides. A tag cut months after the code was proved re-runs everything.
+
+**What still always runs, on every commit including a documentation-only one, and on every tag
+including a reused one:** the lint job and the unit tier on four PHP versions. `tests/unit/VersionConsistencyTest.php` ties this
+document's sibling `CHANGELOG.md` to `Version:` and `WPMCP_VER`, and
+`tests/unit/FloorConsistencyTest.php` ties the declared WordPress floor to the README and to
+the job that proves it. A markdown edit really can fail a test, and it costs a second.
+
+**That is why the release workflow runs them too, reuse or no reuse.** The fingerprint
+deliberately does not hash `README.md`, `CHANGELOG.md`, `SECURITY.md`, `ARCHITECTURE.md`,
+`BUILD-NOTES.md`, `LICENSE`, `docs/*.md` or `build.txt` - none of them is executed on a site -
+and every one of them ships in the zip. The unit tier is the only thing that tests them, so a
+reuse may stand in for the two WordPress tiers and may never stand in for lint or the unit
+tier. Before that was fixed, a commit that was sealed by its parent and RED on its own
+`VersionConsistencyTest` could be tagged and published.
+
+**What forces everything to run even when the code has not changed:** any change to the files
+in the `env` row above; the Monday 06:17 UTC schedule (because `.wp-env.json` pins
+`"core": null`, so the current-core leg's verdict goes stale without a commit being made); and
+`workflow_dispatch` with `force_full` set, for when you want the long answer on demand.
+
+**Proving the gate without publishing.** `release.yml` also triggers on a `citest-*` tag, and
+the publish step - only the publish step - requires a `v` tag. So a throwaway tag runs the
+fingerprint decision, the gate or its reuse, the zip build and the whole verification, and
+cannot create a release. That is how "it refuses to publish when the gate is red" is
+demonstrated rather than asserted. **Never use a `v*` tag for a test: that publishes.**

@@ -2,6 +2,254 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.1.1
+
+**Released 2026-09-24.** The platform-swap release: less code of ours doing what WordPress
+already does, a failure that says what failed, and the WordPress floor moved to where the
+ecosystem is. The private trace log is bounded for the first time, and CI that took an hour and
+three quarters now takes twenty-four minutes.
+
+### Fixed: a failure now says what failed
+
+- **`upload-media` reports the remote server's HTTP STATUS instead of "Internal error".**
+  Measured: a Wikimedia thumbnail URL answered a bare `Internal error` while the private log
+  held `class=WP_Error:http_404 message=Bad Request data={"code":400,...}` - the CDN had
+  refused WordPress's user agent. Core's `download_url()` turns EVERY non-2xx into
+  `WP_Error('http_404', ...)` whatever the status was, and that code is not relayable, so the
+  boundary correctly hid a failure that was not the site's fault and that no agent could act
+  on. The status and the reason phrase now come back - `The server at source_url answered HTTP
+  403 Forbidden instead of the file.` - and the response body NEVER does. Core attaches up to a
+  kilobyte of it; in the measured case it was a whole HTML error page.
+- **The trace id is in the error MESSAGE, not only in `error.data`.** A cold client rendered
+  `error.message` and nothing else, so the one identifier that could find the log line was
+  invisible. Every generic failure now reads `Internal error (trace 1f53b972)`, and the same id
+  stays in `data.trace_id` for anything already parsing it.
+- **A fetch that never CONNECTED is now generic**, where it used to relay the transport's own
+  sentence. `http_request_failed` came off the relayable list because cURL's message names the
+  host it could not reach, which on a proxied site is the operator's internal
+  `WP_PROXY_HOST`. The sentence is in the private log; the caller gets the trace id.
+- **`upload-media`'s description** says the remote server has to be willing to serve the file
+  to THIS site - a URL that opens in your browser may still be refused - and what the two
+  failures look like.
+- **The trace log records argument SHAPES, never argument values.** PHP's own
+  `getTraceAsString()` prints the first fifteen characters of every string argument (verified
+  on PHP 8.2.29 with `zend.exception_ignore_args=0`), which is the start of a URL, a title or
+  anything else a caller sent. A frame now reads
+  `{closure}(array{source_url,filename}, string(41), stdClass)`: an array's keys, a string's
+  length, an object's class.
+
+### Changed: the trace log stops growing for ever
+
+**You will notice this on a site that has been running a while: the file gets shorter.** That is
+the plugin trimming it, and it says so in the file.
+
+- **The private trace log is capped at 2 MiB**, and it discards its OLDEST entries to stay there.
+  Until now it only grew: measured on two development sites, 1,743,937 bytes over 763 entries and
+  1,504,358 over 660, written in eleven days, with nothing rotating, truncating or ageing any of it
+  out. On a customer host nothing ever comes along to clean it up.
+- **The NEWEST entries are the ones that survive**, and that is the whole design rather than a
+  detail. A failure hands the caller a trace id and tells it to quote that id to you, so a cap
+  that discarded the newest entries would throw away exactly the id somebody is about to ask about
+  - which is worse than no cap at all. A test pushes the log past the cap, breaks something over
+  HTTP, and looks the brand-new id up in the file.
+- **A trimmed file announces itself on its first line** -
+  `truncated=1 cap=2097152 removed=549120 kept=1572864`, with a sentence indented under it - and
+  the cut is made BETWEEN entries, never through one. So a shorter file does not read as a
+  corrupted one, no entry begins part-way through, and the marker carries no `trace=` field, so
+  grepping for an id can never return it.
+- **2 MiB is about 900 traced failures** at the measured mean entry of 2,283 bytes, and it is just
+  above both measured files - so installing 1.1.1 does not by itself throw away the log you have.
+  A busy host can raise the ceiling with
+  `add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES)`; a value below 64 KiB is
+  ignored, because a cap smaller than one entry would truncate the entry it had just written.
+- **Enforcing it costs one `fstat()` per traced failure**, on the descriptor the write already has
+  open, and traces are only written when something has already broken. The rewrite itself happens
+  once per quarter-cap of new log - roughly every 230 failures - not on every write.
+- **The trim will not discard an entry it has not read, and will not call a short write a finished
+  one.** Two ways it could otherwise have lost the newest entry - the one the trace id names. `flock`
+  succeeds and protects nothing on NFS and some shared hosting, so an entry appended while the trim
+  was running could have been thrown away with its id already quoted to a caller; the trim now
+  re-checks the file's size immediately before cutting and ABSORBS what arrived instead. And `fwrite`
+  returns a short count on a full disk, which used to read as success and leave the file ending
+  part-way through that same entry; it is now retried, and a rewrite that genuinely cannot finish
+  sends the whole entry to the PHP error log and raises the operator notice rather than pretending.
+- **A filtered cap below 64 KiB falls back to the 2 MiB default rather than being clamped**, which is
+  what the README already said and what the constant is now named for.
+
+### Changed: titles are stored the way wp-admin stores them
+
+- **`create-post` and `update-post` no longer strip tags from a title.** A title typed
+  `x<y z` used to be stored as `x` - text destroyed, silently, by us. Neither wp-admin nor the
+  REST API does that. Core's `title_save_pre` decides instead: only `trim` for a user with
+  `unfiltered_html`, and kses for one without, which ENCODES rather than strips.
+- **So the same title stores different bytes depending on the token's user**, and that is the
+  contract, not a defect: an administrator's `x<y z` is stored `x<y z`; an author's is stored
+  `x&lt;y z`, exactly as wp-admin would store it. `Tom's "quoted" A\B` is stored byte for byte
+  for both. `changed` can therefore report a title as changed when an administrator re-saves a
+  subscriber's post - wp-admin does the same.
+- **Reading a title and writing it back still stores the same bytes**, for both roles, because
+  a field equal to what is stored is not written at all.
+- The whole rule, with its measurements, is now written down in `ARCHITECTURE.md` under **The
+  tool layer is the browser and the form**.
+
+### Changed: less of our code, more of the platform's
+
+Five swaps and a deletion. None changes a capability; each retires something we maintained.
+
+- **`list-posts` can now return a plugin's CUSTOM post statuses.** The five core statuses were
+  written out in our code; the status registry and the `public` / `private` / `protected` flags
+  decide now - the same flags `WP_Query` itself consults. A workflow plugin's `archived` or
+  `expired` is listable, scoped by the same capabilities: public to everybody, protected to a
+  caller with `edit_others_posts` (and to the author for their own posts), private to one with
+  `read_private_posts`, and a status with none of the three to nobody, which is core's own
+  answer. On the ACF-heavy test site this adds exactly one status, ACF's own `acf-disabled`.
+- **A `date` naming a local time that does not exist is stored as typed.** Date parsing is now
+  core's `rest_get_date_with_gmt()` behind our grammar (which accepts `2026-03-04` and
+  `T09:30`, both of which core's refuses) and our guard (core's parser ends in `strtotime()`
+  and rolls 30 February forward). 95 old-against-new comparisons across five timezones differ
+  in exactly one case: `2026-03-08T02:30:00` on a site in America/New_York, the hour that
+  spring-forward skips, is now stored as 02:30 local with the correct GMT instant - which is
+  what the REST API stores - instead of being moved to 03:30.
+- **The theme-code tools now respect a hardening plugin.** The `DISALLOW_FILE_MODS` half of the
+  gate asks `wp_is_file_mod_allowed()`, which is what core asks for `edit_themes`, so a plugin
+  that switches file editing off through the `file_mod_allowed` filter switches the six code
+  tools out of `tools/list` as well. Before this they were advertised and then refused, one
+  call at a time. `DISALLOW_FILE_EDIT` stays a direct constant read, because core's has no
+  filter in front of it either.
+- **Settings are written through the Settings API.** Nothing changes for an operator beyond a
+  post-redirect-get and core's own "Settings saved." - but the sanitiser has moved to where
+  `update_option()` runs it on EVERY path, so a protected meta key typed into the allow-list is
+  dropped whether it arrives from the form, from `wp option update`, or from a restored backup
+  being re-saved.
+- **The JSON body is decoded once**, by core, instead of twice. Nothing observable; the batch
+  refusal still reads the raw first byte, because `[]` and `{}` decode to the same value.
+- **`get-media`'s `url` is `null` when the attachment has no file**, where it used to be the
+  JSON literal `false`. Found by declaring the field's type (see below).
+
+### Changed: an orphaned menu item moves to where WordPress shows it
+
+- **The menu tree is core's `Walker::walk()` now**, with a small collecting subclass fed our own
+  raw rows. Our traversal, our parent map and our orphan handling are gone.
+- **The one observable difference: an item whose stored parent is not an item of its menu** -
+  because the parent was deleted, or is in another menu - used to appear interleaved at the top
+  level by `menu_order`, and now appears AFTER every top-level tree, flat, which is where
+  `wp_nav_menu()` shows it. So `get-menu`'s `position` finally agrees with what a visitor sees.
+  Such an item's own children are shown flat beside it rather than nested under it, which is
+  also core's behaviour.
+- **The next write to that menu persists the new order**, because the renumbering is built from
+  the same walk. ZERO orphaned items were measured on both real test sites (81 items in 5 menus,
+  and 44 items), so nothing changes there - but if your menus have one, its `menu_order` will
+  move the first time anything is added, moved or removed.
+- **`get-menu` primes every linked post and term in two queries** (`update_menu_item_cache()`)
+  before reading them one at a time. On a 66-item menu that is 66 pairs of queries that no
+  longer happen. No value changes: it is the cache, not the read.
+
+### Added: an operator can see what a token is doing
+
+- **The settings screen names the connected CLIENT.** Every MCP client sends its name and
+  version in the first message of every connection, and those two strings are now stored on the
+  token row beside `last_used_at` and `use_count`, so a row reads "Claude Desktop 1.4, last seen
+  3 minutes ago, 412 calls". The server keeps no session state; this is the visibility a session
+  feature would have bought. Token-table schema revision 6.
+- **`do_action('wpmcp_tool_call', $tool, $ok, $context)` fires once per tool call**, including
+  for a refusal and for a crash, so a site can observe usage without this plugin inventing a log
+  format, a location, a rotation policy or a retention rule. `$context` carries the argument
+  KEYS - never values - the token row id, the user id, the scope and the duration in
+  milliseconds.
+
+### Added: `outputSchema` on four read tools (a pilot)
+
+- **`site-info`, `get-post`, `get-media` and `get-user` declare an `outputSchema` and send
+  `structuredContent`** beside the text block, which the specification requires to stay. Four
+  tools and not thirty-six, because a tool that has one sends its data twice and a client cannot
+  tell us whether it wants the second copy.
+- **Each of the four declares its fields once** - name, type, description, and the closure that
+  produces the value - and both the schema and the result are generated from that declaration,
+  so they cannot drift. `structuredContent` is decoded from the text block, so the two wire
+  copies cannot drift either.
+- **The field lists moved out of those four descriptions into their schemas**, a sentence per
+  field, which gives the 1,000 characters a client keeps back to the warnings that need them.
+
+### Changed: the declared WordPress floor is 6.9, and CI executes it
+
+- **`Requires at least` is now `6.9`.** The floor is a CHOICE now rather than a derivation. 5.5,
+  then 6.4, were each the oldest version the code would run on - 6.4 because
+  `_wp_put_post_revision`'s `$post_id` argument is `@since 6.4.0` and `restore-revision` filters
+  on it. That is still the oldest WordPress the code would run on, and it is no longer the floor.
+- **6.9 is where the Abilities API begins**, and that is where the ecosystem has gone: core
+  registers three abilities, Rank Math 24, Gravity Forms 32 behind a flag, and ACF Pro 6.8.10
+  ships its own for field groups, post types, taxonomies and per-post-type CRUD. Supporting
+  below it bought a version question on every future feature, and a 91-minute CI job, to serve
+  sites unlikely to run an agent at all. W3Techs, 23 September 2026: 62.6% of WordPress sites run
+  7.x and 30.4% the whole of 6.x, so the floor keeps the overwhelming majority and drops versions
+  that are updating themselves out of existence.
+- **`Requires at least` is a GATE, not a hint**, which is why the header moves rather than the
+  README explaining itself: core's `validate_plugin_requirements()` refuses to ACTIVATE a plugin
+  below the version it declares. A header of 6.9 with prose promising "6.4 works" would be false
+  for exactly the sites it was addressed to.
+- **CI runs the whole integration suite on WordPress 6.9 with PHP 8.4**, beside the leg on
+  current WordPress, and a red floor blocks a release. The PHP was re-derived rather than carried
+  over: 6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so the leg runs the newest PHP
+  that was in active support when that WordPress was released - the same rule that put the old
+  6.4 leg on 8.2 rather than 8.3. The job asserts the container really came up on that WordPress
+  and that PHP, because a `WP_ENV_CORE` wp-env quietly ignored would leave the leg testing
+  current core twice.
+- **The README opens with a requirements table and the version each feature needs.** One row
+  today, because everything documented works at the floor.
+
+### Fixed: a test that had to win a race with cron
+
+- **`TokenLifecycleTest` no longer loses its own fixture to the plugin's hourly sweep.** On
+  run 35669745657 a dead token's row was deleted between the request that was supposed to be
+  refused and the assertion that read the row back. A dead row is precisely what the sweep
+  deletes, so no fixture shape avoids the race: the five test classes that need a dead row to
+  survive now take the sweep off the schedule for their duration and put it back afterwards,
+  and the dead-token test FIRES the sweep at the worst possible moment on every run, so the
+  hold-off is proved rather than hoped for. No plugin code changed.
+
+### Changed: how this repository tests itself
+
+None of this is visible on a site. It is recorded because it changes what a green tick means.
+
+- **One integration run, not two.** CI ran the suite and then re-ran PHPUnit once per closed
+  sprint group, to prove no gate had silently skipped - 1 h 35 m 23 s followed by 1 h 38 m 28 s
+  of re-executing the same tests in the same container (run 35514259397). The same three
+  numbers per group are now read out of the one run's JUnit log. PHPUnit 10.5 refuses to
+  combine `--group` with `--list-tests`, so the group map comes from `--list-tests-xml`,
+  which is the only form that carries `groups=`.
+- **The gate-group list is one file**, `.github/sprint-gate-groups.txt`, read by both
+  workflows. It used to be written out twice and kept in step by a comment.
+- **A commit that ships byte-identical PHP is not re-tested.** `bin/code-fingerprint.sh`
+  hashes the git blob ids of exactly the files that go into the zip, and beside it the files
+  that decide what the tests are and where they run. A green run files its verdict under that
+  fingerprint; a later commit with the same fingerprint skips the WordPress tiers and PRINTS
+  which run it is reusing. The lint job and the unit tier always run, documentation included,
+  because `VersionConsistencyTest` ties this changelog's top heading to the version in the
+  code. A weekly scheduled run re-proves everything, because a matching fingerprint says the
+  code is identical and says nothing about WordPress or the container.
+- **The integration tier runs on eight machines, not one.** Eight containers, each running a
+  disjoint set of test classes balanced by measured cost, each writing its own JUnit log, and a
+  merge job assembling them into the one log the gate reads. About seventy minutes becomes about
+  fifteen; total test time goes UP by roughly 30%, because each shard builds its own fixtures and
+  none shares a warm database. Free on a public repository and not worth it on a private one. The
+  merge refuses a missing, truncated, empty or duplicated shard rather than reporting a smaller
+  suite as a complete one, and it found a real defect on its first run: one test depended on how
+  much other work had populated the database before it.
+- **The WordPress-6.9 floor leg is sharded too, six ways.** It was the one unsharded leg and
+  therefore the one that decided the whole run's wall clock - 5734 s of suite time inside a
+  1 h 44 m job. Two numbers from run 35886384855 settled why: WP 6.9 on PHP 8.4 costs only +4.7%
+  over the old 6.4 baseline (5734 s against 5478 s), so the VERSION is not the cost; and the eight
+  current-core shards spent 7220 s of machine time doing what this leg did in 5751 s on one
+  machine. It was slow only because nobody had sharded it. Measured after: the leg now takes
+  **1313 s** end to end for 6880 s of machine time - 4.8 times off the wall clock for 10% more
+  work, and the whole CI run finishes in 22 minutes. Same planner, same merge, same `needs:` without `always()` so a shard that
+  DIES reds the run instead of vanishing - six rather than eight only because both tiers now shard
+  at once and GitHub runs twenty jobs concurrently. The earlier plan (move the floor to
+  releases-only) was dropped: it rested on believing 6.x was inherently slow, and it is not.
+- **A release reuses that verdict instead of re-running the gate.** Publishing still requires
+  a green full run for the code being published; what changed is that the run may be the one
+  CI already did. A one-word changelog commit used to get a 90-minute release gate.
+
 ## 1.1.0
 
 **Released 2026-09-21.** The auth surface, rebuilt around what hosted MCP clients actually do.

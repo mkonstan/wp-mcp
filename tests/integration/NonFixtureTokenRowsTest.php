@@ -89,6 +89,13 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        // THE HOURLY SWEEP IS HELD OFF for this class, because it makes a token DEAD and
+        // then needs the row to still be there. `wpmcp_flush_expired_cb()` deletes exactly
+        // the rows `wpmcp_token_state()` calls dead, so the two sets are the same set and no
+        // fixture shape avoids the race - see Fixtures::suspendTokenSweep(), and run
+        // 35669745657, where this race cost a three-hour run. destroy() puts it back.
+        Fixtures::suspendTokenSweep();
+
         // Owned by user 1, not by a fixture user: the test runs purge(), which deletes
         // this run's users, and a sentinel must outlive everything the run does.
         Fixtures::mintToken('read', self::sentinelLabel(), 1);
@@ -133,6 +140,15 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // FIRST, before anything that can throw. The sweep is the one thing this class took
+        // AWAY from the site rather than added to it, so the cost of not restoring it is
+        // paid by the site and not by the run: WordPress schedules this hook only on
+        // activation, so a teardown that dies at line two leaves a real site keeping dead
+        // token rows for ever. Everything below it is `tryRun`/`tryEvaluate` today, which is
+        // an argument for the current code and not for the next edit of it. Idempotent
+        // (analysis/58 §6).
+        Fixtures::resumeTokenSweep();
+
         if (self::$operatorId > 0) {
             Fixtures::revokeTokenIds([self::$operatorId]);
             self::$operatorId = 0;
@@ -151,6 +167,7 @@ final class NonFixtureTokenRowsTest extends FixtureIntegrationTestCase
         Fixtures::deleteTokensLabelled(self::scratchLabel() . '-dev');
         Fixtures::deleteTokensLabelled(self::decoyLabel());
         Fixtures::deleteTokensLabelled(self::lookalikeSeedLabel());
+
         Fixtures::purge();
     }
 

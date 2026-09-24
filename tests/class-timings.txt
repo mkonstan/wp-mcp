@@ -1,0 +1,105 @@
+# PER-CLASS WEIGHTS, in seconds, used ONLY to balance the integration shards.
+#
+# Nothing here decides what runs. The authority on which classes exist is
+# `phpunit --list-tests-xml`, read at plan time by bin/ci-shards.php; this file only decides
+# WHICH SHARD each class lands on. A class missing from this file still runs - it is given the
+# mean weight and named in the plan, so drift is visible rather than silent.
+#
+# THESE NUMBERS ARE A MODEL THAT HAS BEEN CORRECTED ONCE AGAINST REALITY, which is worth more
+# than either half on its own.
+#
+# The first version was pure model: each class's JUnit time plus a flat 69 s for every
+# integration class. It had to be a model, because the obvious measurement is wrong - PHPUnit
+# attributes only the time spent INSIDE test methods, and on run 35773988569 the per-class times
+# summed to 1114 s inside a step that took 4162 s, so 73% of this tier's cost is fixture building
+# that the log attributes to nothing.
+#
+# Then run 35791008021 ran six shards and measured them. The model was out by a lot, and not
+# evenly: the ratio of measured to modelled ran from 0.92 on shard 3 to 1.56 on shard 5, and the
+# measured spread between the fastest and the slowest shard was 82%. So every class's weight was
+# multiplied by its own shard's ratio - a feedback step, which attributes a shard's whole error
+# evenly across the classes that caused it. That is not a per-class measurement and does not
+# pretend to be: with six shards there are six numbers and sixty-eight unknowns. It is one
+# iteration of a loop that converges, and the next run's spread says whether to iterate again.
+#
+# ONE THING THE CORRECTION ALSO REVEALED, and it belongs beside the numbers: the six shards spent
+# 5392 s of suite time between them against 4162 s on one machine - about 30% MORE total work,
+# because each shard builds its own fixtures for its own classes and none of them shares a warm
+# database with the others. Sharding buys waiting time and pays in billed minutes twice over: once
+# for the extra containers, once for the extra work.
+#
+# TO ITERATE: take each shard's "This shard's slice of both suites" step duration from a green
+# sharded run, divide by the modelled weight bin/ci-shards.php printed for that shard, and
+# multiply that shard's classes by the ratio. Refreshing changes this file, which is inside the
+# fingerprint's environment half, so it forces a full run - correctly, since it changes what each
+# shard does.
+#
+# Corrected from run 35791008021 (commit 5dcf09a, six shards, suite steps 621-1129 s).
+WpMcp\Tests\Integration\MenuToolsTest	321
+WpMcp\Tests\Integration\PostMetaToolsTest	263
+WpMcp\Tests\Integration\UpdatePostTruthTest	220
+WpMcp\Tests\Integration\NonFixtureTokenRowsTest	198
+WpMcp\Tests\Integration\RevisionToolsTest	175
+WpMcp\Tests\Integration\DevTokensKilledRunTest	169
+WpMcp\Tests\Integration\UpdatePostContractTest	150
+WpMcp\Tests\Integration\PostFieldWritesTest	144
+WpMcp\Tests\Integration\DevTokensScriptTest	140
+WpMcp\Tests\Integration\RoundTripTest	138
+WpMcp\Tests\Integration\BoundIpDropMigrationTest	138
+WpMcp\Tests\Integration\SqlSelectTest	138
+WpMcp\Tests\Integration\CodeVersionToolsTest	136
+WpMcp\Tests\Integration\InventoryToolsTest	130
+WpMcp\Tests\Integration\CodeHistoryRestoreTest	128
+WpMcp\Tests\Integration\BuildIdentityTest	120
+WpMcp\Tests\Integration\FileVersionStoreTest	120
+WpMcp\Tests\Integration\TransportGatesTest	117
+WpMcp\Tests\Integration\ErrorBoundaryTest	115
+WpMcp\Tests\Integration\OpcacheInvalidationTest	114
+WpMcp\Tests\Integration\ToolContractTest	114
+WpMcp\Tests\Integration\StaleBackupSweepMigrationTest	110
+WpMcp\Tests\Integration\CapabilityScopedReadsTest	109
+WpMcp\Tests\Integration\RestNamespaceTest	108
+WpMcp\Tests\Integration\PostFilterReadsTest	107
+WpMcp\Tests\Integration\AdminTokenTableTest	106
+WpMcp\Tests\Integration\TokenLifecycleTest	104
+WpMcp\Tests\Integration\HeaderOnlyCredentialTest	103
+WpMcp\Tests\Integration\JsonRpcFramingTest	102
+WpMcp\Tests\Integration\OneUnauthorizedTest	101
+WpMcp\Tests\Integration\ListEnvelopeTest	98
+WpMcp\Tests\Integration\WriteToolCapabilityTest	95
+WpMcp\Tests\Integration\TokenLifetimeMigrationTest	92
+WpMcp\Tests\Integration\ConnectorAddressPoolTest	91
+WpMcp\Tests\Integration\AuthEventsTest	88
+WpMcp\Tests\Integration\HandshakeTest	86
+WpMcp\Tests\Integration\ToolRegistryTest	86
+WpMcp\Tests\Integration\LocalWindowSiteTest	85
+WpMcp\Tests\Integration\DeletedTokenUserTest	81
+WpMcp\Tests\Integration\InfraTrustTest	79
+WpMcp\Tests\Integration\TokenUserIdMigrationTest	74
+WpMcp\Tests\Integration\CommentPipelineTest	70
+WpMcp\Tests\Integration\SlashedWritesTest	67
+WpMcp\Tests\Integration\ThemeNameAgreementTest	64
+WpMcp\Tests\Unit\AuthEventTest	0
+WpMcp\Tests\Unit\BuildStampTest	0
+WpMcp\Tests\Unit\CiGroupCountsTest	0
+WpMcp\Tests\Unit\CodeFingerprintTest	0
+WpMcp\Tests\Unit\CodePathCanonicalTest	0
+WpMcp\Tests\Unit\DebrisVerdictTest	0
+WpMcp\Tests\Unit\DescriptionContractTest	0
+WpMcp\Tests\Unit\FloorConsistencyTest	0
+WpMcp\Tests\Unit\HeaderCredentialTest	0
+WpMcp\Tests\Unit\LocalWindowTest	0
+WpMcp\Tests\Unit\MintIdentityTest	0
+WpMcp\Tests\Unit\NoAddressBindingTest	0
+WpMcp\Tests\Unit\NoDisclosureTest	0
+WpMcp\Tests\Unit\OpcacheForceArgumentTest	0
+WpMcp\Tests\Unit\ProtocolVersionTest	0
+WpMcp\Tests\Unit\SchemaValidatorTest	0
+WpMcp\Tests\Unit\SqlSelectRunTest	0
+WpMcp\Tests\Unit\SurfaceSweepTest	0
+WpMcp\Tests\Unit\TokenLifetimeTest	0
+WpMcp\Tests\Unit\TokenRenewTest	0
+WpMcp\Tests\Unit\ToolContractTest	0
+WpMcp\Tests\Unit\UninstallTest	0
+WpMcp\Tests\Unit\VersionConsistencyTest	0
+WpMcp\Tests\Unit\WireSerializationTest	0

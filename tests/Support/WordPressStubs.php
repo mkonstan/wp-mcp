@@ -10,6 +10,10 @@
  *   constants  ABSPATH, HOUR_IN_SECONDS, DAY_IN_SECONDS
  *   functions  register_activation_hook, register_deactivation_hook,
  *              add_action, plugin_dir_path
+ *   classes    Walker - added in 1.1.1, the first load-time CLASS dependency: tools.php
+ *              declares `class WpMcp_Menu_Collector extends Walker` at file scope for the
+ *              menu-tree swap, and PHP resolves a parent class eagerly where it resolves a
+ *              parameter type hint lazily. Empty; see wp-stubs.php for why.
  *
  * With those seven, `require wp-mcp.php` succeeds from an unrelated working directory
  * and every plugin function is declared (wpmcp_mint, wpmcp_validate, wpmcp_tools,

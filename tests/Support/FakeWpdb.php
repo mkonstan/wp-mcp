@@ -115,6 +115,35 @@ final class FakeWpdb
         return $this->vars[$query] ?? $this->defaultVar;
     }
 
+    /**
+     * Columns get_col() answers with, by SUBSTRING of the query, first match wins.
+     *
+     * A SUBSTRING AND NOT THE WHOLE QUERY, unlike $vars, because the only caller is
+     * `SHOW COLUMNS FROM <table> LIKE '<column>'` and what a test wants to say is "this column
+     * is there and that one is not" - the table name and the prefix are noise it would otherwise
+     * have to reproduce exactly. Anything unmatched answers $defaultCol, which is how the
+     * revision-6 test says "every required column is present, the two new ones are not".
+     *
+     * @var array<string, list<string>>
+     */
+    public array $cols = [];
+
+    /** What get_col() answers for a query no key of $cols appears in. */
+    public array $defaultCol = [];
+
+    public function get_col($query = null, $x = 0)
+    {
+        $this->queries[] = $query;
+
+        foreach ($this->cols as $needle => $answer) {
+            if (str_contains((string) $query, $needle)) {
+                return $answer;
+            }
+        }
+
+        return $this->defaultCol;
+    }
+
     public function suppress_errors($suppress = true)
     {
         $previous             = $this->suppressErrors;

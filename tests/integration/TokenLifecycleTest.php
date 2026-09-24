@@ -63,6 +63,16 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
     {
         Fixtures::purge();
 
+        // THE SWEEP IS HELD OFF FOR THE WHOLE CLASS, and this is the fix for the flake on
+        // run 35669745657: the plugin's own hourly cron deleted a dead fixture row between
+        // the HTTP call that was supposed to be refused and the assertion that read the row
+        // back ("The dead fixture row is gone before the cron ran"). Two tests here need a
+        // row to be dead AND still present, and a dead row is precisely what the sweep
+        // deletes - so there is no fixture shape that avoids the race and the test has to
+        // own the timing. See Fixtures::suspendTokenSweep() for why unscheduling is the
+        // whole of it. destroy() puts the schedule back.
+        Fixtures::suspendTokenSweep();
+
         TestRecorder::install();
 
         self::$userId = Fixtures::createUser(self::login(), 'administrator');
@@ -91,6 +101,15 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
 
     private static function destroy(): void
     {
+        // FIRST, before anything that can throw. The sweep is the one thing this class took
+        // AWAY from the site rather than added to it, so the cost of not restoring it is
+        // paid by the site and not by the run: WordPress schedules this hook only on
+        // activation, so a teardown that dies at line two leaves a real site keeping dead
+        // token rows for ever. Everything below it is `tryRun`/`tryEvaluate` today, which is
+        // an argument for the current code and not for the next edit of it. Idempotent
+        // (analysis/58 §6).
+        Fixtures::resumeTokenSweep();
+
         TestRecorder::uninstall();
         Fixtures::deleteUser(self::$userId);
 
@@ -206,6 +225,15 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
     /**
      * A dead token: the same 401, `expired` in the log, and Renew refuses it.
      *
+     * THE RACE IS RUN DELIBERATELY IN THE MIDDLE OF THIS TEST, and that is the fix for the
+     * flake on run 35669745657. The failure there was not a wrong answer - it was the
+     * plugin's own hourly sweep deleting the fixture row between the refusal and the
+     * assertion, because a cron loopback happened to come due during the HTTP call. Hoping
+     * it does not is not a test: build() holds the sweep off for the class, and the call
+     * below FIRES the sweep at exactly the moment cron would have, on every run. With the
+     * hold-off in place it finds nothing scheduled and deletes nothing; without it, the same
+     * call deletes the row and this test goes red every time instead of one run in four.
+     *
      * @group sprint-7
      */
     public function testADeadTokenIsRefusedAsExpiredAndCannotBeRenewed(): void
@@ -227,9 +255,18 @@ final class TokenLifecycleTest extends FixtureIntegrationTestCase
         self::assertCount(1, $events);
         self::assertSame('expired', $events[0]['reason'] ?? null);
 
+        // The worst moment for the sweep to run is right here, so here is where it is run.
+        $sweep = Fixtures::runTokenSweepIfScheduled();
+
         $id = Fixtures::tokenIdLabelled(self::deadLabel());
 
-        self::assertGreaterThan(0, $id, 'The dead fixture row is gone before the cron ran.');
+        self::assertGreaterThan(
+            0,
+            $id,
+            'The dead fixture row was swept while this test was using it. The hold-off in'
+            . ' build() is what is supposed to prevent that, and forcing the sweep here is'
+            . ' what proves it: wp-cli answered "' . $sweep . '".'
+        );
 
         self::assertSame(
             'ERROR: dead',

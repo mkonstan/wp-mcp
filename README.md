@@ -12,14 +12,45 @@ PHP files, a token table, and one REST route that stays dormant until a live tok
 | | |
 |---|---|
 | PHP | 8.1 or newer |
-| WordPress | 5.5 or newer |
+| WordPress | 6.9 or newer |
 | HTTPS | required; the endpoint refuses plaintext with 403 before it reads the token |
 
-The WordPress floor is `wp_new_comment()`, the function `reply-comment` hands its comment
-to. Core's history for it reads `@since 5.5.0 Introduced the comment_type argument`: from
-5.5 that key in the data you pass is an input the function reads, defaulting to `comment`
-when it is empty. `reply-comment` passes it, so on anything older it is passing an argument
-the function did not take. Everything else the plugin calls is older than 5.5.
+**What works at which WordPress version.** One row, because there is nothing to put in a
+second: the whole documented tool set works at 6.9, and every version above it. If a later
+release gates a feature on a newer WordPress, that feature gets its own row here and says so
+in its own tool description - WordPress has ONE `Requires at least` field for the whole
+plugin, not one per feature, so a per-feature condition has to be documented rather than
+implied.
+
+| WordPress | What you get |
+|---|---|
+| 6.9 and newer | Everything this README documents |
+
+**Where 6.9 comes from, and it is a choice rather than a derivation.** Earlier releases of
+this plugin derived the floor from the oldest core function they called - 5.5, then 6.4, the
+latter because `_wp_put_post_revision`'s `$post_id` argument is `@since 6.4.0` and
+`restore-revision` filters on it. That is still the oldest WordPress the code would RUN on,
+and it is no longer the floor. 6.9 is where the Abilities API begins
+(`wp_register_ability()`, `@since 6.9.0`), which is the surface the WordPress ecosystem has
+converged on: core registers three abilities, Rank Math 24, Gravity Forms 32 behind a flag,
+and ACF Pro 6.8.10 ships its own for field groups, post types, taxonomies and per-post-type
+CRUD. Supporting below it costs a version question on every future feature, and a 91-minute
+CI job, to serve sites that are unlikely to run an agent at all. W3Techs, 23 September 2026:
+62.6% of WordPress sites run 7.x and 30.4% the whole of 6.x, so a 6.9 floor keeps the
+overwhelming majority and drops versions that are updating themselves out of existence.
+
+**And 6.9 is executed, not asserted.** `Requires at least` is a gate, not a hint: core's
+`validate_plugin_requirements()` refuses to ACTIVATE a plugin below the version it declares,
+so a number nobody runs is a promise nobody has checked. CI runs the integration suite twice
+on every change to the plugin's code - once against the current WordPress release and once
+against **WordPress 6.9 on PHP 8.4**, which is the pairing this floor is actually tested at.
+6.9 shipped on 2 December 2025, twelve days after PHP 8.5, so 8.4 is the newest PHP that was
+in active support when that WordPress was released - the same rule that made the old 6.4 leg
+run on 8.2 rather than on the PHP of its own release month. 6.9 itself requires PHP 7.2.24
+(`$required_php_version` in its `wp-includes/version.php`), so 8.4 is well inside what it
+supports, and the `Requires PHP: 8.1` floor is proven separately by the unit tier, which runs
+on 8.1, 8.2, 8.3 and 8.4. Declaring a combination nobody can execute is exactly the mistake
+the "WordPress 5.5 with PHP 8.1" claim of 1.0 made.
 
 HTTPS is not optional, and behind a proxy it needs one line of configuration. Read
 [HTTPS enforcement depends on your proxy](#https-enforcement-depends-on-your-proxy)
@@ -138,8 +169,14 @@ twice-daily chore. Renew moves the window without touching the credential.
 The token is shown once. Only its SHA-256 hash is stored, so the page cannot show it
 again. The table below it lists what is live, the user each token runs as, each token's
 state (active / dormant / dead, or **owner missing** when the WordPress user it runs as
-has been deleted), when its window and its lifetime end, and its last use, with **Renew**
-and **Revoke** buttons per row. Renew is offered only where it can work: not on a dead row,
+has been deleted), when its window and its lifetime end, **which client is on the other end**,
+and its last use, with **Renew** and **Revoke** buttons per row.
+
+The **Client** column is the name and version the client sends in the first message of every
+connection, so a row reads `Claude Desktop 1.4` and the last-use cell reads
+`2026-09-23 08:41:07 (3 minutes ago)`. A dash means nothing has ever negotiated with that token.
+It is evidence about what connected and never an identity check: a client is free to call itself
+anything, and the strings are stored as text and escaped on the way out. Renew is offered only where it can work: not on a dead row,
 and not on one whose owner is gone.
 
 When a client starts getting `401`, the table is where you find out which timer ran out:
@@ -278,6 +315,18 @@ as an error naming the field, and the tool never executes.
 Every description says what the tool returns - field names and their formats - so a
 client does not have to call a tool to learn its shape.
 
+**Four tools say it in an `outputSchema` instead** (1.1.1, a pilot): `site-info`, `get-post`,
+`get-media` and `get-user` declare the shape of their result as JSON Schema, a sentence per
+field, and send `structuredContent` beside the usual text block - which stays, because the
+specification says it must. A client that reads only the text block sees no difference.
+
+Two reasons, and neither is "clients need it". First, each of the four declares its fields ONCE
+in this plugin's own source, and both the schema and the result are generated from that
+declaration, so they cannot drift - which is a class of bug this project has had more than once.
+Second, it gives back the 1,000 description characters a client keeps: the field list is in the
+schema now, and the description carries the warnings. Whether the other thirty-four tools follow
+depends on what a real client actually does with the structured half.
+
 ### Lists: one envelope, one date format, and an end
 
 Six tools page: `list-posts`, `list-revisions`, `list-terms`, `list-media`, `list-comments`
@@ -334,7 +383,7 @@ that WordPress gives a post left with no category its default category.
 | Argument | Takes | Default |
 |---|---|---|
 | `post_type` | one post type this tool serves | `post` |
-| `status` | one post status | every status the caller may see |
+| `status` | one post status, a plugin's own included | every status the caller may see |
 | `search` | text matched against title, excerpt and content; a leading `-` on a word **excludes** it | - |
 | `category`, `tag` | a slug or a term id | - |
 | `term` | `"taxonomy:slug"`, for any other taxonomy | - |
@@ -358,6 +407,15 @@ the front of a home query regardless of what was asked for, which would mean a d
 a status filter quietly returning posts outside it. And **ties are broken by ID**, in the same
 direction as the sort, so paging over rows that share a date or a title cannot show one row
 twice and another never.
+
+**A plugin's CUSTOM post statuses are listable, scoped by the same capabilities** (1.1.1).
+WordPress's status registry decides, not a list in this plugin: a status registered `public` is
+listable by anybody, because the site already shows it on the front end; one registered
+`protected` - which is where core's `draft`, `pending` and `future` live - needs
+`edit_others_posts` for somebody else's post and is always visible on your own; one registered
+`private` needs `read_private_posts`; and a status registered with none of the three is listable
+by nobody, which is WordPress's own answer for it. `trash` and `auto-draft` are internal and
+stay out.
 
 **A filter that names something the caller may not see returns an empty list, not an
 error.** An unknown category, a tag holding only somebody else's draft, an author who has
@@ -387,9 +445,23 @@ the same form, read after the last write, so publishing a draft answers its new 
 
 The title, like `content` and `excerpt`, is the stored column, not WordPress's display
 rendering, so quotes, apostrophes, ampersands and backslashes read back as stored, and a
-title written back as read is left as it is (see *Reading it back*). A title you CHANGE is
-still shaped on the way in: `update-post` strips HTML tags from it, and for a caller
-without `unfiltered_html` WordPress's kses filter encodes some characters.
+title written back as read is left as it is (see *Reading it back*).
+
+**A title you CHANGE is shaped by WordPress and by nothing of ours** (1.1.1). This plugin used
+to run `wp_strip_all_tags()` on it, so a title typed `x<y z` was stored as `x`; that is gone,
+and core's own `title_save_pre` decides, exactly as it does when a person saves the post in
+wp-admin. Which means the stored bytes depend on the capability of the user your token runs as:
+
+| you send | with `unfiltered_html` | without it |
+|---|---|---|
+| `x<y z` | `x<y z` | `x&lt;y z` |
+| `Tom's "quoted" A\B` | `Tom's "quoted" A\B` | `Tom's "quoted" A\B` |
+| `Arts & Crafts` | `Arts & Crafts` | `Arts &amp; Crafts` |
+
+Administrators and editors on a single site hold `unfiltered_html`; authors and contributors do
+not, and `DISALLOW_UNFILTERED_HTML` takes it from everybody. Nothing is destroyed on either
+path - markup is ENCODED, never stripped - and reading a title back and writing it unchanged
+still stores the same bytes, because an unchanged field is not written at all.
 
 Three details in that list are decisions rather than data:
 
@@ -569,7 +641,14 @@ classic menu you change may not be what visitors see.
   `block_theme`.
 - `get-menu {id}` returns one menu's items as a tree: id, title, type, object, object_id,
   url, target, classes, parent, position among its siblings, menu_order in the whole menu,
-  status, and children. `title` is the item's own label as typed - a label wp-admin stored
+  status, and children. **The order is WordPress's own** (1.1.1): the tree is built by core's
+  `Walker`, the same engine `wp_nav_menu()` renders through, so `position` cannot disagree with
+  what a visitor sees. One consequence is worth knowing if your menus are untidy: an item whose
+  stored parent is not an item of that menu - the parent was deleted, or is in another menu -
+  is shown AFTER every top-level tree rather than interleaved by `menu_order`, which is where a
+  classic theme shows it, and its own children are shown flat beside it rather than nested under
+  it. The next write to that menu renumbers `menu_order` to match. Before 1.1.1 such an item was
+  listed at the top level in `menu_order` position, which disagreed with the site. `title` is the item's own label as typed - a label wp-admin stored
   as `FDA &#038; GMP` reads `FDA & GMP` - or, when it has none, the linked page's stored
   title or the linked term's name, decoded like every term name.
 - `add-menu-item {menu_id, type, object_id?, url?, title?, parent_id?, position?, target?,
@@ -587,7 +666,7 @@ classic menu you change may not be what visitors see.
 - `remove-menu-item {id}` deletes one - menu items have no trash. Its children move up one
   level into its place, as they do in wp-admin.
 
-**Every write renumbers the menu** so its order runs 1, 2, 3 from top to bottom.
+**Every write renumbers the menu** so its order runs 1, 2, 3 from top to bottom, depth first.
 WordPress's own function stores the position it is given and moves nothing else, so two
 items would end up claiming one place; wp-admin renumbers in the browser before it saves,
 and these tools do it on the server.
@@ -732,8 +811,36 @@ For a development site with no certificate, and nowhere else,
 ## The trace log
 
 An unexpected failure returns one generic JSON-RPC error, `-32603` with an eight-character
-trace id, and nothing else. The class, message, file, line and stack go to a private log,
-so the trace id is something you can look up and a client cannot read.
+trace id - `Internal error (trace 1f53b972)`, with the same id in `error.data.trace_id` - and
+nothing else. The class, message, file, line and stack go to a private log, so the trace id is
+something you can quote to the operator and a client cannot read. The id is in the message
+because a client that renders only `error.message` would otherwise show you a dead end.
+
+The stack in that log carries each argument's SHAPE and never its value: an array's keys, a
+string's length, an object's class. PHP's own formatter prints the first fifteen characters of
+every string argument, which is enough to be somebody's data.
+
+**The log is capped at 2 MiB, and it trims its OLDEST entries.** Before 1.1.1 it grew for ever;
+two development sites reached 1.7 MB and 1.5 MB in eleven days and nothing rotated or aged any
+of it out. When a write takes the file over the cap, the plugin keeps the newest three quarters
+of it and discards the rest, cutting between entries rather than through one, and writes a line
+at the top of the file saying so - so a file that is suddenly shorter is not a mystery:
+
+```
+2026-09-24T01:17:39+00:00 truncated=1 cap=2097152 removed=549120 kept=1572864
+    wp-mcp trimmed this log, and this is not a corrupted file. The OLDEST entries were
+    discarded so the file stays under its cap; ...
+```
+
+The newest entries are the ones that survive, deliberately: a trace id is quoted to you shortly
+after it is issued, so a cap that discarded the newest would throw away exactly the id somebody
+is asking about. A host that wants a different ceiling can raise it -
+`add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES);` - and a value below 64 KiB is
+ignored rather than obeyed, leaving the 2 MiB default in place.
+
+If the trim cannot finish - a full disk is the case that does it - the plugin does not pretend it
+did: the whole entry goes to the PHP error log and the same admin notice as an unwritable directory
+appears, so the trace id you were given still resolves to something.
 
 The log lives at `wp-content/wpmcp/trace-<32 hex>.log`. The random name is generated once
 per site and kept in an option, so the URL cannot be derived from anything a client sees.
@@ -977,8 +1084,8 @@ whole statement go to the private trace log and nowhere else.
 
 ## Hooks
 
-Six. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
-tools' version store in 1.1.
+Seven. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
+tools' version store in 1.1, and `wpmcp_tool_call` with 1.1.1.
 
 `wpmcp_tools` (filter) adds your own tools to the catalog. It runs on every request, after
 the built-ins are assembled and before scope filtering. An entry must declare a boolean
@@ -1072,6 +1179,30 @@ add_action('wpmcp_auth_event', function ($type, $context) {
 
 `wpmcp_auth_event_redacted_keys` (filter) adds key names to redact from that context
 array. Tokens, hashes and authorization headers are redacted already, at every depth.
+
+`wpmcp_tool_call` (action) reports what a token is DOING, once per `tools/call` - a refusal
+and a crash included, because an operator asking this question is usually asking because
+something is not working. It receives the tool name, a boolean `ok` (false for any refusal,
+tool error or crash) and a context array:
+
+| Key | |
+|---|---|
+| `arg_keys` | the argument NAMES the call carried. Never the values: a listener is an ordinary plugin callback, and the values are somebody's content |
+| `token_id` | the token row id, 0 when there is no session |
+| `user_id` | the WordPress user the call ran as |
+| `scope` | `read` or `admin` |
+| `duration_ms` | wall-clock milliseconds, one decimal place |
+
+There is no built-in log for this, deliberately: a log would mean this plugin choosing a
+location, a rotation policy, a retention period and a disclosure rule for every site. Write the
+four lines that suit yours, or write nothing and pay one empty hook call.
+
+```php
+add_action('wpmcp_tool_call', function ($tool, $ok, $context) {
+    error_log(sprintf('wpmcp %s %s user=%d %.1fms', $tool, $ok ? 'ok' : 'FAILED',
+        $context['user_id'], $context['duration_ms']));
+}, 10, 3);
+```
 
 `wpmcp_file_versions_keep` (filter) sets how many versions of one theme file the code
 tools keep. The default is 20, pruned oldest-first on insert. A value that is not a

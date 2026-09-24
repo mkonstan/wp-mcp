@@ -120,8 +120,8 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * tools/call on the throwing tool: -32603, "Internal error", an eight-hex trace id,
-     * and nothing else at all.
+     * tools/call on the throwing tool: -32603, "Internal error (trace <id>)", the same id in
+     * `data.trace_id`, and nothing else at all.
      *
      * @group sprint-3
      */
@@ -146,13 +146,6 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
 
         self::assertIsArray($body, 'Not JSON: ' . $raw);
         self::assertSame(-32603, $body['error']['code'] ?? null, $raw);
-        self::assertSame(
-            'Internal error',
-            $body['error']['message'] ?? null,
-            'The JSON-RPC message must be exactly "Internal error" - one string for every'
-            . ' unexpected failure, so the message itself discloses nothing. Body: ' . $raw
-        );
-
         $traceId = (string) ($body['error']['data']['trace_id'] ?? '');
 
         self::assertMatchesRegularExpression(
@@ -160,6 +153,17 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
             $traceId,
             'error.data.trace_id is not eight lower-case hex digits. Without it the'
             . ' generic message is a dead end for the operator. Body: ' . $raw
+        );
+
+        // ONE STRING FOR EVERY UNEXPECTED FAILURE, plus the trace id (1.1.1). A cold client
+        // rendered `error.message` and nothing else, so an id that lived only in `data` could
+        // not be quoted to the operator and the log line could not be found. The message is
+        // still built from a template and a random eight-hex id, so it discloses nothing.
+        self::assertSame(
+            'Internal error (trace ' . $traceId . ')',
+            $body['error']['message'] ?? null,
+            'The JSON-RPC message is not the generic sentence carrying this event\'s own trace'
+            . ' id. Body: ' . $raw
         );
 
         // Now the absence assertions, on the WHOLE body rather than on one field: the
@@ -245,10 +249,16 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
      *
      * WHY THE LIST EXISTS. Wrapping every core WP_Error in "Internal error" made the
      * agent's own mistakes unreadable: `term_exists` means "use the term, do not create
-     * it", `comment_flood` means "wait and retry", `http_request_failed` on a source_url
-     * means "you typed the URL wrong". An agent cannot self-correct on "Internal error", so
-     * it repeats the call, and each repeat writes a stack trace for something that is not a
-     * bug. Five codes, all of them the caller's own doing, all of them actionable.
+     * it", `comment_flood` means "wait and retry", `empty_content` means "fix the arguments".
+     * An agent cannot self-correct on "Internal error", so it repeats the call, and each repeat
+     * writes a stack trace for something that is not a bug. Four codes, all of them the
+     * caller's own doing, all of them actionable.
+     *
+     * FOUR, AND NOT FIVE, SINCE 1.1.1: `http_request_failed` came off the list because its
+     * message is the HTTP transport's, and cURL's names the host it could not reach - on a site
+     * with WP_PROXY_HOST set, the operator's own proxy. The case it was really protecting - a
+     * remote server that ANSWERS and refuses - is upload-media's, and it now gets a relayable
+     * `wpmcp_fetch_failed` naming the status instead (tests/integration/ErrorSurfaceTest.php).
      *
      * @group sprint-3
      */
@@ -300,7 +310,7 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
 
         self::assertIsArray($body, 'Not JSON: ' . $raw);
         self::assertSame(-32603, $body['error']['code'] ?? null, $raw);
-        self::assertSame('Internal error', $body['error']['message'] ?? null, $raw);
+        self::assertStringStartsWith('Internal error (trace ', (string) ($body['error']['message'] ?? ''), $raw);
 
         self::assertStringNotContainsString(
             self::OPAQUE_DATA,

@@ -2,8 +2,8 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
- * Version: 1.1.0
- * Requires at least: 5.5
+ * Version: 1.1.1
+ * Requires at least: 6.9
  * Requires PHP: 8.1
  * Author: Max Konstantinovski
  * Author URI: https://github.com/mkonstan
@@ -50,7 +50,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '1.1.0');
+define('WPMCP_VER', '1.1.1');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 
 /**
@@ -389,8 +389,18 @@ function wpmcp_max_window() {
 //       every INSERT would fail, and all three code writers would fail closed. A schema
 //       change ships with a bump - the same rule the note above this list states, and the
 //       reason the activation hook alone is not enough.
-define('WPMCP_DB_VER', 5);
+//   6 = who is connected. Adds client_name and client_version to the token table, filled
+//       from the `clientInfo` every client already sends in `initialize` and shown on the
+//       settings screen beside last_used_at and use_count. This is the operator visibility
+//       the REJECTED session feature would have bought: "Claude Desktop 1.4, last seen 3
+//       minutes ago, 412 calls" answers "which client is this token, and is it still
+//       there?" without the plugin holding any session state at all.
+define('WPMCP_DB_VER', 6);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
+
+// Revision 6's two optional columns, when the ALTER did not work: the names, for the admin
+// notice. Absent when they are both there. See wpmcp_note_client_columns().
+define('WPMCP_CLIENT_COLUMNS_OPTION', 'wpmcp_client_columns_missing');
 
 /* ============================================================
  * Activation / upgrade: create the tokens table, migrate data
@@ -458,6 +468,8 @@ function wpmcp_install() {
   window_secs int(10) unsigned NOT NULL DEFAULT 0,
   expires_at datetime NOT NULL,
   last_used_at datetime DEFAULT NULL,
+  client_name varchar(191) NOT NULL DEFAULT '',
+  client_version varchar(64) NOT NULL DEFAULT '',
   use_count bigint(20) unsigned NOT NULL DEFAULT 0,
   created_by bigint(20) unsigned NOT NULL DEFAULT 0,
   user_id bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -502,7 +514,16 @@ function wpmcp_install() {
   KEY path_saved_at (path(191),saved_at)
 ) $charset;";
 
-    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    // GUARDED, the same way the opcache call in tools.php is guarded: on a request where
+    // something has already loaded wp-admin/includes/file.php's sibling, the require is a no-op,
+    // and asking whether the function is there first is cheaper than asking the filesystem. It is
+    // also what makes wpmcp_install() reachable from the unit tier at all, which is where the
+    // "stamp the revision even when the optional columns are missing" claim is now proved
+    // (tests/unit/PlatformApiTest.php).
+    if (!function_exists('dbDelta')) {
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    }
+
     dbDelta($sql);
     dbDelta($versions);
 
@@ -519,6 +540,31 @@ function wpmcp_install() {
     if (!wpmcp_token_column_exists('user_id')) { return false; }
     if (!wpmcp_token_column_exists('active_until')) { return false; }
     if (!wpmcp_token_column_exists('window_secs')) { return false; }
+    // REVISION 6'S TWO COLUMNS DO NOT GATE THE STAMP, and the rule that decides it is the
+    // one the address-column drop below already states: gate on a step only when the plugin
+    // is INCORRECT without it. The three columns above are preconditions - without them a
+    // token authenticates as nobody. `client_name` and `client_version` are not: they hold
+    // the name a client reported about itself, nothing reads them but one admin table cell,
+    // and wpmcp_record_client_info() skips its write entirely when the row has no such field.
+    //
+    // THE FIRST VERSION OF THIS SPRINT GATED ON THEM, and the review was right to call it the
+    // highest real-site cost in the change. On a host whose ALTER fails - a database user with
+    // no ALTER privilege is ordinary shared hosting - the revision would never be recorded, so
+    // wpmcp_maybe_upgrade() would run dbDelta plus five SHOW COLUMNS plus two UPDATEs on EVERY
+    // REQUEST, for ever, with the plugin otherwise working perfectly and nothing anywhere
+    // saying why the site had got slower. That is the exact hazard written out two screens
+    // below about DROP, and gating here contradicted it.
+    //
+    // So: RECORD THE REVISION AND SAY SO LOUDLY. Not a bounded retry - N more requests of the
+    // same cost, and then the same silence, for a failure mode that does not clear by itself:
+    // a missing privilege is not transient, and a lock that is will have cleared before the
+    // stamp is read again anyway (the whole upgrade is one request). The cost of choosing this
+    // is the revision-5 lesson: a column added under a stamped revision reaches nobody, so
+    // these two never arrive on that site. That is why the operator is TOLD, with the one
+    // action that does retry - deactivate and reactivate, which calls wpmcp_install() directly
+    // rather than through the stamp.
+    wpmcp_note_client_columns();
+
     if (wpmcp_migrate_token_user_ids() === false) { return false; }
     if (wpmcp_migrate_token_lifetimes() === false) { return false; }
 
@@ -558,6 +604,104 @@ function wpmcp_install() {
 
     update_option(WPMCP_DB_VER_OPTION, WPMCP_DB_VER);
     return true;
+}
+
+/**
+ * Are revision 6's two optional columns there? Records the answer; gates nothing.
+ *
+ * SAID ONCE, HERE, for the reason wpmcp_migrate_drop_address_column() says its own thing here:
+ * the message has to name the columns, and this is the one place in the plugin allowed to.
+ * Three surfaces, because a silent unexplained absence is how the next person loses an
+ * afternoon - the PHP error log for whoever reads logs, an option for the admin notice, and the
+ * notice itself on every admin screen.
+ *
+ * THE OPTION IS CLEARED WHEN THEY ARRIVE, so a site that fixes its privileges and reactivates
+ * the plugin stops being warned without anybody deleting a row.
+ *
+ * @return bool true when both columns are present
+ */
+function wpmcp_note_client_columns() {
+    $names = wpmcp_client_columns_report(
+        wpmcp_token_column_exists('client_name'),
+        wpmcp_token_column_exists('client_version')
+    );
+
+    if ($names === '') {
+        if (get_option(WPMCP_CLIENT_COLUMNS_OPTION, '') !== '') {
+            delete_option(WPMCP_CLIENT_COLUMNS_OPTION);
+        }
+
+        return true;
+    }
+
+    update_option(WPMCP_CLIENT_COLUMNS_OPTION, $names);
+    error_log(
+        'wp-mcp: could not add ' . $names . ' to ' . wpmcp_table() . '. The plugin is fully'
+        . ' upgraded and works correctly; the only thing missing is the "Client" column on'
+        . ' Settings > WP MCP, which names the client each token is used by. The usual cause is'
+        . ' a database user with no ALTER privilege. Fix that and deactivate and reactivate the'
+        . ' plugin to add them.'
+    );
+
+    return false;
+}
+
+/**
+ * Which of revision 6's two columns are missing, as the string the notice and the log print -
+ * or '' when there is nothing to say.
+ *
+ * PURE, AND SPLIT OUT FOR THAT REASON. The decision this encodes is the one the review found
+ * wrong, so it is the part a test has to be able to drive: all four combinations, with no
+ * $wpdb, no options and no log. wpmcp_note_client_columns() is then only the reading and the
+ * writing around it.
+ *
+ * WHAT PROVES THE WHOLE PATH is tests/unit/PlatformApiTest.php's
+ * testTheInstallerStampsTheRevisionWhenTheClientColumnsCouldNotBeAdded: the installer run under
+ * the runtime stubs with a $wpdb double whose SHOW COLUMNS answers EMPTY for these two and
+ * present for every required one, which is a host whose ALTER was refused. It asserts the stamp
+ * is written anyway, the option records the names, and the option is deleted again once both
+ * columns are there. (An earlier version of this docblock cited an integration test that was
+ * never written - the review caught it.)
+ *
+ * @param bool $hasName    is client_name on the table?
+ * @param bool $hasVersion is client_version on the table?
+ */
+function wpmcp_client_columns_report($hasName, $hasVersion) {
+    $missing = array();
+
+    if (!$hasName)    { $missing[] = 'client_name'; }
+    if (!$hasVersion) { $missing[] = 'client_version'; }
+
+    return implode(' and ', $missing);
+}
+
+/** The columns revision 6 could not add, as a display string, or '' when there are none. */
+function wpmcp_client_columns_missing() {
+    return (string) get_option(WPMCP_CLIENT_COLUMNS_OPTION, '');
+}
+
+/**
+ * SITE-WIDE, and a WARNING rather than an error: nothing is broken, one admin-screen cell is
+ * unavailable, and the operator is the only person who can change the privilege that caused it.
+ *
+ * On `admin_notices` rather than on the plugin's own page for the reason trace.php gives for
+ * its two: an operator who never opens Settings > WP MCP would never see it, which is how a
+ * plugin manages to detect something and tell nobody.
+ */
+add_action('admin_notices', 'wpmcp_client_columns_notice');
+function wpmcp_client_columns_notice() {
+    if (!current_user_can('manage_options')) { return; }
+
+    $missing = wpmcp_client_columns_missing();
+
+    if ($missing === '') { return; }
+
+    echo '<div class="notice notice-warning"><p><strong>WP MCP: the database would not accept'
+        . ' two new columns.</strong></p><p><code>' . esc_html($missing) . '</code> could not be'
+        . ' added to the token table, so the <strong>Client</strong> column on Settings &gt; WP'
+        . ' MCP cannot say which client each token is used by. Everything else is upgraded and'
+        . ' working. The usual cause is a database user without the <code>ALTER</code>'
+        . ' privilege: grant it, then deactivate and reactivate this plugin to add them.</p></div>';
 }
 
 /** Is the file-versions table really there? The upgrade gate, not decoration. */
@@ -1589,6 +1733,60 @@ function wpmcp_validate($raw, $ip) {
         array('%s','%d'), array('%d')
     );
     return $row;
+}
+
+/**
+ * Record WHICH CLIENT is using this token, from `initialize`'s own `clientInfo`.
+ *
+ * WHY THIS IS THE WHOLE FEATURE. Operators asked the question the rejected session feature
+ * was going to answer - "what is actually connected to this site, and is it still there?" -
+ * and every MCP client already answers it, unprompted, in the first message of every
+ * connection: `initialize.params.clientInfo` is `{name, version}` and is REQUIRED by the
+ * specification. Storing the two strings beside last_used_at and use_count turns the token
+ * table into the answer, and the server stays stateless (see the BACKLOG entry for why
+ * sessions are dead).
+ *
+ * THE VALUES ARE THE CLIENT'S, SO THEY ARE TREATED AS INPUT. `sanitize_text_field()` strips
+ * tags, newlines and control characters, and the two lengths are the columns' own (191 and
+ * 64); the admin screen escapes them again on the way out. A client is free to call itself
+ * anything, so the field is evidence about what connected, never an identity check.
+ *
+ * WRITTEN ONLY WHEN IT CHANGED, and skipped entirely when the row has no such field: the
+ * session is a `SELECT *` row, so the property exists exactly when the column does, and a
+ * site whose revision-6 ALTER has not yet succeeded gets no error and no write. One UPDATE
+ * per reconnection rather than one per initialize.
+ *
+ * `initialize` IS THE ONLY CALLER because it is the only message that carries clientInfo. A
+ * client that never negotiates - the plugin does not require it - is simply not recorded.
+ */
+function wpmcp_record_client_info($params) {
+    global $wpdb;
+
+    $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
+    if (!$session || !property_exists($session, 'client_name')) { return; }
+
+    $info = (isset($params['clientInfo']) && is_array($params['clientInfo']))
+        ? $params['clientInfo']
+        : array();
+
+    $name = isset($info['name']) && is_scalar($info['name'])
+        ? substr(sanitize_text_field((string) $info['name']), 0, 191) : '';
+    $version = isset($info['version']) && is_scalar($info['version'])
+        ? substr(sanitize_text_field((string) $info['version']), 0, 64) : '';
+
+    if ($name === '' && $version === '') { return; }
+    if ($name === (string) $session->client_name
+        && $version === (string) $session->client_version) {
+        return;
+    }
+
+    $wpdb->update(
+        wpmcp_table(),
+        array('client_name' => $name, 'client_version' => $version),
+        array('id' => (int) $session->id),
+        array('%s', '%s'),
+        array('%d')
+    );
 }
 
 /**

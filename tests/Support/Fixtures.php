@@ -1452,6 +1452,80 @@ final class Fixtures
         ));
     }
 
+    /* ============================================================
+     * The hourly sweep, which a test must own rather than race
+     * ========================================================== */
+
+    /**
+     * Unschedule `wpmcp_flush_expired` and return how many occurrences were removed.
+     *
+     * WHY THIS EXISTS, with the run id. On 2026-09-22, run 35669745657 on `main`,
+     * TokenLifecycleTest::testADeadTokenIsRefusedAsExpiredAndCannotBeRenewed failed with
+     * "The dead fixture row is gone before the cron ran" - the plugin's own hourly sweep
+     * deleted the fixture between the HTTP call that was supposed to be refused and the
+     * assertion that read the row back. The same code passed three other runs, and each
+     * failure costs a three-hour run.
+     *
+     * AND NO DEADLINE CAN AVOID IT, which is why the fix has to be a hold-off rather than a
+     * cleverer fixture. `wpmcp_token_state()` calls a row dead when
+     * `expires_at <= UTC_TIMESTAMP()` (wp-mcp.php) and `wpmcp_flush_expired_cb()` deletes
+     * exactly `expires_at <= UTC_TIMESTAMP()`. The set of rows a test needs to be DEAD and
+     * the set the sweep deletes are the same set, by construction. A test that wants a dead
+     * row to still be there has to stop the sweep, or win a race with cron.
+     *
+     * WHAT RUNS IT, AND WHY UNSCHEDULING IS ENOUGH. Nothing calls the callback directly
+     * except two tests that mean to. The other path is WordPress's own cron: a front-end
+     * request spawns a loopback to wp-cron.php, which runs whatever is DUE - and the HTTP
+     * request these tests make is such a request. With the hook not scheduled, nothing is
+     * due for it and the loopback cannot reach it, whatever else it runs.
+     *
+     * THE SCHEDULE IS PUT BACK by resumeTokenSweep(), because the plugin only ever
+     * schedules this on activation (wp-mcp.php's wpmcp_activate) - a site left without it
+     * would keep dead rows for ever and nothing would say so.
+     */
+    public static function suspendTokenSweep(): int
+    {
+        return (int) WpCli::evaluate(
+            'echo (int) wp_unschedule_hook("wpmcp_flush_expired");'
+        );
+    }
+
+    /**
+     * Put the hourly sweep back, at the same offset the activation hook uses.
+     *
+     * Idempotent and tolerant: it is called from teardown, where the interesting failure is
+     * whatever the test found, not this.
+     */
+    public static function resumeTokenSweep(): void
+    {
+        WpCli::tryEvaluate(
+            'if (!wp_next_scheduled("wpmcp_flush_expired")) {'
+            . ' wp_schedule_event(time() + HOUR_IN_SECONDS, "hourly", "wpmcp_flush_expired"); }'
+            . ' echo (int) wp_next_scheduled("wpmcp_flush_expired");'
+        );
+    }
+
+    /**
+     * MAKE THE RACE CERTAIN: run the sweep now, if and only if it is still scheduled.
+     *
+     * A test that calls this at the exact moment cron would have is no longer hoping the
+     * loopback did not fire - it has fired it, deliberately, every run. With the hold-off in
+     * place the hook is not scheduled, wp-cli answers that the event does not exist, nothing
+     * is deleted, and the assertions that follow are a fact rather than a coin toss. Take
+     * the hold-off away and this same call deletes the row and the test goes red, which is
+     * how the fix was proved.
+     *
+     * ONLY THIS HOOK. `wp cron event run --due-now` would also run whatever else a site has
+     * due - on a real Local site that is other people's plugins, mail and HTTP - and a
+     * fixture helper has no business doing that.
+     *
+     * @return string wp-cli's own words, for a test that wants to assert on them.
+     */
+    public static function runTokenSweepIfScheduled(): string
+    {
+        return WpCli::tryRun(['cron', 'event', 'run', 'wpmcp_flush_expired']);
+    }
+
     /**
      * Remember a directory this run writes OUTSIDE the database, so a killed run leaves a
      * name behind (round 3, review R2-1).
@@ -1838,7 +1912,8 @@ final class Fixtures
      * which is the precise claim (round 2, review S2): SqlSelectTest arms the switch with a
      * `pre_option_` filter in a mu-plugin, gated on a per-request header, and asserts the
      * stored option is unchanged afterwards; PostMetaToolsTest's settings round trip DOES
-     * write it, through wpmcp_save_settings(), and writes back the value it read a moment
+     * write it, through update_option() (1.1.1: the Settings API swap put the normaliser on
+     * sanitize_option_*, so there is no wpmcp_save_settings() left), and writes back the value it read a moment
      * earlier in the same `wp eval` - a killed run cannot fall between the two. So when the
      * option is ON, an operator switched it on - both local test sites keep SQL reads on
      * for their dev MCP servers - and calling that debris turned every clean run red. It is
