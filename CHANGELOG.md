@@ -64,6 +64,16 @@ the plugin trimming it, and it says so in the file.
 - **Enforcing it costs one `fstat()` per traced failure**, on the descriptor the write already has
   open, and traces are only written when something has already broken. The rewrite itself happens
   once per quarter-cap of new log - roughly every 230 failures - not on every write.
+- **The trim will not discard an entry it has not read, and will not call a short write a finished
+  one.** Two ways it could otherwise have lost the newest entry - the one the trace id names. `flock`
+  succeeds and protects nothing on NFS and some shared hosting, so an entry appended while the trim
+  was running could have been thrown away with its id already quoted to a caller; the trim now
+  re-checks the file's size immediately before cutting and ABSORBS what arrived instead. And `fwrite`
+  returns a short count on a full disk, which used to read as success and leave the file ending
+  part-way through that same entry; it is now retried, and a rewrite that genuinely cannot finish
+  sends the whole entry to the PHP error log and raises the operator notice rather than pretending.
+- **A filtered cap below 64 KiB falls back to the 2 MiB default rather than being clamped**, which is
+  what the README already said and what the constant is now named for.
 
 ### Changed: titles are stored the way wp-admin stores them
 

@@ -29,6 +29,7 @@ declare(strict_types=1);
 namespace WpMcp\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
+use WpMcp\Tests\Support\TraceStream;
 use WpMcp\Tests\Support\WordPressRuntime;
 use WpMcp\Tests\Support\WordPressStubs;
 
@@ -51,6 +52,9 @@ final class TraceCapTest extends TestCase
         parent::setUp();
 
         WordPressRuntime::install();
+
+        TraceStream::register();
+        TraceStream::reset();
 
         $this->path = sys_get_temp_dir() . '/wpmcp-trace-cap-' . bin2hex(random_bytes(6)) . '.log';
     }
@@ -276,15 +280,230 @@ final class TraceCapTest extends TestCase
         }
     }
 
-    /** Enforce the cap on the temp file the way wpmcp_trace_append() does. */
-    private function cap(int $max, int $newest): int
+    /**
+     * THE CONSTANT THAT DECIDES WHAT IS TOO SMALL IS NAMED FOR WHAT IT DOES (round 2).
+     *
+     * It was called `WPMCP_TRACE_LOG_MIN_CAP`, which says "the smallest cap you can get" - and a
+     * reader acting on that name would expect a filter returning 1,024 to yield a 64 KiB log. It
+     * does not: a sub-floor value is REJECTED and the 2 MiB default stands, which is the
+     * wpmcp_file_versions_keep rule (a useless value is far more likely to be a mistake than a
+     * decision, and honouring a mistake quietly is worse than ignoring it). The behaviour is right
+     * and the README already describes it correctly, so the NAME moved:
+     * `WPMCP_TRACE_LOG_CAP_REJECT_BELOW`.
+     *
+     * Asserted rather than left to review, because a constant whose name contradicts its code is
+     * the kind of thing a later sprint 'fixes' by changing the code.
+     *
+     * @group sprint-14d
+     */
+    public function testTheRejectionThresholdIsNamedForRejectingRatherThanForClamping(): void
     {
-        $handle = fopen($this->path, 'ab+');
+        self::assertTrue(
+            defined('WPMCP_TRACE_LOG_CAP_REJECT_BELOW'),
+            'The threshold constant is not called WPMCP_TRACE_LOG_CAP_REJECT_BELOW. A name like'
+            . ' MIN_CAP promises a floor the code does not implement - it rejects and falls back to'
+            . ' the default instead of clamping.'
+        );
+        self::assertFalse(
+            defined('WPMCP_TRACE_LOG_MIN_CAP'),
+            'WPMCP_TRACE_LOG_MIN_CAP still exists. Two names for one threshold is how the wrong one'
+            . ' ends up in the next caller.'
+        );
+        self::assertSame(65536, WPMCP_TRACE_LOG_CAP_REJECT_BELOW);
 
-        self::assertNotFalse($handle, 'Could not open ' . $this->path);
+        // And the name tells the truth: just below is rejected to the DEFAULT, not clamped to the
+        // threshold, and just at it is honoured.
+        WordPressRuntime::addFilter('wpmcp_trace_log_max_bytes', static fn ($b) => 65535);
+        self::assertSame(
+            2097152,
+            \wpmcp_trace_log_max_bytes(),
+            'A cap one byte below the threshold was clamped to the threshold rather than rejected,'
+            . ' so the constant now behaves like the name it used to have.'
+        );
+
+        WordPressRuntime::addFilter('wpmcp_trace_log_max_bytes', static fn ($b) => 65536);
+        self::assertSame(65536, \wpmcp_trace_log_max_bytes());
+    }
+
+    /**
+     * AN ENTRY THAT ARRIVES DURING THE REWRITE IS NOT DISCARDED - the round-2 fix, and the one
+     * that touches the promise this whole item rests on.
+     *
+     * THE HOST THIS IS ABOUT. `wpmcp_trace_append()` takes `LOCK_EX`, and on NFS and on some
+     * shared hosting `flock` succeeds and protects nothing. There another request can append an
+     * entry between our tail read and our `ftruncate` - and that entry's trace id has ALREADY been
+     * handed to a caller we told to quote it. The inherited weakness was a TORN entry; the cap
+     * turned it into a LOST one, which is the thing this sprint exists to make impossible.
+     *
+     * The fix does not merely skip the cut when the size moved (which was the suggestion): it
+     * ABSORBS what arrived and cuts anyway, so the promise is kept AND the file still comes down
+     * under its cap. Skipping is the fallback when the file will not hold still.
+     *
+     * @group sprint-14d
+     */
+    public function testAnEntryThatLANDSDuringTheRewriteIsNotDiscarded(): void
+    {
+        $cap       = 65536;
+        $concurrent = $this->entry('race', 1);
+
+        file_put_contents($this->path, implode('', $this->fill($cap * 2, 'old')));
+
+        TraceStream::growOnStat($this->path, $concurrent);
+
+        $removed = $this->cap($cap, self::MEASURED_MEAN_ENTRY, true);
+        $after   = (string) file_get_contents($this->path);
+
+        self::assertStringContainsString(
+            'trace=race0001 ',
+            $after,
+            'AN ENTRY WRITTEN DURING THE REWRITE WAS DISCARDED, and its trace id is already with a'
+            . ' caller who was told to quote it. On a host where flock does nothing, that is the'
+            . ' cap losing exactly the entry it promised to keep.'
+        );
+        self::assertStringContainsString(
+            $concurrent,
+            $after,
+            'The concurrent entry is present but not WHOLE, so the absorbed bytes were cut rather'
+            . ' than appended.'
+        );
+        self::assertGreaterThan(
+            0,
+            $removed,
+            'The cut was abandoned rather than absorbing the concurrent entry. Abandoning is the'
+            . ' correct FALLBACK, but with one appended entry the file can be trimmed and keep'
+            . ' everything, so abandoning here means the cap stops working on a busy host.'
+        );
+        self::assertLessThanOrEqual($cap, strlen($after));
+    }
+
+    /**
+     * A file that will not hold still is left ALONE - the fallback, and it must not be a cut.
+     *
+     * If the size keeps moving under the reconcile, there is no size at which a truncate is safe,
+     * so nothing is truncated and the next traced failure tries again (the file is still over its
+     * cap, so one will). A cap that is occasionally late is a cost; a cap that discards an issued
+     * id is a broken promise.
+     *
+     * @group sprint-14d
+     */
+    public function testAFileWhoseSizeKeepsMovingIsNotCutAtAll(): void
+    {
+        $cap = 65536;
+
+        file_put_contents($this->path, implode('', $this->fill($cap * 2, 'old')));
+
+        $before = (string) file_get_contents($this->path);
+
+        // Every stat grows it again, so the reconcile can never reach a stable size.
+        TraceStream::growOnStatForever($this->path, $this->entry('race', 2));
+
+        $removed = $this->cap($cap, self::MEASURED_MEAN_ENTRY, true);
+
+        self::assertSame(0, $removed, 'A file that never settled was truncated anyway.');
+        self::assertStringContainsString(
+            $before,
+            (string) file_get_contents($this->path),
+            'The original contents are no longer a prefix of the file, so something was cut from a'
+            . ' file whose size was still moving.'
+        );
+    }
+
+    /**
+     * A SHORT WRITE ON THE REWRITE IS NOT SUCCESS - the other round-2 fix.
+     *
+     * `fwrite` returns the number of bytes it actually took, and on a full disk that is fewer than
+     * it was given. The old code compared it against `false` alone, so a short write read as a
+     * completed one and left the file ending INSIDE the newest entry - the exact entry the cap
+     * exists to keep. This case is the recoverable one: the first write takes half and later
+     * writes behave, which a retry finishes.
+     *
+     * @group sprint-14d
+     */
+    public function testAShortWriteOnTheRewriteIsRetriedUntilTheKeptPartIsWhole(): void
+    {
+        $cap    = 65536;
+        $newest = $this->entry('newest', 1);
+
+        file_put_contents($this->path, implode('', $this->fill($cap * 2, 'old')) . $newest);
+
+        TraceStream::shortWrite($this->path, true);
+
+        $incomplete = null;
+        $removed    = $this->cap($cap, strlen($newest), true, $incomplete);
+        $after      = (string) file_get_contents($this->path);
+
+        self::assertFalse(
+            $incomplete,
+            'A short write that later writes could finish was reported as an incomplete rewrite.'
+        );
+        self::assertGreaterThan(0, $removed);
+        self::assertStringContainsString(
+            $newest,
+            $after,
+            'THE FILE ENDS INSIDE THE NEWEST ENTRY. A short fwrite was treated as a whole one, so'
+            . ' the entry whose id the caller is holding lost its stack, its file:line, or both.'
+        );
+        self::assertStringEndsWith(
+            "\n",
+            $after,
+            'The file does not end on a line boundary, which is what a rewrite cut short leaves.'
+        );
+    }
+
+    /**
+     * A rewrite that CANNOT be finished says so, so the caller can put the entry somewhere else.
+     *
+     * There is no un-truncating a file, so when the bytes will not go back the honest outcome is to
+     * report it: wpmcp_trace_append() then returns false, and wpmcp_trace_record()'s existing
+     * fallback writes the whole entry to error_log() and raises the operator notice. The trace id
+     * the caller holds still resolves to something, which is the rule this file implements.
+     *
+     * @group sprint-14d
+     */
+    public function testARewriteThatCannotBeFinishedIsReportedRatherThanCalledSuccess(): void
+    {
+        $cap = 65536;
+
+        file_put_contents($this->path, implode('', $this->fill($cap * 2, 'old')));
+
+        TraceStream::shortWrite($this->path, false);
+
+        $incomplete = null;
+        $removed    = $this->cap($cap, self::MEASURED_MEAN_ENTRY, true, $incomplete);
+
+        self::assertTrue(
+            $incomplete,
+            'A rewrite that could not write its bytes back reported nothing, so the log now ends'
+            . ' inside an entry and neither the caller nor the operator is told.'
+        );
+        self::assertSame(
+            0,
+            $removed,
+            'An incomplete rewrite reported bytes removed as though the trim had worked.'
+        );
+    }
+
+    /**
+     * Enforce the cap on the temp file the way wpmcp_trace_append() does.
+     *
+     * $viaStream opens the file through TraceStream, which is the only way to reach the two windows
+     * the round-2 fixes closed - see that class.
+     */
+    private function cap(int $max, int $newest, bool $viaStream = false, &$incomplete = null): int
+    {
+        $path   = $viaStream ? TraceStream::url($this->path) : $this->path;
+        $handle = fopen($path, 'ab+');
+
+        self::assertNotFalse($handle, 'Could not open ' . $path);
 
         $stat    = fstat($handle);
-        $removed = \wpmcp_trace_cap_file($handle, (int) $stat['size'], $max, $newest);
+        $removed = \wpmcp_trace_cap_file(
+            $handle,
+            (int) $stat['size'],
+            $max,
+            $newest,
+            $incomplete
+        );
 
         fclose($handle);
 

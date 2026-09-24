@@ -836,7 +836,11 @@ The newest entries are the ones that survive, deliberately: a trace id is quoted
 after it is issued, so a cap that discarded the newest would throw away exactly the id somebody
 is asking about. A host that wants a different ceiling can raise it -
 `add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES);` - and a value below 64 KiB is
-ignored rather than obeyed.
+ignored rather than obeyed, leaving the 2 MiB default in place.
+
+If the trim cannot finish - a full disk is the case that does it - the plugin does not pretend it
+did: the whole entry goes to the PHP error log and the same admin notice as an unwritable directory
+appears, so the trace id you were given still resolves to something.
 
 The log lives at `wp-content/wpmcp/trace-<32 hex>.log`. The random name is generated once
 per site and kept in an option, so the URL cannot be derived from anything a client sees.

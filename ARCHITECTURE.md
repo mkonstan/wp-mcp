@@ -145,9 +145,12 @@ the newest entries would discard an id in the same millisecond it went out on th
 worse than no cap. So the newest three quarters of the cap survive, the cut lands between entries
 rather than through one, and the first line of a trimmed file says `truncated=1` with the cap, the
 bytes removed and the bytes kept - a shorter file must not read as a damaged one. The ceiling is
-`wpmcp_trace_log_max_bytes`, filterable and floored at one entry's worth; enforcing it costs one
-`fstat()` on the descriptor the append already holds, on a path that only runs when something has
-already broken.
+`wpmcp_trace_log_max_bytes`, filterable, and a filtered value under one entry's worth is REJECTED
+back to the default rather than clamped - honouring an obvious mistake quietly is worse than
+ignoring it. Enforcing the cap costs one `fstat()` on the descriptor the append already holds, on a
+path that only runs when something has already broken. The trim also refuses to discard bytes it has
+not read and refuses to treat a short write as a finished one, because `flock` is a no-op on NFS and
+a disk can be full: either would otherwise lose the newest entry, which is the one the id names.
 
 ## Five error codes and no more
 
