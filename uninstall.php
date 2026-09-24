@@ -5,20 +5,20 @@
  * WP MCP - what Delete leaves behind, which is nothing.
  *
  * WordPress runs this file when the plugin is DELETED, not when it is deactivated.
- * Deactivating is reversible and leaves every token, option and log in place on purpose.
+ * Deactivating is reversible and leaves every token, option and trace in place on purpose.
  *
  * NOTHING FROM THE PLUGIN IS LOADED HERE. WordPress includes this file on its own, in a
- * request where wp-mcp.php has not run: no WPMCP_TABLE, no WPMCP_TRACE_NAME_OPTION, no
- * wpmcp_trace_dir(). Every name below is therefore spelled out as a literal, which is a
- * duplication and the reason tests/unit/UninstallTest.php exists: it reads the option
- * names out of the plugin's source and fails if one of them is not named here. A new
- * option without a line in this file is a red test rather than a row left in wp_options
- * on somebody's site.
+ * request where wp-mcp.php has not run: no WPMCP_TABLE, no WPMCP_TRACES_TABLE,
+ * no wpmcp_traces_table(). Every name below is therefore spelled out as a literal, which is
+ * a duplication and the reason tests/unit/UninstallTest.php exists: it reads the option
+ * names and the CREATE TABLE statements out of the plugin's source and fails if one of them
+ * is not named here. A new option or table without a line in this file is a red test rather
+ * than a row left in somebody's database.
  *
  * THE ORDER IS DELIBERATE. The cron hook goes first, so a scheduled flush cannot fire
- * against a table that is about to disappear. Options next, then the table, then the log
- * directory - the thing most likely to fail is last, and when it does the rest is already
- * gone.
+ * against a table that is about to disappear. Options next, then the tables, then what
+ * 1.1.1 and earlier left in `wp-content` - the thing most likely to fail is last, and when
+ * it does the rest is already gone.
  */
 
 // Called any other way, this file does nothing. Without the guard it is a URL that drops
@@ -26,40 +26,50 @@
 if (!defined('WP_UNINSTALL_PLUGIN')) { exit; }
 
 /**
- * Every option this plugin writes.
+ * Every option this plugin writes, plus the three it used to.
  *
  * wpmcp_db_ver              schema revision, compared on every load
- * wpmcp_trace_log_name      this site's random trace-log file name
- * wpmcp_trace_log_readable  set when the self-check found the log served over HTTP
- * wpmcp_trace_log_unwritable set when a trace went to error_log() instead
  * wpmcp_client_columns_missing set when revision 6's two optional columns could not be added
  * wpmcp_code_enabled        the code-editing switch
  * wpmcp_code_denylist       the code-editing denylist
  * wpmcp_sql_enabled         the sql-select switch
  * wpmcp_meta_keys           the post meta keys the meta tools may read and write
+ *
+ * THE LAST THREE ARE 1.1.1'S AND NOTHING WRITES THEM ANY MORE. The trace log became a table
+ * in 1.1.2 and revision 7's upgrade deletes them - but only on a site that RAN that upgrade,
+ * and a plugin deactivated before the update and then deleted never loads, so `plugins_loaded`
+ * never fires and that migration never runs. Deleting them is three rows and covers exactly
+ * that site; leaving them out would leave a stale option behind on it for ever.
+ *
+ * wpmcp_trace_log_name      the random trace-log file name (1.1.1 and earlier)
+ * wpmcp_trace_log_readable  the daily self-check's outcome (1.1.1 and earlier)
+ * wpmcp_trace_log_unwritable set when a trace went to error_log() instead (1.1.1 and earlier)
  */
 $wpmcp_options = array(
     'wpmcp_db_ver',
-    'wpmcp_trace_log_name',
-    'wpmcp_trace_log_readable',
-    'wpmcp_trace_log_unwritable',
     'wpmcp_client_columns_missing',
     'wpmcp_code_enabled',
     'wpmcp_code_denylist',
     'wpmcp_sql_enabled',
     'wpmcp_meta_keys',
+    'wpmcp_trace_log_name',
+    'wpmcp_trace_log_readable',
+    'wpmcp_trace_log_unwritable',
 );
 
-/** Every transient. Deleted through the API, because an object cache holds them too. */
+/**
+ * Every transient, which is now only 1.1.1's. Deleted through the API, because an object
+ * cache holds them too - and for the reason the three legacy options above are still here.
+ */
 $wpmcp_transients = array(
     'wpmcp_trace_checked',
 );
 
 /**
- * Clean one site: its cron hook, its options, its token table.
+ * Clean one site: its cron hook, its options, its three tables.
  *
- * The trace log lives in wp-content, which a network shares, so it is handled once
- * afterwards rather than per site.
+ * What 1.1.1 and earlier left in wp-content is handled once afterwards rather than per
+ * site, because that directory is shared across a network.
  */
 function wpmcp_uninstall_site(array $options, array $transients) {
     global $wpdb;
@@ -73,10 +83,13 @@ function wpmcp_uninstall_site(array $options, array $transients) {
     // plus the bare name. On multisite $wpdb->prefix is the CURRENT site's prefix, which
     // is why this runs inside the per-site loop below.
     //
-    // BOTH TABLES. wpmcp_file_versions holds the previous contents of theme files the
+    // ALL THREE TABLES. wpmcp_file_versions holds the previous contents of theme files the
     // code tools changed - up to half a megabyte per row - so a plugin that left it
-    // behind would leave the largest thing it ever wrote.
-    foreach (array('wpmcp_tokens', 'wpmcp_file_versions') as $bare) {
+    // behind would leave the largest thing it ever wrote. wpmcp_traces holds stack traces,
+    // absolute paths and, when a database call failed, SQL: the one thing worse to leave in
+    // a stranger's database than a token hash. tests/unit/UninstallTest.php reads the
+    // CREATE TABLE statements out of the plugin and requires every one of them here.
+    foreach (array('wpmcp_tokens', 'wpmcp_file_versions', 'wpmcp_traces') as $bare) {
         $table = $wpdb->prefix . $bare;
 
         // Interpolated rather than prepared: DROP TABLE takes no placeholders, and the
@@ -85,7 +98,17 @@ function wpmcp_uninstall_site(array $options, array $transients) {
     }
 }
 
-/** Remove the trace log directory and everything the plugin put in it. */
+/**
+ * Remove what 1.1.1 and earlier left in `wp-content/wpmcp/`: the trace log, its two guard
+ * files and the directory.
+ *
+ * NOTHING THE CURRENT PLUGIN WROTE IS IN HERE. The trace log became a table in 1.1.2 and
+ * revision 7's upgrade deletes this directory - so on almost every site this function finds
+ * nothing and returns at the first line. It stays for the one site it is about: a plugin
+ * DEACTIVATED before the update and then deleted never loads, so `plugins_loaded` never
+ * fires, revision 7 never runs, and the file full of stack traces is still sitting under the
+ * document root where nginx will serve it. Deleting the plugin has to take it.
+ */
 function wpmcp_uninstall_trace_dir() {
     $dir = WP_CONTENT_DIR . '/wpmcp';
 

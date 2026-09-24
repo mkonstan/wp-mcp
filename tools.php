@@ -4910,15 +4910,25 @@ function wpmcp_sql_restore_session($variable, $priorTimeout, $priorSwitch) {
  * The identifiers this tool refuses to see, ANYWHERE in the statement, case-insensitively.
  *
  * THIS AND wpmcp_sql_denied_functions() ARE THE WHOLE OF THE STRING INSPECTION IN THIS
- * TOOL - two table names and one function name - AND THEY EXIST BECAUSE THE SERVER CANNOT
+ * TOOL - three table names and one function name - AND THEY EXIST BECAUSE THE SERVER CANNOT
  * MAKE THESE DECISIONS. Everything else the tool refuses is refused by MySQL itself - the
  * wrapper's grammar, the READ ONLY transaction, the statement timeout. But the WordPress
- * database user owns the token table and the file-version table: it created them and it
- * can read them, and there is no GRANT this plugin can issue on its own connection to
- * take that away. So the one thing the server will happily do and must not is read the
- * table of token hashes and the table of theme-file bytes, and the only place that can be
- * stopped is here, before the statement is sent. `LOAD_FILE()` is the same shape of
+ * database user owns all three of this plugin's tables: it created them and it can read
+ * them, and there is no GRANT this plugin can issue on its own connection to take that
+ * away. So the things the server will happily do and must not are read the table of token
+ * hashes, the table of theme-file bytes and the table of TRACES, and the only place that
+ * can be stopped is here, before the statement is sent. `LOAD_FILE()` is the same shape of
  * problem with a different subject and lives in the other function.
+ *
+ * THE TRACES TABLE IS THE THIRD SINCE 1.1.2, AND IT IS THE ONE THIS TOOL MOST HAS TO REFUSE.
+ * Every other denial here protects a credential or a file; this one protects the error
+ * BOUNDARY. A trace row holds exactly the detail the boundary exists to keep from a caller -
+ * the class, the message, the absolute file:line, the WP_Error data (which is where wpdb puts
+ * the failing query) and the whole stack. The plugin hands a caller eight hex digits and
+ * nothing else; leaving the table readable would let an admin-scope token that has just
+ * caused a failure select the stack trace for it and undo the boundary through the back door.
+ * The log file was never readable by a token at all, so this denial is what replaces the
+ * filesystem as the wall. See analysis/53 D25's second cost.
  *
  * NOTHING IS STRIPPED FIRST. No comments removed, no strings skipped, no tokenising: a
  * mention of either name inside a comment or inside a string literal refuses the whole
@@ -4938,8 +4948,10 @@ function wpmcp_sql_denied_identifiers() {
     return array_values(array_unique(array(
         wpmcp_table(),
         wpmcp_versions_table(),
+        wpmcp_traces_table(),
         WPMCP_TABLE,
         WPMCP_VERSIONS_TABLE,
+        WPMCP_TRACES_TABLE,
     )));
 }
 

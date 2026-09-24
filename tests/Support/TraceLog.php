@@ -1,28 +1,23 @@
 <?php
 /**
- * The plugin's private trace log, read from the site under test.
+ * The plugin's private trace store, read from the site under test.
  *
- * READ THROUGH `wp eval`, NOT file_get_contents, for the same reason MuPlugin writes
- * through it: locally the site is on this filesystem, in CI it is inside a
- * @wordpress/env container whose wp-content the host cannot reach. WP_CONTENT_DIR is
- * WordPress's own answer to "where is it", which beats rebuilding the path from
- * WPMCP_SITE_PATH and being wrong on a site with a moved wp-content.
+ * A TABLE SINCE 1.1.2, NOT A FILE, and that is why nothing here opens anything: traces are
+ * rows in `wp_wpmcp_traces`. The old class read `wp-content/wpmcp/trace-<32 hex>.log` through
+ * `wp eval` because in CI the site is inside a container whose wp-content the host cannot
+ * reach; the reason to go through `wp eval` is now simpler - the database is the site's, and
+ * the rendering has to be the plugin's own.
  *
- * NOTHING HERE TRUNCATES THE LOG. It is an operator's file, not a fixture, and a second
- * runner may be writing to it; every assertion is therefore "this trace id appears",
- * never "the log contains only this". That also means the tests stay correct when run
- * twice in a row, which clearing would not.
+ * `entry()` RETURNS THE SAME TEXT THE FILE HELD, because it calls the plugin's
+ * wpmcp_trace_entry() - a `key=value` header line with the stack indented under it. Every
+ * assertion written against the file era therefore still means what it meant, and an operator
+ * reading the settings screen's lookup sees the identical shape.
  *
- * THE PLUGIN ITSELF TRUNCATES IT SINCE 1.1.1, at 2 MiB, oldest entries first - which does not
- * change the rule above, it is the reason for it. `contents()` can therefore begin with a
- * `truncated=1` marker line, and an entry that was in the file a moment ago may be gone. The one
- * class that exercises that on purpose (tests/integration/TraceLogCapTest.php) points the SITE at
- * a throwaway log file name for its duration rather than truncating the operator's.
- *
- * THE FILE NAME IS A SECRET AND IS ASKED FOR, NEVER BUILT. It is `trace-<32 hex>.log`,
- * generated once per site and kept in the `wpmcp_trace_log_name` option, so the test has to
- * read it from the site the same way the plugin does. A test that hardcoded the old
- * `trace.log` would be asserting against the very name B1 removed.
+ * NOTHING HERE DELETES A ROW IT DID NOT PLANT. The table is an operator's, not a fixture's,
+ * and a second runner may be writing to it; every assertion is "this trace id is there",
+ * never "the table holds only this". The plugin sweeps it hourly (seven days, 2,000 rows), so
+ * a trace that was there a moment ago may be gone - which is the reason for the rule, not a
+ * change to it.
  */
 
 declare(strict_types=1);
@@ -31,134 +26,202 @@ namespace WpMcp\Tests\Support;
 
 final class TraceLog
 {
-    /** The name the log had before B1 gave it a random one. Must not be servable. */
-    public const LEGACY_NAME = 'trace.log';
-
-    /** This site's log file name, from the plugin itself. */
-    public static function fileName(): string
-    {
-        return WpCli::evaluate('echo wpmcp_trace_file_name();');
-    }
-
-    /**
-     * The log's size in bytes, or 0 when it is not there yet.
-     *
-     * FOR "DID THE LOG GROW", WHICH IS THE ONLY QUESTION contents() WAS EVER ASKED FOR THAT DOES
-     * NOT NEED THE BYTES (round 3). This log is append-only and, until 1.1.1, never trimmed, so on
-     * a machine that has run the suite for weeks it is over a megabyte - the cap holds it at 2 MiB
-     * now, which is still a megabyte. A growth check written as
-     * `assertNotSame($before, contents())` then ships two megabyte-long strings through a wp-cli
-     * subprocess AND hands one of them to a PHPUnit constraint. The queen's full-suite run died
-     * inside PHPUnit's own failure formatting at exactly that assertion, on both sites, with the
-     * real outcome invisible underneath a TypeError. An integer cannot do that.
-     */
-    public static function size(): int
+    /** How many traces the site is holding. For "did a trace get written". */
+    public static function count(): int
     {
         return (int) trim(WpCli::evaluate(
-            '$f = wpmcp_trace_path(); echo is_file($f) ? (int) filesize($f) : 0;'
+            'global $wpdb;'
+            . ' echo (int) $wpdb->get_var("SELECT COUNT(*) FROM " . wpmcp_traces_table());'
         ));
     }
 
-    /** Whole log, or '' when the file does not exist yet. */
-    public static function contents(): string
-    {
-        // base64 so the text survives wp-env's own re-quoting and WpCli::clean(), which
-        // keeps only non-empty lines of a container's stdout.
-        $encoded = WpCli::evaluate(
-            '$f = wpmcp_trace_path();'
-            . ' echo is_file($f) ? base64_encode((string) file_get_contents($f)) : "";'
-        );
-
-        if (trim($encoded) === '') {
-            return '';
-        }
-
-        return (string) base64_decode(trim($encoded), true);
-    }
-
     /**
-     * The one log entry carrying $traceId: its header line plus the indented stack
-     * frames under it, up to the next entry. '' when the trace id is not in the log.
+     * The one trace carrying $traceId, rendered exactly as the error-log fallback and the
+     * settings screen render it: the header line plus the indented stack. '' when there is
+     * none.
+     *
+     * Read through the plugin's own wpmcp_trace_find(), so the test exercises the lookup the
+     * operator's promise depends on rather than a query of its own.
      */
     public static function entry(string $traceId): string
     {
-        $entry = '';
-
-        foreach (explode("\n", self::contents()) as $line) {
-            $line = rtrim($line, "\r");
-
-            if ($entry !== '' && $line !== '' && $line[0] !== ' ') {
-                break; // the next entry starts at column 0
-            }
-
-            if ($entry !== '' || str_contains($line, 'trace=' . $traceId . ' ')) {
-                $entry .= $line . "\n";
-            }
-        }
-
-        return $entry;
-    }
-
-    /** The URL the log would be served at, as the plugin computes it. */
-    public static function url(): string
-    {
-        return WpCli::evaluate('echo wpmcp_trace_url();');
-    }
-
-    /** The three outcomes wpmcp_trace_selfcheck() can store, as the plugin names them. */
-    public const READABLE     = 'readable';
-    public const NOT_READABLE = 'not_readable';
-    public const UNVERIFIED   = 'unverified';
-
-    /** Run the plugin's own self-check and return the state it stored. */
-    public static function selfCheck(): string
-    {
-        return WpCli::evaluate('echo wpmcp_trace_selfcheck();');
-    }
-
-    /** The state the last self-check stored, without re-running it. */
-    public static function selfCheckState(): string
-    {
-        return WpCli::evaluate('echo wpmcp_trace_selfcheck_state();');
-    }
-
-    /** Why the last self-check could not answer, or '' when it could. */
-    public static function selfCheckReason(): string
-    {
-        $encoded = WpCli::evaluate('echo base64_encode(wpmcp_trace_selfcheck_reason());');
-
-        return trim($encoded) === '' ? '' : (string) base64_decode(trim($encoded), true);
-    }
-
-    /** Does the site-wide red "readable from the web" warning stand? */
-    public static function exposedOptionIsSet(): bool
-    {
-        return WpCli::evaluate('echo (int) wpmcp_trace_log_is_exposed();') === '1';
-    }
-
-    /** PHP_OS_FAMILY on the SITE, which is not this runner's on a containerised CI. */
-    public static function osFamily(): string
-    {
-        return WpCli::evaluate('echo PHP_OS_FAMILY;');
-    }
-
-    /** The file's permission bits, as four octal digits ('0600'), or '' when absent. */
-    public static function mode(): string
-    {
-        return WpCli::evaluate(
-            '$f = wpmcp_trace_path();'
-            . ' echo is_file($f) ? substr(sprintf("%o", fileperms($f)), -4) : "";'
-        );
-    }
-
-    /** The `.htaccess` the plugin wrote beside the log, or '' when there is none. */
-    public static function htaccess(): string
-    {
         $encoded = WpCli::evaluate(
-            '$f = wpmcp_trace_dir() . "/.htaccess";'
-            . ' echo is_file($f) ? base64_encode((string) file_get_contents($f)) : "";'
+            '$out = "";'
+            . ' foreach (wpmcp_trace_find(' . self::php($traceId) . ') as $r) {'
+            . ' $out .= wpmcp_trace_entry($r); }'
+            . ' echo base64_encode($out);'
         );
 
         return trim($encoded) === '' ? '' : (string) base64_decode(trim($encoded), true);
+    }
+
+    /**
+     * Is $needle anywhere in any stored trace?
+     *
+     * THE SEARCH HAPPENS ON THE SITE, and that is deliberate: the alternative is shipping
+     * every retained trace through a wp-cli subprocess and into a PHPUnit constraint, which
+     * is how the file era's `contents()` killed a full-suite run - PHPUnit builds a constraint
+     * description from the expected value, and a megabyte of it made `preg_replace` give up
+     * and return null inside `LogicalNot::negate()`. A boolean cannot do that.
+     */
+    public static function contains(string $needle): bool
+    {
+        return trim(WpCli::evaluate(
+            'global $wpdb; $n = ' . self::php($needle) . '; $hit = 0;'
+            . ' foreach ($wpdb->get_results("SELECT * FROM " . wpmcp_traces_table()) as $r) {'
+            . ' if (strpos(wpmcp_trace_entry($r), $n) !== false) { $hit = 1; break; } }'
+            . ' echo $hit;'
+        )) === '1';
+    }
+
+    /** Run the plugin's own retention sweep and return how many rows it removed. */
+    public static function sweep(): int
+    {
+        return (int) trim(WpCli::evaluate('echo (int) wpmcp_trace_sweep();'));
+    }
+
+    /** The two retention caps the site is honouring: [days, rows]. */
+    public static function retention(): array
+    {
+        $raw = WpCli::evaluate('echo wpmcp_trace_keep_days(), "\t", wpmcp_trace_keep_rows();');
+        $parts = explode("\t", trim($raw));
+
+        return [(int) ($parts[0] ?? 0), (int) ($parts[1] ?? 0)];
+    }
+
+    /**
+     * Plant one trace row with a chosen id and age, and return its id.
+     *
+     * DIRECTLY THROUGH $wpdb, which is the one thing in this class that is not the plugin's
+     * own path - because there is no plugin path to a trace of a chosen AGE, and the sweep
+     * cannot be tested without one. Everything else about the row is what the plugin writes.
+     */
+    public static function plant(string $traceId, int $daysAgo): string
+    {
+        return trim(WpCli::evaluate(
+            'global $wpdb;'
+            . ' echo (int) $wpdb->insert(wpmcp_traces_table(), array('
+            . ' "trace_id" => ' . self::php($traceId) . ','
+            . ' "logged_at" => gmdate("Y-m-d H:i:s", time() - ' . (int) $daysAgo . ' * DAY_IN_SECONDS),'
+            . ' "method" => "tools/call", "tool" => "wpmcp-test-planted",'
+            . ' "user_id" => 0, "token_id" => 0, "class" => "RuntimeException",'
+            . ' "message" => "wpmcp-test planted trace", "at" => "planted.php:1",'
+            . ' "data" => "", "stack" => "#0 {main}"));'
+        ));
+    }
+
+    /** Remove every trace this run planted, by tool name. Teardown only. */
+    public static function forgetPlanted(): void
+    {
+        WpCli::tryEvaluate(
+            'global $wpdb;'
+            . ' echo (int) $wpdb->delete(wpmcp_traces_table(), array("tool" => "wpmcp-test-planted"));'
+        );
+    }
+
+    /** Does the traces table exist on this site? */
+    public static function tableExists(): bool
+    {
+        return trim(WpCli::evaluate(
+            'global $wpdb; $t = wpmcp_traces_table();'
+            . ' echo (int) ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t)) === $t);'
+        )) === '1';
+    }
+
+    /* ----------------------------------------------------------------
+     * 1.1.1's log FILE, which revision 7 deletes
+     * -------------------------------------------------------------- */
+
+    /** The content planted in the fake log, so the test can say the file it found was ours. */
+    public const LEGACY_BODY = "2026-01-01T00:00:00+00:00 trace=deadbeef class=RuntimeException\n"
+        . "    #0 wpmcp-test planted by the upgrade test\n";
+
+    /**
+     * Recreate 1.1.1's trace log exactly as that version left it: the directory, a
+     * `trace-<32 hex>.log` with content, the empty `index.php`, the `.htaccess`, the three
+     * options and the transient. Returns the log file's name.
+     *
+     * A SITE UPGRADING FROM 1.1.1 HAS ALL OF THIS, and every piece of it is what revision 7
+     * has to take: the file is the exposure (nginx serves it, MEASURED), the directory is
+     * what makes the URL exist, and the options are rows nothing will ever read again.
+     */
+    public static function plantLegacyFile(): string
+    {
+        $name = trim(WpCli::evaluate(
+            '$dir = WP_CONTENT_DIR . "/wpmcp"; wp_mkdir_p($dir);'
+            . ' $name = "trace-" . bin2hex(random_bytes(16)) . ".log";'
+            . ' file_put_contents($dir . "/" . $name, base64_decode("'
+            . base64_encode(self::LEGACY_BODY) . '"));'
+            . ' file_put_contents($dir . "/index.php", "<?php\n// Silence is golden.\n");'
+            . ' file_put_contents($dir . "/.htaccess", "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n");'
+            . ' update_option("wpmcp_trace_log_name", $name);'
+            . ' update_option("wpmcp_trace_log_readable", array("state" => "readable", "reason" => "", "checked_at" => gmdate("c")));'
+            . ' update_option("wpmcp_trace_log_unwritable", 1);'
+            . ' set_transient("wpmcp_trace_checked", 1, DAY_IN_SECONDS);'
+            . ' echo $name;'
+        ));
+
+        return $name;
+    }
+
+    /**
+     * What of 1.1.1's log is still on the site: the directory, each file, and each option.
+     *
+     * @return array<string, bool>
+     */
+    public static function legacyState(): array
+    {
+        $raw = WpCli::evaluate(
+            '$dir = WP_CONTENT_DIR . "/wpmcp";'
+            . ' $logs = glob($dir . "/trace-*.log") ?: array();'
+            . ' echo (int) is_dir($dir), "\t", count($logs), "\t",'
+            . ' (int) is_file($dir . "/index.php"), "\t", (int) is_file($dir . "/.htaccess"), "\t",'
+            . ' (int) is_file($dir . "/trace.log"), "\t",'
+            . ' (int) (get_option("wpmcp_trace_log_name", null) !== null), "\t",'
+            . ' (int) (get_option("wpmcp_trace_log_readable", null) !== null), "\t",'
+            . ' (int) (get_option("wpmcp_trace_log_unwritable", null) !== null), "\t",'
+            . ' (int) (get_transient("wpmcp_trace_checked") !== false);'
+        );
+
+        $p = explode("\t", trim($raw));
+
+        return [
+            'directory'      => ($p[0] ?? '0') === '1',
+            'logs'           => (int) ($p[1] ?? 0) > 0,
+            'index'          => ($p[2] ?? '0') === '1',
+            'htaccess'       => ($p[3] ?? '0') === '1',
+            'legacy_log'     => ($p[4] ?? '0') === '1',
+            'name_option'    => ($p[5] ?? '0') === '1',
+            'readable_option' => ($p[6] ?? '0') === '1',
+            'unwritable_option' => ($p[7] ?? '0') === '1',
+            'transient'      => ($p[8] ?? '0') === '1',
+        ];
+    }
+
+    /**
+     * Remove 1.1.1's log and options, whatever state a killed run left them in. Teardown
+     * only, and it is the same set revision 7's migration removes - so on a green run it
+     * finds nothing, and on a crashed one it stops a planted file being left under the
+     * document root, which is the exposure this whole sprint is about.
+     */
+    public static function forgetLegacyFile(): void
+    {
+        WpCli::tryEvaluate(
+            '$dir = WP_CONTENT_DIR . "/wpmcp";'
+            . ' foreach (array_merge(glob($dir . "/trace-*.log") ?: array(),'
+            . ' array($dir . "/trace.log", $dir . "/index.php", $dir . "/.htaccess")) as $f) {'
+            . ' if (is_file($f)) { @unlink($f); } }'
+            . ' if (is_dir($dir)) { @rmdir($dir); }'
+            . ' delete_option("wpmcp_trace_log_name");'
+            . ' delete_option("wpmcp_trace_log_readable");'
+            . ' delete_option("wpmcp_trace_log_unwritable");'
+            . ' delete_transient("wpmcp_trace_checked"); echo 1;'
+        );
+    }
+
+    /** A PHP single-quoted literal, for a `wp eval` snippet that must stay one line. */
+    private static function php(string $value): string
+    {
+        return "'" . addcslashes($value, "'\\") . "'";
     }
 }

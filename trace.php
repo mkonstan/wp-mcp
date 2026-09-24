@@ -22,207 +22,79 @@
  * the first fifteen characters of every string argument, which is a value. wpmcp_trace_stack()
  * builds the stack from getTrace() and writes each argument's SHAPE instead - see there.
  *
- * WHY THE FILE NAME IS RANDOM. The first version wrote wp-content/wpmcp/trace.log behind
- * an .htaccess and checked over HTTP whether that worked. It did not: .htaccess is an
- * APACHE file, nginx neither reads nor serves it, and on the development host
- * `GET /wp-content/wpmcp/trace.log` returned 200 with 14 KB of absolute paths, the OS
- * username, the plugin inventory, tool names, user ids and every stack frame's arguments -
- * to anybody, with no token. The plugin NOTICED and carried on writing, which made the
- * self-check an observation rather than a guard.
+ * SINCE 1.1.2 A TRACE IS A ROW, NOT A LINE IN A FILE, and the whole reason is that a file
+ * could not be made private on the hosts most sites run on. `wp-content/wpmcp/trace.log`
+ * sat behind an `.htaccess`, which is an APACHE file: nginx has no per-directory config and
+ * never reads it. MEASURED on the development host - `GET /wp-content/wpmcp/trace.log`
+ * returned 200 with 14 KB of absolute paths, the OS username, the plugin inventory, tool
+ * names, user ids and every stack frame - to anybody, with no token. Randomising the file
+ * name bought secrecy and nothing more: the URL still existed and a directory listing still
+ * handed it over. A TABLE CANNOT BE SERVED OVER HTTP AT ALL, so the whole class of failure
+ * is gone rather than mitigated, and with it two sprints of machinery: the guard files, the
+ * daily HTTP self-check, both admin notices, the size cap, the keep-newest-75% rewrite, the
+ * absorb-and-retry trim, the short-write retry, flock, fstat and ftruncate. Atomicity is the
+ * database's problem now - one INSERT either happens or does not. See analysis/53 D25.
  *
- * So the name is now `trace-<32 hex>.log`, generated once from random_bytes and kept in
- * the `wpmcp_trace_log_name` option. The URL is not derivable from anything a client sees:
- * not from the endpoint, not from an error response, not from the directory (index.php is
- * empty), not from a guess. Server configuration becomes belt-and-braces rather than the
- * only thing between a stranger and the log - .htaccess and index.php stay, the self-check
- * stays (it now probes the real name, so it catches a directory listing), and the operator
- * warning is raised site-wide rather than on one settings page nobody has to visit.
+ * THE OBJECTION THAT DID NOT SURVIVE, recorded so it is not re-made: a trace must survive a
+ * broken database, since database failures are among the things it records. It cannot happen.
+ * If the database is genuinely down WordPress never boots, the visitor gets "Error
+ * establishing a database connection" and this plugin is not running to log anything. The
+ * realistic case is a SINGLE query failing - bad SQL in `sql-select`, a missing table, a
+ * deadlock - where the connection is fine and an INSERT succeeds.
  *
- * THE FILE IS BOUNDED SINCE 1.1.1, at 2 MiB, and the direction it is cut in is not a detail:
- * the newest entries survive and the oldest go, because this boundary hands a caller a trace id
- * and tells it to quote that id. See wpmcp_trace_log_max_bytes() for the measurement behind the
- * number and wpmcp_trace_cap_file() for why the opposite choice would be worse than no cap.
+ * THE TWO COSTS OF A TABLE, DESIGNED AGAINST RATHER THAN DISCOVERED. (1) A trace now rides
+ * in every database backup, export and staging clone, where a file did not - so retention is
+ * DAYS, and both caps are below. (2) `sql-select` must refuse this table the way it already
+ * refuses the token table, or a caller reads straight through the boundary the rest of the
+ * plugin maintains: see wpmcp_sql_denied_identifiers() in tools.php.
+ *
+ * THE ONE PROMISE, UNCHANGED FROM THE FILE ERA: the boundary hands a caller an eight-hex
+ * trace id and tells it to quote that id, so the id must still resolve for the person
+ * supporting the site. That is why `trace_id` is INDEXED and why the settings screen has a
+ * single lookup on it - see wpmcp_trace_find() and admin.php.
  */
 if (!defined('ABSPATH')) { exit; }
 
-/** Option holding this site's trace-log file name. See wpmcp_trace_file_name(). */
-define('WPMCP_TRACE_NAME_OPTION', 'wpmcp_trace_log_name');
+/**
+ * How many days of traces are kept, and how many rows at most. Filterable; both floored.
+ *
+ * SEVEN DAYS, AND THE NUMBER IS THE FIRST COST. A trace now sits in every database backup
+ * and every staging clone, so "for ever" is not available - but a support case opened on
+ * Monday still has to be answerable on Friday, and one working week is the shortest span
+ * that is true of. Past that the id a caller was given stops resolving, which is the price
+ * of not carrying stack traces into every copy of the database anybody ever takes.
+ *
+ * TWO THOUSAND ROWS AS WELL AS SEVEN DAYS, because the age cap alone is unbounded in SIZE:
+ * a site in a retry loop can write a hundred thousand rows inside its window and the
+ * operator's next backup carries all of them. MEASURED 2026-09-24 (analysis/62): mean entry
+ * 2,283 bytes, and 763 entries in eleven days on a development site under continuous suite
+ * load - 69 failures a day, far more than a real site sees. Seven days at that rate is 486
+ * rows, about 1.1 MB. The row cap bites at 286 failures a day, four times that rate, and
+ * holds the worst case at 2,000 rows - about 4.6 MB, which is the hard ceiling this feature
+ * adds to a backup.
+ *
+ * AND IT IS THE OLDEST ROWS THAT GO, for the reason the file's cap was cut the same way: the
+ * newest entry is the one whose id was issued a moment ago and is about to be quoted.
+ *
+ * A USELESS FILTERED VALUE IS IGNORED RATHER THAN OBEYED, which is the wpmcp_file_versions_keep
+ * rule: zero days or ten rows would throw away the entry whose id the caller is holding, and
+ * that is far likelier to be a mistake than a decision.
+ */
+define('WPMCP_TRACE_KEEP_DAYS', 7);
+define('WPMCP_TRACE_KEEP_ROWS', 2000);
 
 /**
- * Option holding the last self-check's outcome: array('state', 'reason', 'checked_at').
- * The name is historical - it now holds three answers, not a boolean.
+ * The most stack frames one row stores.
+ *
+ * THE ONE VALUE THE FILE'S BYTE CAP USED TO BOUND AND A COLUMN DOES NOT. Every other field
+ * is cut at 2,000 characters by wpmcp_trace_field(); the stack was not, because the file had
+ * a 2 MiB ceiling over the whole thing. A runaway recursion produces thousands of frames, so
+ * without this one row could be a megabyte - and it would ride in every backup 2,000 times
+ * over. Two hundred frames is far past the depth anybody reads and is about 30 KB at the
+ * measured frame length; what is dropped is the MIDDLE of the call chain, and the line saying
+ * so is in the stack itself.
  */
-define('WPMCP_TRACE_EXPOSED_OPTION', 'wpmcp_trace_log_readable');
-
-/** The three self-check outcomes. See wpmcp_trace_selfcheck(). */
-define('WPMCP_TRACE_READABLE', 'readable');
-define('WPMCP_TRACE_NOT_READABLE', 'not_readable');
-define('WPMCP_TRACE_UNVERIFIED', 'unverified');
-
-/** Option set when a trace could not be written to the log and went to error_log(). */
-define('WPMCP_TRACE_UNWRITABLE_OPTION', 'wpmcp_trace_log_unwritable');
-
-/** Transient that keeps the self-check to once a day. */
-define('WPMCP_TRACE_CHECK_TRANSIENT', 'wpmcp_trace_checked');
-
-/** The name the log used to have, before it was made unguessable. Deleted on sight. */
-define('WPMCP_TRACE_LEGACY_NAME', 'trace.log');
-
-/**
- * The log's size cap in bytes: two mebibytes. See wpmcp_trace_log_max_bytes() for the
- * measurement behind the number and for how an operator moves it.
- */
-define('WPMCP_TRACE_LOG_MAX_BYTES', 2097152);
-
-/**
- * A filtered cap below this is REJECTED and the default stands. 64 KiB is about twenty-eight
- * entries at the measured mean: small enough to be a deliberate choice, large enough that the
- * entry being written can never be the thing a truncation discards.
- *
- * NAMED FOR REJECTING, NOT FOR CLAMPING, and it was called `WPMCP_TRACE_LOG_MIN_CAP` until round 2
- * of this sprint - a name that promises a floor the code does not implement. A filter returning
- * 1,024 does not get a 64 KiB log, it gets the 2 MiB default, which is the wpmcp_file_versions_keep
- * rule: a useless value is far likelier to be a mistake than a decision, and quietly honouring a
- * mistake is worse than ignoring it. The behaviour is the one we want and the README already
- * described it correctly, so the NAME moved rather than the code.
- */
-define('WPMCP_TRACE_LOG_CAP_REJECT_BELOW', 65536);
-
-/**
- * How much of the cap survives a truncation, as a percentage.
- *
- * NOT 100. Cutting back to exactly the cap would put the file one entry under it, and the very
- * next traced failure would rewrite the whole thing again - a megabyte read and a megabyte
- * written per failure, for ever. Seventy-five per cent leaves a quarter of the cap as headroom,
- * which at the measured 2.3 KB mean entry is about 230 failures between rewrites.
- */
-define('WPMCP_TRACE_LOG_KEEP_PERCENT', 75);
-
-/** The directory the log and its two guard files live in. */
-function wpmcp_trace_dir() {
-    return WP_CONTENT_DIR . '/wpmcp';
-}
-
-/**
- * This site's log file name: `trace-<32 hex>.log`, generated once and remembered.
- *
- * add_option() RATHER THAN update_option(), because two requests can arrive at an empty
- * option at the same time and the second must lose rather than rename the log out from
- * under the first: add_option() returns false when the row already exists, and the value
- * is then re-read. The option is autoloaded, so a normal request pays nothing for it.
- *
- * The stored value is validated on every read. Anything that is not exactly this shape -
- * a hand-edited option, a truncated row, a migration that copied a different site's
- * wp_options - is replaced rather than trusted, because this string becomes a file path.
- */
-function wpmcp_trace_file_name() {
-    $name = (string) get_option(WPMCP_TRACE_NAME_OPTION, '');
-
-    if (preg_match('/^trace-[0-9a-f]{32}\.log$/', $name) === 1) { return $name; }
-
-    $fresh = 'trace-' . bin2hex(random_bytes(16)) . '.log';
-
-    if (!add_option(WPMCP_TRACE_NAME_OPTION, $fresh, '', 'yes')) {
-        $stored = (string) get_option(WPMCP_TRACE_NAME_OPTION, '');
-
-        if (preg_match('/^trace-[0-9a-f]{32}\.log$/', $stored) === 1) { return $stored; }
-
-        update_option(WPMCP_TRACE_NAME_OPTION, $fresh);
-    }
-
-    return $fresh;
-}
-
-/** The log file itself. */
-function wpmcp_trace_path() {
-    return wpmcp_trace_dir() . '/' . wpmcp_trace_file_name();
-}
-
-/** The URL the log WOULD be served at, which is exactly what the self-check asks about. */
-function wpmcp_trace_url() {
-    return content_url('wpmcp/' . wpmcp_trace_file_name());
-}
-
-/**
- * Create the directory, its two guard files, and an empty log.
- *
- * Called on activation and, because activation never fires for a plugin updated in place,
- * before every write.
- *
- * THE EMPTY LOG IS CREATED ON PURPOSE. A self-check that fetches a URL with no file behind
- * it gets 404 from any server, correctly configured or not, so without this the check
- * would be green on every host and would mean nothing. An empty file makes the question
- * answerable.
- *
- * 0600 ON THE LOG. The umask default is 0644 (measured) and wp_mkdir_p gives the directory
- * 0755, so on a shared host whose parent path is traversable another account could read
- * it. chmod costs nothing and is not a substitute for the random name - it is the same
- * belt-and-braces reasoning.
- *
- * THE LEGACY trace.log IS DELETED. A site that ran the first version of this file has a
- * predictably-named, world-readable log already sitting there, full of the traces this
- * change exists to hide. Leaving it would make the fix cosmetic.
- *
- * Returns true when the directory exists and is writable.
- */
-function wpmcp_trace_ensure_dir() {
-    $dir = wpmcp_trace_dir();
-
-    if (!is_dir($dir) && !wp_mkdir_p($dir)) { return false; }
-
-    // index.php: an empty PHP file, so a server with directory indexes on shows nothing.
-    // The only .php file this plugin writes outside the theme, so it is the only other
-    // place the "a write is not finished until the opcode cache is told" rule reaches.
-    // It matters on a reinstall: uninstall deletes this path, and with
-    // opcache.validate_timestamps off the cache can still hold whatever was compiled from
-    // it. Invalidated only when we actually wrote, so a request that finds the file
-    // already there costs nothing.
-    $index = $dir . '/index.php';
-    if (!file_exists($index)) {
-        @file_put_contents($index, "<?php\n// Silence is golden.\n");
-        wpmcp_opcache_invalidate($index);
-    }
-
-    // .htaccess: Apache only, and written the way core writes its own.
-    //
-    // `Deny from all` on its own is an UNKNOWN DIRECTIVE on Apache 2.4 built without
-    // mod_access_compat, and an unknown directive in an .htaccess turns the whole
-    // directory into a 500 - which is "not readable", but by breaking the server rather
-    // than by configuring it. Each spelling therefore sits behind the IfModule that makes
-    // it legal, 2.4's first.
-    //
-    // REWRITTEN WHEN IT IS THE OLD ONE, not only when it is missing. The first version of
-    // this file wrote a bare `Deny from all` followed by a 2.4 block, and a site that ran
-    // it already has that on disk; "write only if absent" would leave every upgraded site
-    // with the unguarded directive and the 500 risk. The marker is the NEGATED block, which
-    // only the corrected content has, so a hand-edited file that keeps it is left alone.
-    $htaccess = $dir . '/.htaccess';
-    $current  = is_file($htaccess) ? (string) @file_get_contents($htaccess) : '';
-
-    if (strpos($current, '<IfModule !mod_authz_core.c>') === false) {
-        @file_put_contents(
-            $htaccess,
-            "<IfModule mod_authz_core.c>\n"
-            . "\tRequire all denied\n"
-            . "</IfModule>\n"
-            . "<IfModule !mod_authz_core.c>\n"
-            . "\tOrder deny,allow\n"
-            . "\tDeny from all\n"
-            . "</IfModule>\n"
-        );
-    }
-
-    $legacy = $dir . '/' . WPMCP_TRACE_LEGACY_NAME;
-    if (is_file($legacy)) { @unlink($legacy); }
-
-    $log = wpmcp_trace_path();
-    if (!file_exists($log)) {
-        @file_put_contents($log, '');
-        @chmod($log, 0600);
-    }
-
-    return is_writable($dir);
-}
+define('WPMCP_TRACE_STACK_FRAMES', 200);
 
 /** Eight hex digits. Short enough to read out loud, long enough to grep for. */
 function wpmcp_trace_new_id() {
@@ -294,382 +166,191 @@ function wpmcp_trace_wp_error($error, $method = '', $tool = '') {
 }
 
 /**
- * One trace, one line, plus the stack indented under it.
+ * One trace, one row in `wp_wpmcp_traces`. Returns the trace id either way.
  *
- * ISO timestamp, trace id, method, tool, user id, token row id, class, message, file:line,
- * WP_Error data - in that order, as `key=value`, so a grep for `trace=1a2b3c4d` finds the
- * whole event and a log shipper can parse the fields. Newlines in a value are flattened;
- * the stack is the only thing allowed more than one line, and every one of its lines is
- * indented four spaces so the "an event starts at column 0" rule holds.
+ * The fields are the file era's, unchanged: time, trace id, method, tool, user id, token
+ * row id, class, message, file:line, WP_Error data, stack.
  *
- * THE STACK CARRIES ARGUMENT SHAPES AND NOT ARGUMENT VALUES (1.1.1) - see
- * wpmcp_trace_stack(), which replaced getTraceAsString() for exactly that reason.
+ * SEPARATE COLUMNS RATHER THAN ONE JSON PAYLOAD, and the reason is the sweep and the
+ * lookup. Both caps below key on `logged_at`, and the lookup keys on `trace_id`, so at
+ * least two fields have to be columns whatever else happens - and once a row is half
+ * columns and half payload, every reader needs to know which half a field is in. They are
+ * also each a natural width: `trace_id` is eight characters, the two ids are integers, and
+ * `message`, `data` and `stack` are the only three that can be long. A payload would buy
+ * nothing but a json_decode on the one screen that reads a row.
+ *
+ * `trace_id` IS INDEXED AND NOT UNIQUE. Indexed because looking one up by id is the only
+ * read that matters - it is what the boundary's promise reduces to. Not unique, because a
+ * duplicate would then make the INSERT fail and the entry would be lost at the exact moment
+ * its id went out on the wire; eight hex is 4.3 billion values against at most 2,000 rows,
+ * so a collision is vanishingly unlikely, and if one ever happens the lookup shows both
+ * rows rather than hiding the one being asked about.
  *
  * NEVER THE RAW TOKEN. The token is identified by its ROW ID, which is what the admin table
  * already shows, exactly as the auth events do.
  *
- * A FAILED WRITE FALLS BACK TO error_log(), and says so. The previous version returned a
- * trace id and wrote nothing whenever the directory was unwritable or file_put_contents
- * failed - both hidden behind `@` - so the client held a reference to an event that existed
- * nowhere. Silence is the one outcome the rule this file implements forbids: error_log() is
- * private on every host by default and is already where the auth events go, so the trace
- * survives, and an option turns the site-wide admin notice on so somebody fixes the
- * directory.
- *
- * THE APPEND ITSELF LIVES IN wpmcp_trace_append() SINCE 1.1.1, because it now also holds the
- * file under a size cap - and the cap reads the size off the descriptor the write already has
- * open, which is the whole reason the write is no longer one file_put_contents() call.
+ * A FAILED INSERT FALLS BACK TO error_log(), unchanged from the file era and for the same
+ * reason: the client is holding a reference to this event, and silence is the one outcome
+ * the rule this file implements forbids. error_log() is private on every host by default
+ * and is already where the auth events go. There is no admin notice behind it any more -
+ * the two the file needed were about the file, and the one case left is a missing table,
+ * which the installer retries on the next request.
  */
 function wpmcp_trace_record($class, Throwable $e, $method = '', $tool = '', $data = '') {
+    global $wpdb;
+
     $id      = wpmcp_trace_new_id();
     $session = isset($GLOBALS['wpmcp_session']) ? $GLOBALS['wpmcp_session'] : null;
 
-    $fields = array(
-        gmdate('c'),
-        'trace=' . $id,
-        'method=' . wpmcp_trace_field($method),
-        'tool=' . wpmcp_trace_field($tool),
-        'user=' . ($session ? (int) $session->user_id : 0),
-        'token=' . ($session ? (int) $session->id : 0),
-        'class=' . wpmcp_trace_field($class),
-        'message=' . wpmcp_trace_field($e->getMessage()),
-        'at=' . wpmcp_trace_field($e->getFile() . ':' . $e->getLine()),
+    $row = array(
+        'trace_id'  => $id,
+        'logged_at' => gmdate('Y-m-d H:i:s'),
+        'method'    => wpmcp_trace_field($method),
+        'tool'      => wpmcp_trace_field($tool),
+        'user_id'   => $session ? (int) $session->user_id : 0,
+        'token_id'  => $session ? (int) $session->id : 0,
+        'class'     => wpmcp_trace_field($class),
+        'message'   => wpmcp_trace_field($e->getMessage()),
+        'at'        => wpmcp_trace_field($e->getFile() . ':' . $e->getLine()),
+        'data'      => $data === '' ? '' : wpmcp_trace_field($data),
+        'stack'     => implode("\n", wpmcp_trace_stack($e)),
     );
 
-    if ($data !== '') { $fields[] = 'data=' . wpmcp_trace_field($data); }
+    // $wpdb->insert() rather than a prepared INSERT: it is the platform API for exactly
+    // this, it escapes every value under the connection's charset, and the format list
+    // makes the two integer columns integers rather than quoted strings.
+    $written = $wpdb->insert(
+        wpmcp_traces_table(),
+        $row,
+        array('%s', '%s', '%s', '%s', '%d', '%d', '%s', '%s', '%s', '%s', '%s')
+    );
 
-    $line  = implode(' ', $fields);
-    $stack = '';
-
-    foreach (wpmcp_trace_stack($e) as $frame) {
-        $stack .= '    ' . $frame . "\n";
-    }
-
-    $entry   = $line . "\n" . $stack;
-    $written = false;
-
-    if (wpmcp_trace_ensure_dir()) {
-        $written = wpmcp_trace_append($entry);
-    }
-
-    if ($written) {
-        if (get_option(WPMCP_TRACE_UNWRITABLE_OPTION, 0)) {
-            delete_option(WPMCP_TRACE_UNWRITABLE_OPTION);
-        }
-    } else {
-        // The trace still exists somewhere, and the operator is told where.
-        error_log('wp-mcp trace (log file unwritable) ' . $entry);
-        update_option(WPMCP_TRACE_UNWRITABLE_OPTION, 1);
+    if (!$written) {
+        error_log('wp-mcp trace (could not be stored) ' . wpmcp_trace_entry($row));
     }
 
     return $id;
 }
 
 /**
- * The log's size cap in bytes. 2 MiB by default, filterable, floored.
+ * One stored trace as the text the file used to hold: a `key=value` header line, with the
+ * stack indented four spaces under it.
  *
- * WHY THERE IS A CAP AT ALL, MEASURED 2026-09-24 on the two development sites: 1,743,937 bytes
- * over 763 entries and 1,504,358 over 660, both written in eleven days and neither ever rotated,
- * truncated or aged out. That is the SHIPPED behaviour on every site this plugin is installed on,
- * and on a customer host nothing ever comes along to clean it up. D24 chose a size cap with
- * truncation over rotate-N (three files instead of one, and the operator has to know which) and
- * over age-out (a quiet site keeps a year, a loud one fills the disk in a day).
+ * THE SHAPE IS KEPT ON PURPOSE. It is what the error_log() fallback writes, what the
+ * settings screen prints, and what every operator who has read this plugin's log before
+ * already knows how to read - `grep trace=1a2b3c4d` still finds the event. An empty value
+ * is written `""` so the line stays parseable; that is a property of the LINE and not of
+ * the column, which simply holds ''.
  *
- * TWO MEBIBYTES, AND THE NUMBER IS THE MEASUREMENT. At the measured mean entry of 2,283 bytes it
- * holds about 900 traced failures. The two development sites above are sites under continuous
- * suite load - a real site producing traces at that rate has a bug storm - and 2 MiB is just
- * ABOVE both of them, so installing 1.1.1 does not by itself throw away anybody's current log;
- * the cap starts biting on the next megabyte, which is the growth it exists to stop.
- *
- * A FILTER RATHER THAN A CONSTANT, and rather than a settings field. The precedent is
- * wpmcp_file_versions_keep(): a retention number that one host in fifty wants to move, where a
- * screen would cost a field, a label, a sanitiser and a row in the options table for a decision
- * almost nobody makes. The operator-visible part of this feature is not the number, it is the
- * line the truncation writes into the file itself - see wpmcp_trace_cap_file().
- *
- * A USELESS VALUE IS IGNORED RATHER THAN OBEYED, the same way the version cap ignores "keep
- * zero". A cap below one entry's worth would make every write truncate the entry it had just
- * written, which is the exact failure this whole item is shaped to avoid.
+ * @param array|object $row a row of `wp_wpmcp_traces`, or the array about to become one.
  */
-function wpmcp_trace_log_max_bytes() {
-    $max = apply_filters('wpmcp_trace_log_max_bytes', WPMCP_TRACE_LOG_MAX_BYTES);
-    $max = is_numeric($max) ? (int) $max : 0;
+function wpmcp_trace_entry($row) {
+    $row = (array) $row;
 
-    return $max >= WPMCP_TRACE_LOG_CAP_REJECT_BELOW ? $max : WPMCP_TRACE_LOG_MAX_BYTES;
+    $value = static function ($key) use ($row) {
+        $v = isset($row[$key]) ? (string) $row[$key] : '';
+
+        return $v === '' ? '""' : $v;
+    };
+
+    $fields = array(
+        isset($row['logged_at']) ? gmdate('c', strtotime((string) $row['logged_at'] . ' UTC')) : gmdate('c'),
+        'trace=' . $value('trace_id'),
+        'method=' . $value('method'),
+        'tool=' . $value('tool'),
+        'user=' . (int) ($row['user_id'] ?? 0),
+        'token=' . (int) ($row['token_id'] ?? 0),
+        'class=' . $value('class'),
+        'message=' . $value('message'),
+        'at=' . $value('at'),
+    );
+
+    if ((string) ($row['data'] ?? '') !== '') { $fields[] = 'data=' . $value('data'); }
+
+    $entry = implode(' ', $fields) . "\n";
+
+    foreach (explode("\n", (string) ($row['stack'] ?? '')) as $frame) {
+        if ($frame !== '') { $entry .= '    ' . $frame . "\n"; }
+    }
+
+    return $entry;
 }
 
 /**
- * Append one entry to the log and hold the file under its cap. True when the bytes landed.
+ * The rows carrying this trace id, newest first. Empty when there are none.
  *
- * WHY fopen/flock/fwrite AND NOT file_put_contents(FILE_APPEND|LOCK_EX), which is what this was.
- * The cap has to know the file's size, and the cheapest place to learn it is the descriptor the
- * write already has open: fstat() on an open handle costs one syscall and no path resolution,
- * where filesize() or a bare stat() resolves the path again and is subject to PHP's stat cache.
- * `ftell()` would be cheaper still and is NOT usable - measured on this project's PHP (8.2.29):
- * in append mode ftell() returns 4 after a 4-byte write to a 1,000-byte file, because O_APPEND
- * writes at the end while the stream's own position does not follow. fstat() returned 1,004.
+ * THE ID IS CHECKED AGAINST ITS OWN SHAPE BEFORE IT REACHES A QUERY, which is what keeps
+ * this a LOOKUP and not a search: eight lower-case hex digits or nothing at all. A caller
+ * cannot widen it into `%`, into an empty string that would match everything, or into a
+ * second condition. Five rows at most, because an id is one event - the limit exists only
+ * so a collision cannot turn one paste into an unbounded read.
  *
- * THE COST PER WRITE, STATED PLAINLY, because this runs on every traced failure: one fstat() on
- * a descriptor that is already open and already locked, added to the open, the lock, the write
- * and the close that the append cost before. There is no sampling and none is needed - a trace
- * is written when something has already broken, never on a healthy request, and the failure that
- * produced it cost orders of magnitude more than a stat. The REWRITE is the expensive part, and
- * it happens once per quarter-cap of new log (about 230 failures), never per write.
- *
- * LOCK_EX IS HELD ACROSS THE WHOLE THING, so no second writer can append into a file that is
- * being rewritten. A READER can still see the file mid-rewrite, and that is the accepted cost of
- * rewriting in place rather than writing a temp file and renaming: a rename would put a new inode
- * under every other writer's lock, which is worse than a reader seeing a short file for a few
- * milliseconds once every few hundred failures.
- *
- * AND THE LOCK IS NOT ASSUMED TO WORK. `flock` succeeds and protects nothing on NFS and on some
- * shared hosting, so wpmcp_trace_cap_file() re-checks the file's size immediately before it cuts
- * and absorbs anything that arrived rather than discarding it. That is round 2 of this sprint, and
- * it is there because the cap changed the cost of the race: without a cap a lock-less host could
- * tear an entry, with one it could lose an entry whose id was already quoted.
+ * @return array<int, object>
  */
-function wpmcp_trace_append($entry) {
-    // 'ab+' rather than 'ab': the cap has to READ the tail it is going to keep, and a handle
-    // opened write-only cannot. Writes still always land at the end - that is what O_APPEND
-    // means - so seeking to read cannot make the next append overwrite anything.
-    $handle = @fopen(wpmcp_trace_path(), 'ab+');
+function wpmcp_trace_find($traceId) {
+    global $wpdb;
 
-    if (!$handle) { return false; }
+    $traceId = strtolower(trim((string) $traceId));
 
-    if (!flock($handle, LOCK_EX)) {
-        fclose($handle);
+    if (preg_match('/^[0-9a-f]{8}$/', $traceId) !== 1) { return array(); }
 
-        return false;
-    }
+    $rows = $wpdb->get_results($wpdb->prepare(
+        'SELECT * FROM ' . wpmcp_traces_table() . ' WHERE trace_id = %s ORDER BY id DESC LIMIT 5',
+        $traceId
+    ));
 
-    $written = @fwrite($handle, $entry);
-    $ok      = ($written === strlen($entry));
+    return is_array($rows) ? $rows : array();
+}
 
-    if ($ok) {
-        $stat = fstat($handle);
-        $size = (is_array($stat) && isset($stat['size'])) ? (int) $stat['size'] : 0;
-        $max  = wpmcp_trace_log_max_bytes();
+/** Days of traces kept. Filterable; a value under one day is ignored. */
+function wpmcp_trace_keep_days() {
+    $days = (int) apply_filters('wpmcp_trace_keep_days', WPMCP_TRACE_KEEP_DAYS);
 
-        if ($size > $max) {
-            $incomplete = false;
+    return $days >= 1 ? $days : WPMCP_TRACE_KEEP_DAYS;
+}
 
-            wpmcp_trace_cap_file($handle, $size, $max, strlen($entry), $incomplete);
+/** Rows of traces kept. Filterable; a value under a hundred is ignored. */
+function wpmcp_trace_keep_rows() {
+    $rows = (int) apply_filters('wpmcp_trace_keep_rows', WPMCP_TRACE_KEEP_ROWS);
 
-            // A REWRITE THAT COULD NOT BE FINISHED UNWRITES THE ENTRY (round 2). The bytes went in
-            // and the trim then truncated the file and could not put them all back, so the entry
-            // this call was made for is no longer whole in the log - and its id is already on its
-            // way to a caller. Answering false is not a lie about the append, it is the truth about
-            // the LOG: wpmcp_trace_record() then sends the whole entry to error_log() and raises
-            // the operator notice, through the fallback that has existed for an unwritable
-            // directory. Reusing that path rather than adding one is deliberate - there is exactly
-            // one place in this file that decides what happens when the log cannot hold a trace.
-            if ($incomplete) { $ok = false; }
-        }
-    }
-
-    flock($handle, LOCK_UN);
-    fclose($handle);
-
-    return $ok;
+    return $rows >= 100 ? $rows : WPMCP_TRACE_KEEP_ROWS;
 }
 
 /**
- * Bring an over-cap log back under its cap by discarding its OLDEST entries. Returns bytes
- * discarded, 0 when nothing was.
+ * Drop traces past either cap. Returns how many rows went.
  *
- * **THE DIRECTION IS THE WHOLE DESIGN, AND IT IS EASY TO GET BACKWARDS.** The boundary hands a
- * caller an eight-hex trace id and tells it to quote that id to the operator. A cap that kept the
- * head of the file and dropped the tail would therefore be WORSE THAN NO CAP: the entry it threw
- * away would be the newest one, which is precisely the one somebody is about to ask about, and it
- * would throw it away in the same millisecond the id was issued. So the tail survives and the
- * head goes, and tests/integration/TraceLogCapTest.php proves it the only way that counts - by
- * pushing the file past the cap, breaking something over HTTP, and looking the brand-new id up in
- * the file afterwards.
+ * CALLED FROM THE HOURLY HOOK THAT ALREADY EXISTS, `wpmcp_flush_expired`, beside the dead
+ * token rows - see wpmcp_flush_expired_cb() in wp-mcp.php. The file era had no clean-up
+ * hook at all and needed a rewrite inside every write to stay bounded; a table is swept
+ * once an hour by two DELETEs and costs a traced failure nothing.
  *
- * THE CUT LANDS ON AN ENTRY BOUNDARY, never at an arbitrary byte. An entry is a header line at
- * column 0 plus its stack indented four spaces under it, and every consumer keys on exactly that:
- * `grep trace=<id>` finds the header, a log shipper parses the header's `key=value` fields, and
- * tests/Support/TraceLog::entry() reads until the next line at column 0. A file that began
- * part-way through an entry would open with a run of orphan stack frames that reads as corruption
- * and that attaches itself to whatever entry comes next. So the keep window is scanned for the
- * first header - an ISO timestamp at column 0 - and the cut is made there.
- *
- * AND IT SAYS SO, in the log's own shape. The first line of a truncated file is a header at
- * column 0 with the cap, the bytes removed and the bytes kept, and an indented explanation under
- * it, so an operator meeting a file that is shorter than yesterday's can tell "the plugin trimmed
- * it" from "something ate it" without opening a support ticket. It deliberately carries NO
- * `trace=` field: a marker that looked like a trace event could be returned by `grep trace=` and
- * could in principle collide with an id somebody was given.
- *
- * ONE ENTRY CAN BE BIGGER THAN THE WHOLE KEEP WINDOW. Every field is bounded at 2,000 characters
- * by wpmcp_trace_field(), but the stack is not, and a runaway recursion produces thousands of
- * frames. When no header starts inside the window, or when the first one that does would leave
- * less than the entry just written, the window is taken to start at that entry instead - its own
- * start IS a boundary, and it is the one entry that must not be lost.
- *
- * TWO THINGS IT REFUSES TO DO, both added in round 2 of this sprint and both about the same
- * promise - that an id already handed to a caller still resolves:
- *
- *   it never truncates away bytes it has not READ, so an entry appended during the rewrite on a
- *   host where `flock` does nothing is absorbed rather than discarded;
- *   it never treats a SHORT write as a finished one, so the file cannot be left ending inside the
- *   newest entry with nobody told.
- *
- * @param resource $handle     open on the log in append mode, holding LOCK_EX.
- * @param int      $size       the file's size in bytes right now.
- * @param int      $max        the cap.
- * @param int      $newest     the length of the entry just appended, which must survive.
- * @param bool     $incomplete set true when the file was truncated and the kept part could not all
- *                             be written back. The log then ends inside an entry, so the caller
- *                             must treat the append as failed - see wpmcp_trace_append().
+ * THE ROW CAP IS CUT BY id AND NOT BY A SUBQUERY WITH A LIMIT. `id` is AUTO_INCREMENT, so
+ * it orders the rows exactly as `logged_at` does and more finely - two traces in the same
+ * second are still ordered - and `DELETE ... WHERE id <= n` needs no sort, no temporary
+ * table and no `DELETE FROM t WHERE id IN (SELECT ... FROM t)`, which MySQL refuses
+ * outright. MAX(id) is read from the index.
  */
-function wpmcp_trace_cap_file($handle, $size, $max, $newest, &$incomplete = null) {
-    $incomplete = false;
+function wpmcp_trace_sweep() {
+    global $wpdb;
 
-    $size   = (int) $size;
-    $max    = (int) $max;
-    $newest = (int) $newest;
+    $table = wpmcp_traces_table();
 
-    if ($size <= $max) { return 0; }
+    $gone = (int) $wpdb->query($wpdb->prepare(
+        'DELETE FROM ' . $table . ' WHERE logged_at < (UTC_TIMESTAMP() - INTERVAL %d DAY)',
+        wpmcp_trace_keep_days()
+    ));
 
-    $keep = (int) ($max * WPMCP_TRACE_LOG_KEEP_PERCENT / 100);
+    $newest = (int) $wpdb->get_var('SELECT MAX(id) FROM ' . $table);
+    $cut    = $newest - wpmcp_trace_keep_rows();
 
-    if ($keep < $newest) { $keep = $newest; }
-
-    $from = $size - $keep;
-
-    if ($from < 0) { $from = 0; }
-
-    if (fseek($handle, $from) !== 0) { return 0; }
-
-    $tail = (string) stream_get_contents($handle);
-
-    if ($tail === '') { return 0; }
-
-    // Bytes of the file this function has actually READ, which is where the read started plus how
-    // much came back - NOT $size, which was measured before the read and may already be stale.
-    $held = $from + strlen($tail);
-
-    $header = '/^\d{4}-\d\d-\d\dT/';
-    $at     = null;
-
-    if (preg_match($header, $tail) === 1) {
-        $at = 0;
-    } elseif (preg_match('/\n(\d{4}-\d\d-\d\dT)/', $tail, $m, PREG_OFFSET_CAPTURE) === 1) {
-        $at = (int) $m[1][1];
+    if ($cut > 0) {
+        $gone += (int) $wpdb->query($wpdb->prepare(
+            'DELETE FROM ' . $table . ' WHERE id <= %d',
+            $cut
+        ));
     }
 
-    if ($at === null || strlen($tail) - $at < $newest) {
-        $at = strlen($tail) - $newest;
-
-        if ($at < 0) { $at = 0; }
-    }
-
-    $tail = substr($tail, $at);
-
-    /*
-     * NEVER TRUNCATE AWAY BYTES THIS FUNCTION HAS NOT READ (round 2 of this sprint).
-     *
-     * THE HOST THIS IS ABOUT. wpmcp_trace_append() holds LOCK_EX across the whole thing, and on
-     * NFS and some shared hosting `flock` SUCCEEDS AND PROTECTS NOTHING. There another request can
-     * append an entry between the read above and the ftruncate below - and that entry's trace id
-     * has already gone out on the wire to a caller we told to quote it. The weakness is inherited
-     * (a torn entry was always possible without a lock); the CONSEQUENCE is new and is the one
-     * thing this whole item exists to prevent, because the cap turns a torn entry into a LOST one.
-     *
-     * So the file is re-stat'ed and anything that arrived is ABSORBED into the tail rather than
-     * merely deferring the cut - the promise is kept AND the file still comes down under its cap,
-     * which matters because a host busy enough to hit the race is the host that needs the cap.
-     * Abandoning is the FALLBACK, for a file that will not hold still: nothing is truncated, and
-     * the next traced failure tries again (the file is still over its cap, so one will).
-     *
-     * THREE ROUNDS, NOT A LOOP WITHOUT END. Each round costs one fstat and, at most, a read of
-     * whatever arrived. A file that is still moving after three is a file where no size is safe.
-     *
-     * WHAT THIS CANNOT CLOSE, AND IT IS STATED RATHER THAN IMPLIED: the OS can still schedule an
-     * append between the last fstat and the ftruncate. Without a working lock that window is
-     * irreducible. What changes is its WIDTH - from the whole tail read, which is up to a
-     * megabyte and a half of I/O, down to two adjacent syscalls.
-     */
-    $settled = false;
-
-    for ($round = 0; $round < 3; $round++) {
-        $stat = fstat($handle);
-        $live = (is_array($stat) && isset($stat['size'])) ? (int) $stat['size'] : -1;
-
-        if ($live === $held) { $settled = true; break; }
-
-        // Smaller than what we read means somebody else is already rewriting this file. Two
-        // rewriters is not a case to win; it is a case to leave alone.
-        if ($live < $held) { return 0; }
-
-        if (fseek($handle, $held) !== 0) { return 0; }
-
-        $extra = (string) stream_get_contents($handle);
-
-        if ($extra === '') { return 0; }
-
-        $tail .= $extra;
-        $held += strlen($extra);
-    }
-
-    if (!$settled) { return 0; }
-
-    $removed = $held - strlen($tail);
-
-    if ($removed <= 0) { return 0; }
-
-    $note = gmdate('c')
-        . ' truncated=1 cap=' . $max
-        . ' removed=' . $removed
-        . ' kept=' . strlen($tail) . "\n"
-        . "    wp-mcp trimmed this log, and this is not a corrupted file. The OLDEST entries were\n"
-        . "    discarded so the file stays under its cap; everything below this line is the NEWEST\n"
-        . "    part of it, so a trace id issued at any time since is still here. The cut was made\n"
-        . "    on an entry boundary, so no entry below begins part-way through.\n";
-
-    $out   = $note . $tail;
-    $total = strlen($out);
-
-    // TRUNCATE THEN WRITE, in that order, because O_APPEND puts every write at the end of the
-    // file and the end of a zero-length file is offset 0. The window between the two is the one
-    // place this function can lose data if the process dies inside it; it is one fwrite wide, it
-    // is entered once per few hundred failures, and the alternative - a temp file and a rename -
-    // would hand every other writer a lock on an inode that is no longer the log.
-    if (!ftruncate($handle, 0)) { return 0; }
-
-    /*
-     * A SHORT fwrite IS NOT A SUCCESSFUL ONE (round 2 of this sprint).
-     *
-     * fwrite returns the number of bytes it actually took, and on a full disk that is fewer than it
-     * was handed. The first version of this compared it against `false` alone, so a short write
-     * read as a completed one and left the file ending INSIDE the newest entry - the exact entry
-     * the cap exists to keep, with its stack and its file:line gone.
-     *
-     * So the remainder is retried while it makes PROGRESS, which is what repairs the transient case
-     * (an interrupted write) and is exactly how PHP's own fwrite treats a userland stream. A write
-     * that returns false or takes nothing is the end of it: there is no un-truncating a file, so
-     * the honest move is to REPORT it. $incomplete is what wpmcp_trace_append() reads to answer
-     * false, which sends the whole entry to error_log() through the fallback that already exists
-     * and raises the operator notice. The id the caller holds still resolves to something.
-     */
-    $put = 0;
-
-    for ($attempt = 0; $attempt < 5 && $put < $total; $attempt++) {
-        $n = @fwrite($handle, substr($out, $put));
-
-        if ($n === false || (int) $n <= 0) { break; }
-
-        $put += (int) $n;
-    }
-
-    if ($put < $total) {
-        $incomplete = true;
-
-        return 0;
-    }
-
-    return $removed;
+    return $gone;
 }
 
 /**
@@ -680,9 +361,9 @@ function wpmcp_trace_cap_file($handle, $size, $max, $newest, &$incomplete = null
  * PHP this project runs (8.2.29, `zend.exception_ignore_args=0`):
  * `#0 file(3): f('SECRETSECRETSEC...', Array, Object(stdClass))`. Fifteen characters is
  * plenty to be a value: the start of a `source_url`, of a post title, of an SQL statement, of
- * whatever a caller passed. The trace log is private and unguessable, and it is still not the
- * place for caller data - what an operator needs from a frame is which call it was and what
- * SORT of thing it was given, and that is all this writes.
+ * whatever a caller passed. The trace is private, and it is still not the place for caller
+ * data - what an operator needs from a frame is which call it was and what SORT of thing it
+ * was given, and that is all this writes.
  *
  * AN ARRAY'S KEYS ARE THE ONE EXCEPTION, and they are what makes a frame readable: the tool
  * closure's frame is `{closure}(array{source_url,filename,title})`, which names the arguments
@@ -690,16 +371,32 @@ function wpmcp_trace_cap_file($handle, $size, $max, $newest, &$incomplete = null
  * anything outside word characters is dropped, because a key can be caller-supplied too (a
  * meta key, a taxonomy name).
  *
+ * BOUNDED AT WPMCP_TRACE_STACK_FRAMES, AND THE MIDDLE IS WHAT GOES. The frames worth reading
+ * are the innermost ones, where the failure is, and the outermost ones, which say how the
+ * request got there; a runaway recursion is a repeat of the same few frames in between. The
+ * gap says how many it dropped, so nobody reads a shortened stack as a complete one.
+ *
  * The frame numbering, the `{main}` sentinel and the `[internal function]` marker are PHP's
- * own spellings, kept so that a log a reader has seen before still reads the same.
+ * own spellings, kept so that a stack a reader has seen before still reads the same.
  *
  * @return list<string>
  */
 function wpmcp_trace_stack(Throwable $e) {
     $lines  = array();
     $frames = $e->getTrace();
+    $total  = count($frames);
+    $max    = (int) WPMCP_TRACE_STACK_FRAMES;
+    $head   = (int) ($max / 2);
+    $tail   = $max - $head;
 
     foreach ($frames as $i => $frame) {
+        if ($total > $max && $i === $head) {
+            $lines[] = '#' . (int) $i . ' ... ' . ($total - $max) . ' frames omitted ('
+                . $total . ' in all, ' . $max . ' kept)';
+        }
+
+        if ($total > $max && $i >= $head && $i < $total - $tail) { continue; }
+
         $where = isset($frame['file'])
             ? $frame['file'] . '(' . (isset($frame['line']) ? (int) $frame['line'] : 0) . ')'
             : '[internal function]';
@@ -709,7 +406,7 @@ function wpmcp_trace_stack(Throwable $e) {
 
         // `args` is ABSENT, not empty, on a host with zend.exception_ignore_args=1 (PHP's own
         // production default), so "no arguments" and "arguments withheld by php.ini" are two
-        // different frames and the log says which.
+        // different frames and the stack says which.
         if (!array_key_exists('args', $frame)) {
             $args = '...';
         } else {
@@ -721,7 +418,7 @@ function wpmcp_trace_stack(Throwable $e) {
         $lines[] = '#' . (int) $i . ' ' . $where . ': ' . $call . '(' . $args . ')';
     }
 
-    $lines[] = '#' . count($frames) . ' {main}';
+    $lines[] = '#' . $total . ' {main}';
 
     return $lines;
 }
@@ -762,247 +459,18 @@ function wpmcp_trace_arg_shape($arg) {
     return gettype($arg);
 }
 
-/** One field: newlines flattened, bounded, empty written as "" so the shape stays parseable. */
+/**
+ * One field: newlines flattened, bounded.
+ *
+ * A WP_Error's data, and a throwable's message, can both be arbitrarily long, and every one
+ * of these now rides in a database backup. One event must not be able to become a megabyte
+ * of it. Newlines go because the rendered entry is one line per event and every consumer
+ * keys on that - see wpmcp_trace_entry().
+ */
 function wpmcp_trace_field($value) {
     $value = str_replace(array("\r", "\n"), ' ', (string) $value);
 
-    // A WP_Error's data, and a throwable's message, can both be arbitrarily long. One
-    // event must not be able to become a megabyte of log.
     if (strlen($value) > 2000) { $value = substr($value, 0, 2000) . '...'; }
 
-    return $value === '' ? '""' : $value;
-}
-
-/* ---------------- is the log actually private? ---------------- */
-
-/**
- * Ask this host whether it serves the trace log, and remember which of THREE answers it gave.
- *
- * STILL WORTH ASKING NOW THAT THE NAME IS SECRET, for one case: a directory listing. If
- * `wp-content/wpmcp/` is indexable the name stops being secret, and this probe - which
- * fetches the REAL file name, the same URL a stranger would have to find - is what notices.
- * A 200 here means the log is reachable by someone who knows the name, which after a
- * listing is everyone.
- *
- * THREE OUTCOMES, NAMED, BECAUSE "COULD NOT TELL" IS NOT "FINE". The first version returned
- * true/false/null and treated null as "leave the option alone", which is silent - and silent
- * is the one thing the rule this file implements forbids. CI found the case: inside a
- * @wordpress/env container the site's own URL (`http://localhost:8888/...`) is a Docker port
- * mapping that does not exist from within, so wp_remote_get returns a WP_Error and the plugin
- * knew nothing about its own log while saying nothing about it either. Managed hosts block
- * loopback the same way, so this is a production shape, not a CI artifact.
- *
- *   readable      200, and the body IS the log. Someone who knows the name can read it.
- *   not_readable  403, 404, anything else - the server refuses it. What we want.
- *   unverified    wp_remote_get failed, OR a 200 whose body is not the log (a captive
- *                 portal, a proxy error page, a WP 404 template served with 200). The
- *                 question is unanswered and the admin notice says so, with the reason.
- *
- * WHY THE BODY IS COMPARED AND NOT JUST THE STATUS. A 200 from something that is not this
- * file proves nothing in either direction: calling it `readable` raises a false alarm the
- * operator cannot act on, and calling it `not_readable` clears a warning that may be real.
- * The comparison is against the head of the file on disk - and an EMPTY log demands an empty
- * body, because a zero-length prefix matches everything.
- *
- * sslverify IS OFF, deliberately. This is a request to ourselves asking for a status code,
- * carrying no credential and trusting no content, and a development site's certificate is
- * self-signed - with verification on, the one host where the answer is "yes, it is
- * readable" would answer `unverified` instead.
- *
- * NOT ON A REST REQUEST. It is wired to admin_init, so an MCP call never pays for an
- * outbound HTTP request, and the answer is computed where it is displayed.
- *
- * Returns the state string it stored.
- */
-function wpmcp_trace_selfcheck() {
-    wpmcp_trace_ensure_dir();
-
-    $response = wp_remote_get(wpmcp_trace_url(), array(
-        'timeout'     => 5,
-        'sslverify'   => false,
-        'redirection' => 0,
-    ));
-
-    if (is_wp_error($response)) {
-        return wpmcp_trace_store_selfcheck(
-            WPMCP_TRACE_UNVERIFIED,
-            $response->get_error_message()
-        );
-    }
-
-    if ((int) wp_remote_retrieve_response_code($response) !== 200) {
-        return wpmcp_trace_store_selfcheck(WPMCP_TRACE_NOT_READABLE, '');
-    }
-
-    if (!wpmcp_trace_body_is_the_log((string) wp_remote_retrieve_body($response))) {
-        return wpmcp_trace_store_selfcheck(
-            WPMCP_TRACE_UNVERIFIED,
-            'the URL answered 200 with something that is not the log file'
-        );
-    }
-
-    return wpmcp_trace_store_selfcheck(WPMCP_TRACE_READABLE, '');
-}
-
-/**
- * Is this response body the log file?
- *
- * Compared against the head of the file rather than all of it, because this runs on an admin
- * page load and the cap still allows two megabytes. An empty log is the case a prefix check gets
- * wrong - every string starts with '' - so it is required to be exactly empty.
- *
- * A TRUNCATED LOG DOES NOT CONFUSE IT, which is the one thing worth checking here now that the
- * file can be rewritten under it: the head of a truncated file is the truncation marker, and the
- * comparison is against whatever the head is at the time it is read, not against a remembered
- * one. The cut is on an entry boundary, so the head is never a fragment either.
- */
-function wpmcp_trace_body_is_the_log($body) {
-    $path = wpmcp_trace_path();
-
-    if (!is_file($path)) { return false; }
-
-    $head = (string) @file_get_contents($path, false, null, 0, 1024);
-
-    return $head === '' ? $body === '' : strncmp($body, $head, strlen($head)) === 0;
-}
-
-/**
- * Write the outcome to the option the admin notices read. Returns the state.
- *
- * The reason is flattened and BOUNDED before it is stored: it comes from a WP_Error the
- * HTTP layer produced, it is printed on every admin screen, and a cURL error carrying a
- * whole response body would otherwise become the page. Not wpmcp_trace_field(), which
- * writes an empty value as `""` for the log's key=value shape - here empty means empty.
- */
-function wpmcp_trace_store_selfcheck($state, $reason) {
-    $reason = str_replace(array("\r", "\n"), ' ', (string) $reason);
-
-    if (strlen($reason) > 300) { $reason = substr($reason, 0, 300) . '...'; }
-
-    update_option(WPMCP_TRACE_EXPOSED_OPTION, array(
-        'state'      => (string) $state,
-        'reason'     => $reason,
-        'checked_at' => gmdate('c'),
-    ));
-
-    return (string) $state;
-}
-
-/**
- * The last self-check's outcome: one of the three states, or '' if it has never run.
- *
- * A SCALAR VALUE IN THE OPTION IS THE OLD SHAPE, and a site upgrading from it has `1`
- * sitting there meaning "readable". Read it rather than discarding it: dropping the value
- * would silently clear a real warning on exactly the sites that had one.
- */
-function wpmcp_trace_selfcheck_state() {
-    $stored = get_option(WPMCP_TRACE_EXPOSED_OPTION, '');
-
-    if (is_array($stored)) {
-        $state = isset($stored['state']) ? (string) $stored['state'] : '';
-
-        return in_array($state, array(
-            WPMCP_TRACE_READABLE,
-            WPMCP_TRACE_NOT_READABLE,
-            WPMCP_TRACE_UNVERIFIED,
-        ), true) ? $state : '';
-    }
-
-    return ((int) $stored === 1) ? WPMCP_TRACE_READABLE : '';
-}
-
-/** Why the last self-check could not answer, or '' when it could. */
-function wpmcp_trace_selfcheck_reason() {
-    $stored = get_option(WPMCP_TRACE_EXPOSED_OPTION, '');
-
-    return (is_array($stored) && isset($stored['reason'])) ? (string) $stored['reason'] : '';
-}
-
-/** Is the trace log known to be readable from the web? */
-function wpmcp_trace_log_is_exposed() {
-    return wpmcp_trace_selfcheck_state() === WPMCP_TRACE_READABLE;
-}
-
-/** Did the self-check fail to get an answer at all? */
-function wpmcp_trace_log_is_unverified() {
-    return wpmcp_trace_selfcheck_state() === WPMCP_TRACE_UNVERIFIED;
-}
-
-/** Did a trace have to go to error_log() because the log file could not be written? */
-function wpmcp_trace_log_is_unwritable() {
-    return (int) get_option(WPMCP_TRACE_UNWRITABLE_OPTION, 0) === 1;
-}
-
-/**
- * Once a day, on an admin page load.
- *
- * admin_init rather than cron or init: the check costs an outbound HTTP request, the only
- * consumer of its answer is the admin notice, and WP-Cron on a low-traffic site is driven
- * by page loads anyway. The transient is set BEFORE the request, so a host where the fetch
- * hangs for the full timeout does that once a day rather than once a page load.
- */
-add_action('admin_init', 'wpmcp_trace_selfcheck_daily');
-function wpmcp_trace_selfcheck_daily() {
-    if (get_transient(WPMCP_TRACE_CHECK_TRANSIENT)) { return; }
-
-    set_transient(WPMCP_TRACE_CHECK_TRANSIENT, 1, DAY_IN_SECONDS);
-    wpmcp_trace_selfcheck();
-}
-
-/**
- * SITE-WIDE, not on the plugin's own settings page.
- *
- * Both of these say that the thing holding the stack traces is not behaving: one that a
- * stranger can read it, one that nobody can. An operator who never opens Settings > WP MCP
- * would never have seen either, which is how the first version managed to detect a public
- * log and tell nobody. `admin_notices` puts it on every screen, for anyone who could act
- * on it (manage_options), and neither is dismissible - dismissing would not fix it.
- */
-add_action('admin_notices', 'wpmcp_trace_admin_notices');
-function wpmcp_trace_admin_notices() {
-    if (!current_user_can('manage_options')) { return; }
-
-    if (wpmcp_trace_log_is_exposed()) {
-        echo '<div class="notice notice-error"><p><strong>WP MCP: the trace log is'
-            . ' readable from the web.</strong></p><p>This plugin fetched its own log file'
-            . ' over HTTP and got <code>200</code>. That file holds stack traces, absolute'
-            . ' file paths and, when a database call fails, SQL. Its name is random, so the'
-            . ' likeliest cause is directory listing being on. Deny'
-            . ' <code>/wp-content/wpmcp/</code> in your server config &mdash; nginx:'
-            . ' <code>location ^~ /wp-content/wpmcp/ { deny all; }</code></p></div>';
-    }
-
-    // UNVERIFIED IS NOT SILENT. The plugin does not know whether its log is public, and the
-    // operator is the only one who can find out. A warning rather than an error: nothing is
-    // known to be wrong, but nothing is known to be right either.
-    if (wpmcp_trace_log_is_unverified()) {
-        $reason = wpmcp_trace_selfcheck_reason();
-
-        echo '<div class="notice notice-warning"><p><strong>WP MCP: could not check whether'
-            . ' the trace log is readable from the web.</strong></p><p>The plugin tried to'
-            . ' fetch its own log file over HTTP and got no usable answer'
-            . ($reason === '' ? '' : ' &mdash; <code>' . esc_html($reason) . '</code>')
-            . '. A host that blocks requests from itself to itself (a container, or a'
-            . ' managed host with loopback closed) does this, and it is not in itself a'
-            . ' problem &mdash; but it means the check below is yours to make.</p>'
-            . '<p><strong>Check manually:</strong> open'
-            . ' <code>' . esc_html(wpmcp_trace_url()) . '</code> in a browser. It must NOT'
-            . ' return the file. If it does, deny <code>/wp-content/wpmcp/</code> in your'
-            . ' server config &mdash; nginx:'
-            . ' <code>location ^~ /wp-content/wpmcp/ { deny all; }</code>, Apache:'
-            . ' the <code>.htaccess</code> beside the log already does it.</p></div>';
-    }
-
-    if (wpmcp_trace_log_is_unwritable()) {
-        // TWO CAUSES, ONE NOTICE, and the wording covers both since round 2 of the LOG+FLOOR
-        // sprint: the directory is not writable, or a write into it did not complete - which on a
-        // full disk is what a trim of the log looks like. Both end the same way for the operator:
-        // the trace went to the PHP error log and the directory needs attention.
-        echo '<div class="notice notice-error"><p><strong>WP MCP: the trace log could not'
-            . ' be written.</strong></p><p>A failure was recorded to the PHP error log'
-            . ' instead, because <code>' . esc_html(wpmcp_trace_dir()) . '</code> is not'
-            . ' writable, or a write into it could not be completed &mdash; a full disk does'
-            . ' that. Trace ids handed to clients are still findable there, but fix the'
-            . ' directory so they go back to one file.</p></div>';
-    }
+    return $value;
 }
