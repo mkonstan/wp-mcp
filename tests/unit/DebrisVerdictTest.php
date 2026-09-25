@@ -135,7 +135,17 @@ final class DebrisVerdictTest extends TestCase
             'The unexpected row is not named, so it cannot be looked up.'
         );
         self::assertStringContainsString('list-posts', $report);
-        self::assertStringContainsString('3 trace row(s) were caused by this suite on purpose', $report);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
+        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
+        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
+        // tests, so one could pass on another's number. See ToolResult::mentions().
+        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
+        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
+        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
+        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
+        // count is the cheapest boundary there is, and it asserts one more true thing: that
+        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        self::assertStringContainsString('NOTICE: 3 trace row(s) were caused by this suite on purpose', $report);
         self::assertStringContainsString(
             'KNOWN FALSE POSITIVE',
             $report,
@@ -177,7 +187,17 @@ final class DebrisVerdictTest extends TestCase
 
         $report = Fixtures::traceReport(0, 57, $listed, 7);
 
-        self::assertStringContainsString('57 trace row(s) on this site were NOT caused by a test', $report);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
+        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
+        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
+        // tests, so one could pass on another's number. See ToolResult::mentions().
+        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
+        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
+        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
+        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
+        // count is the cheapest boundary there is, and it asserts one more true thing: that
+        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        self::assertStringContainsString('NOTICE: 57 trace row(s) on this site were NOT caused by a test', $report);
         self::assertStringContainsString(
             'Showing the newest ' . Fixtures::TRACE_ROWS_LISTED . ' of 57',
             $report,
@@ -218,7 +238,17 @@ final class DebrisVerdictTest extends TestCase
         $report = Fixtures::traceReport(13, 0, [], 7);
 
         self::assertStringNotContainsString('NOT caused by a test', $report);
-        self::assertStringContainsString('13 trace row(s) were caused by this suite on purpose', $report);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
+        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
+        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
+        // tests, so one could pass on another's number. See ToolResult::mentions().
+        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
+        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
+        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
+        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
+        // count is the cheapest boundary there is, and it asserts one more true thing: that
+        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        self::assertStringContainsString('NOTICE: 13 trace row(s) were caused by this suite on purpose', $report);
 
         [$code, $out] = Fixtures::debrisVerdict('', $report, '');
 
