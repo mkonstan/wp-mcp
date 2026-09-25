@@ -27,7 +27,11 @@
  *
  * and three rules. (1) It may call WordPress and the helpers in tools.php, and nothing in
  * endpoint.php, admin.php or trace.php: a module does not reach into the request path, the
- * settings screen or the log. (2) Its own availability guard - function_exists('acf') and the
+ * settings screen or the log. That is a GATE, not a convention - tests/unit/ModuleBoundaryTest.php
+ * tokenises every module file and resolves each wpmcp_* call to the file that declares it - and
+ * the tools.php helpers the modules call today are five: wpmcp_cannot(),
+ * wpmcp_decode_specialchars(), wpmcp_listable_statuses(), wpmcp_post_type_ok() and
+ * wpmcp_raw_title(). A sixth is a change to this contract and that test says so. (2) Its own availability guard - function_exists('acf') and the
  * like - goes at the top of its own file, before the registration call, so a module that
  * cannot work does not register and its tools do not exist. That is the bare-site rule, and
  * it is the module's to apply because only the module knows what it needs. (3) It may not

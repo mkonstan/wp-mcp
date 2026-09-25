@@ -23,9 +23,10 @@
  * THE MENU TOOLS LEFT THIS FILE IN 1.1.2 and now live in modules/menus.php, behind the seam
  * described in modules.php; the content-type discovery tool arrived there rather than here for
  * the same reason. This file is the CORE catalog. A new feature goes in its own module file,
- * and the four helpers below that a module may call - wpmcp_cannot(),
- * wpmcp_decode_specialchars(), wpmcp_post_type_ok() and wpmcp_raw_title() - are the only
- * traffic in that direction; see ARCHITECTURE.md's "The module seam".
+ * and the five helpers below that a module may call - wpmcp_cannot(),
+ * wpmcp_decode_specialchars(), wpmcp_listable_statuses(), wpmcp_post_type_ok() and
+ * wpmcp_raw_title() - are the only traffic in that direction, which
+ * tests/unit/ModuleBoundaryTest.php holds them to; see ARCHITECTURE.md's "The module seam".
  *
  * THE ANNOTATIONS ARE AUTHORED HERE, ONE ENTRY AT A TIME, and that is the point of them:
  * `readOnlyHint` is !write (one fact, one declaration), but `destructiveHint`,
@@ -37,15 +38,17 @@
  *                          restore-revision (replaces the text it restores over),
  *                          delete-term, delete-media, moderate-comment (spam and trash
  *                          destroy the comment's place in the thread), code-write
- *                          (overwrites a theme file), code-delete, update-menu-item
- *                          (replaces the label, link, target and classes it is sent)
- *                          and remove-menu-item (menu items have no trash).
+ *                          (overwrites a theme file) and code-delete.
  *                  false   every read tool, and create-post / create-term /
- *                          upload-media / reply-comment / add-menu-item, which only
- *                          ADD: each call brings a new post, term, attachment, comment
- *                          or menu item into being and replaces nothing that was there.
- *                          (add-menu-item renumbers its siblings' menu_order, which
- *                          keeps the order they had; it replaces none of them.)
+ *                          upload-media / reply-comment, which only ADD: each call brings
+ *                          a new post, term, attachment or comment into being and
+ *                          replaces nothing that was there.
+ *
+ *                  THE MENU TOOLS ARE NOT IN EITHER LIST ANY MORE, and that is the point
+ *                  of the seam rather than an omission: they are declared in
+ *                  modules/menus.php, so their judgements are recorded in THAT file's
+ *                  header. A roll-call here that named tools this file does not define
+ *                  would be the first thing to drift the next time a module moves.
  *
  *                  THE TEST IS MCP'S OWN AND IT IS NARROW: `false` promises the update
  *                  is ADDITIVE. update-post was false, and that was wrong - it replaces
@@ -54,9 +57,8 @@
  *                  2026-09-12. "Only the fields the caller named" is scope, not
  *                  additivity, and a client honouring the hint would have let an agent
  *                  overwrite a published body without asking. When in doubt, true.
- *   idempotentHint  false  the five tools that CREATE a new object per call
- *                          (create-post, create-term, upload-media, reply-comment,
- *                          add-menu-item), and
+ *   idempotentHint  false  the four tools HERE that CREATE a new object per call
+ *                          (create-post, create-term, upload-media, reply-comment), and
  *                          code-write and code-restore, whose second call stores another
  *                          version of the file - the file ends up the same, the history
  *                          does not.

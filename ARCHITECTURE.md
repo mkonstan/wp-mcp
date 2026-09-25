@@ -96,15 +96,22 @@ it** - a hook that loaded arbitrary PHP would be a remote-code-execution surface
 clothes of extensibility. Third-party tools arrive through the `wpmcp_tools` filter, which adds
 arrays rather than files.
 
-**What a module may call:** WordPress, and four helpers in `tools.php` - `wpmcp_cannot()`,
-`wpmcp_decode_specialchars()`, `wpmcp_post_type_ok()` and `wpmcp_raw_title()`.
+**What a module may call:** WordPress, and five helpers in `tools.php` - `wpmcp_cannot()`, `wpmcp_decode_specialchars()`, `wpmcp_listable_statuses()`,
+`wpmcp_post_type_ok()` and `wpmcp_raw_title()`.
 
 **What it may not:** anything in `endpoint.php`, `admin.php` or `trace.php`. A module does not
-reach into the request path, the settings screen or the log. Nothing in the core calls into a
-module either, which is the property `tests/unit/BareCoreTest.php` gates: it copies the core
-into a temporary directory WITHOUT `modules/`, loads it in a fresh PHP process, and asserts the
-registry comes back as exactly the 24 core tools. A core file that needed a module would fatal
-there and name the symbol.
+reach into the request path, the settings screen or the log.
+
+**Both halves of that are a GATE and not a convention**, which is the whole point of
+`tests/unit/ModuleBoundaryTest.php`: it tokenises every module file, resolves each `wpmcp_*` call
+to the file that declares it, and fails when one resolves anywhere but `tools.php`, `modules.php`
+or a module - so a core file nobody thought to forbid is forbidden by default. It also holds the
+five helpers above to being exactly the five, because an unenforced sentence in the seam's own
+contract is the ACF `permission_callback` mistake in our own words. Nothing in the core calls
+into a module either, asserted the same way there and again by `tests/unit/BareCoreTest.php`,
+which copies the core into a temporary directory WITHOUT `modules/`, loads it in a fresh PHP
+process, and asserts the registry comes back as exactly the 24 core tools. A core file that
+needed a module would fatal there and name the symbol.
 
 **A module's own availability guard goes at the top of its own file**, before the registration
 call - `function_exists('acf')` and the like - so a module that cannot work does not register

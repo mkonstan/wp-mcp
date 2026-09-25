@@ -23,10 +23,13 @@
  *
  * WHAT THIS FILE MAY CALL, and the list is short because it was already short: four core
  * helpers in tools.php - wpmcp_cannot(), wpmcp_decode_specialchars(), wpmcp_post_type_ok()
- * and wpmcp_raw_title() - plus WordPress itself. It calls nothing in endpoint.php, nothing
- * in admin.php, and nothing in trace.php: a module does not reach into the request path,
- * the settings screen or the log. ARCHITECTURE.md's "The module seam" states the rule; this
- * paragraph is what it looks like from inside a module.
+ * and wpmcp_raw_title() - plus WordPress itself. (Those four are THIS module's subset; the
+ * seam's whole allow-list is five, the fifth being wpmcp_listable_statuses(), which
+ * modules/discovery.php calls.) It calls nothing in endpoint.php, nothing in admin.php, and
+ * nothing in trace.php: a module does not reach into the request path, the settings screen or
+ * the log. ARCHITECTURE.md's "The module seam" states the rule and
+ * tests/unit/ModuleBoundaryTest.php enforces it; this paragraph is what it looks like from
+ * inside a module.
  */
 if (!defined('ABSPATH')) { exit; }
 

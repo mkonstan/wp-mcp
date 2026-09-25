@@ -48,7 +48,7 @@ of `tools.php` behind a declared seam.
   `tools/list` rather than between the comment tools and the inventory tools. `tools/list` pages
   at 50 and the catalog is 39, so there is no second page and no cursor is affected. MCP clients
   treat the listing as a set.
-- **`tools.php` is 5,896 lines instead of 6,987**, and a new file, `modules.php`, carries the
+- **`tools.php` is 1,084 lines shorter - 6,987 down to 5,903 at this commit**, and a new file, `modules.php`, carries the
   seam: the manifest of module files, the loader, `wpmcp_register_module()`, and the gate.
 - **The seam checks rather than trusts, which is the whole of its security value.** A module's
   entries face the SAME function a third-party `wpmcp_tools` filter entry has always faced -
