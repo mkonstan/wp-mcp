@@ -98,6 +98,7 @@ function wpmcp_module_manifest() {
     return array(
         'menus'     => 'modules/menus.php',
         'discovery' => 'modules/discovery.php',
+        'acf'       => 'modules/acf.php',
     );
 }
 

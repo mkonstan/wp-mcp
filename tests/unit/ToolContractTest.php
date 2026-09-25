@@ -224,6 +224,11 @@ final class ToolContractTest extends TestCase
             // counts rows. Nothing destroyed, the same answer twice for the same site, and no
             // other server reached.
             'list-content-types' => [false, true,  false],
+            // Sprint ACF-READ. get-acf-values reads ACF field values through ACF's own REST
+            // formatter and writes nothing. Nothing destroyed, the same answer twice for the same
+            // object and the same caller, and no other server reached - the reduction asks core's
+            // own REST controller in-process.
+            'get-acf-values'     => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

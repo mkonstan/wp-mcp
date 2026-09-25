@@ -66,10 +66,13 @@ final class ModuleApiFaceTest extends TestCase
      * (`wp-includes/nav-menu.php`).
      */
     private const PLATFORM_FUNCTIONS = [
+        'add_action',
+        'add_filter',
         'current_user_can',
         'esc_url_raw',
         'get_nav_menu_locations',
         'get_object_taxonomies',
+        'get_option',
         'get_post',
         'get_post_meta',
         'get_post_types',
@@ -77,11 +80,14 @@ final class ModuleApiFaceTest extends TestCase
         'get_registered_nav_menus',
         'get_taxonomies',
         'get_term',
+        'get_term_meta',
+        'get_user_meta',
         'get_userdata',
         'is_post_type_viewable',
         'is_taxonomy_viewable',
         'is_wp_error',
         'post_type_exists',
+        'remove_filter',
         'sanitize_key',
         'taxonomy_exists',
         'update_menu_item_cache',

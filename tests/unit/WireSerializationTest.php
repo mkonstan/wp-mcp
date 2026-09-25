@@ -298,6 +298,15 @@ final class WireSerializationTest extends TestCase
             // that the move kept them reachable from a bare `require wp-mcp.php`.
             'wpmcp_menu_tools',
             'wpmcp_discovery_tools',
+            // AND THE ACF MODULE, WHICH IS NOT REGISTERED IN THIS TIER AT ALL, on purpose. The
+            // unit tier has no WordPress and therefore no ACF, so wpmcp_acf_register_module()
+            // never runs and get-acf-values is absent from wpmcp_tools() - which is the bare-site
+            // guarantee BareCoreTest asserts. Its PROVIDER is still a plain function, so naming
+            // it here is what puts the tool inside every contract test in this tier: the
+            // description limits, the first-fifty-characters rule, the four annotations, the
+            // schema dialect. A tool whose contract were only checkable on a site with ACF would
+            // be a tool nothing checks.
+            'wpmcp_acf_tools',
         ] as $fn) {
             self::assertTrue(function_exists($fn), "{$fn}() is gone.");
 
@@ -305,7 +314,7 @@ final class WireSerializationTest extends TestCase
         }
 
         self::assertCount(
-            39,
+            40,
             $tools,
             'The catalog is not 39 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
