@@ -29,6 +29,20 @@
  * `wpmcp_*(` detector cannot see at all, so a module could have reached into the transport layer
  * unchecked; `classRefsIn()` now refuses any `WpMcp\` reference from a module.
  *
+ * A THIRD WAY, CLOSED IN THE ACF-READ SPRINT, and it is the one that was neither a call nor a
+ * class: a name in NEITHER position fell through in SILENCE. Found by Fable after the seam
+ * sprint's gate closed (`analysis/69` round 4; `analysis/BACKLOG.md`). Round 3's unresolved-call
+ * assertion did not cover it, because that assertion only reports unresolved names followed by
+ * `(`. See testEveryNameOfThisPluginInAModuleIsClaimedByADetector() for the two shapes - a
+ * `WPMCP_*` constant read, and a flat `WpMcp_*` class in a type-hint, a return type or a `catch` -
+ * and for the STATED decision about what a module may do with a core constant. The assertion is
+ * now the positive-marker one: the set of names NEITHER detector claimed is `[]`, so a position
+ * nobody enumerated is reported rather than skipped.
+ *
+ * AND POSITION IS DECIDED IN ONE PLACE, `tests/Support/PhpSymbols.php`, since 1.2.0 - because
+ * `ModuleApiFaceTest` asks the same question about ANOTHER plugin's symbols, and two token
+ * scanners would be two sets of the holes above to find twice.
+ *
  * WHAT THIS GATE CANNOT SEE, AND IT IS SAID HERE BECAUSE A MECHANISM THAT DOES NOT STATE ITS
  * LIMIT INVITES THE EXACT TRUST THIS SPRINT SET OUT TO REMOVE. It resolves names, so it resolves
  * only names that are WRITTEN. An INDIRECT call is outside it:
@@ -59,6 +73,7 @@ declare(strict_types=1);
 namespace WpMcp\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
+use WpMcp\Tests\Support\PhpSymbols;
 
 final class ModuleBoundaryTest extends TestCase
 {
@@ -481,60 +496,209 @@ final class ModuleBoundaryTest extends TestCase
         self::assertGreaterThan(100, count($defined), 'The definition map is implausibly small.');
     }
 
+    /**
+     * THE POSITION THAT USED TO FALL BETWEEN THIS FILE AND SILENCE (the sprint ACF-READ rider).
+     *
+     * FOUND BY FABLE, SEAM ROUND 4, AFTER THAT SPRINT'S GATE HAD CLOSED (`analysis/69`, round 4;
+     * `analysis/BACKLOG.md`). Everything above decides by POSITION - `(` means a call, and
+     * `new` / `::` / `->` / `instanceof` / `extends` / `implements` / `use` mean a class - and
+     * Fable confirmed the rule is sound and that every MISATTRIBUTION errs loud. But a name in
+     * NEITHER position falls through in silence, and round 3's unresolved-call assertion does not
+     * cover it, because that assertion only reports unresolved names followed by `(`. Two shapes:
+     *
+     *   1. a `WPMCP_*` CONSTANT read from a module - 3 are defined in endpoint.php, 13 in
+     *      trace.php, 5 in tools.php and the rest in wp-mcp.php;
+     *   2. a flat `WpMcp_*` class in a TYPE-HINT, a RETURN TYPE or a `catch` clause - none of
+     *      which is `new`, `::` or `(`.
+     *
+     * Both were empty when Fable found them, which is the argument for closing them rather than
+     * against it: the trigger recorded in the backlog was "the ACF read-only sprint, whose module
+     * is this detector's FIRST new consumer", so the hole and its first possible exploiter arrive
+     * together.
+     *
+     * THE FIX IS THE POSITIVE-MARKER SHAPE, the same one `ModuleApiFaceTest` uses and for the same
+     * reason: assert that the set of names NEITHER detector claimed is `[]`. A check that reports
+     * nothing when it sees nothing is indistinguishable from a check that ran and was satisfied.
+     *
+     * AND THE DECISION THE BACKLOG ASKED FOR, STATED. A constant read is NOT simply permitted. It
+     * is held to the SAME boundary as a call: the constant must be defined in a file a module may
+     * call into. `WPMCP_DB_VER` would be harmless, and `WPMCP_TRACE_TEXT_BYTES` is exactly the
+     * coupling to the log that rule (1) exists to prevent - and no rule can tell those two apart
+     * by name. So the rule is the one that is already enforced for functions, applied to the other
+     * kind of symbol, and a module that genuinely needs a core constant moves it to tools.php or
+     * is admitted here on purpose.
+     *
+     * @group sprint-seam
+     * @group sprint-acf-read
+     */
+    public function testEveryNameOfThisPluginInAModuleIsClaimedByADetector(): void
+    {
+        $constants = self::constantDefinitions();
+        $unclaimed = [];
+        $offences  = [];
+
+        foreach (self::moduleFiles() as $module) {
+            foreach (self::pluginSymbols((string) file_get_contents($module)) as $symbol) {
+                $where = basename($module) . ' line ' . $symbol['line'] . ': ' . $symbol['name'];
+
+                switch ($symbol['kind']) {
+                    // CLAIMED by an assertion above: a call is resolved to its defining file, a
+                    // class reference to the file that declares it.
+                    case 'call':
+                    case 'class':
+                        break;
+
+                    // A DECLARATION OF THE MODULE'S OWN is not a reference to anything.
+                    case 'function_declaration':
+                    case 'class_declaration':
+                    case 'const_declaration':
+                        break;
+
+                    // REACHED THROUGH A CLASS, and the class is a name in the source that the
+                    // class detector already owns - `WpMcp_Thing::make()` names WpMcp_Thing, and
+                    // `$thing->wpmcp_x()` needed a `new` or a type-hint to get that object, both
+                    // of which are class positions.
+                    case 'method':
+                    case 'static_call':
+                        break;
+
+                    case 'constant':
+                        $home = $constants[$symbol['lower']] ?? null;
+
+                        if ($home === null) {
+                            $unclaimed[] = $where . ' is read as a constant and this test cannot'
+                                . ' find where it is defined';
+                        } elseif (!in_array($home, self::MAY_CALL, true) && strpos($home, 'modules/') !== 0) {
+                            $offences[] = $where . ' is a constant defined in ' . $home;
+                        }
+                        break;
+
+                    default:
+                        $unclaimed[] = $where . ' appears in ' . $symbol['kind'] . ' position,'
+                            . ' which neither detector in this file claims';
+                }
+            }
+        }
+
+        self::assertSame(
+            [],
+            $unclaimed,
+            "A module names one of this plugin's symbols in a position no detector here claims:\n"
+            . implode("\n", $unclaimed)
+            . "\n\nThat is the shape that used to pass in silence. Either the name belongs in a"
+            . ' position the detectors read - a call or a class reference - or this file needs a'
+            . ' bucket for the position it is in, decided on purpose rather than left open.'
+        );
+
+        self::assertSame(
+            [],
+            $offences,
+            "A module reads a constant the core defines outside the seam:\n" . implode("\n", $offences)
+            . "\n\nA constant read is held to the same boundary as a call, because no rule can tell"
+            . ' WPMCP_DB_VER from WPMCP_TRACE_TEXT_BYTES by name. Move it into tools.php as part of'
+            . " the seam's contract, or do without it."
+        );
+    }
+
+    /**
+     * THE NEW BUCKETS ARE REAL, held by a fixture for the reason every other shape in this file
+     * is: a test that states a position is covered, without covering it, is the thing this sprint
+     * is removing.
+     *
+     * @group sprint-seam
+     * @group sprint-acf-read
+     */
+    public function testAConstantReadAndATypeHintAreBothSeen(): void
+    {
+        $source = <<<'PHP'
+        <?php
+        function wpmcp_fixture_thing(WpMcp_Menu_Collector $c): WpMcp_Menu_Collector {
+            try { $n = WPMCP_TRACE_TEXT_BYTES + WPMCP_PAGE_CAP; }
+            catch (WpMcp_Menu_Collector $e) { $n = 0; }
+            return $c;
+        }
+        PHP;
+
+        $kinds = [];
+
+        foreach (self::pluginSymbols($source) as $symbol) {
+            $kinds[$symbol['name'] . '#' . $symbol['kind']] = true;
+        }
+
+        self::assertArrayHasKey(
+            'WPMCP_TRACE_TEXT_BYTES#constant',
+            $kinds,
+            'A constant read is not seen as one, so the boundary assertion above never fires.'
+        );
+        self::assertArrayHasKey(
+            'WpMcp_Menu_Collector#type',
+            $kinds,
+            'A flat class in a type-hint, a return type or a catch clause is not seen, which is'
+            . ' the second half of the position that used to fall through.'
+        );
+
+        // AND NEITHER OF THE TWO ORIGINAL DETECTORS CLAIMS THEM, which is the fact that makes the
+        // new bucket necessary rather than decorative.
+        self::assertSame([], self::callsIn($source), 'callsIn() claimed a type-hint or a constant.');
+        self::assertSame([], array_keys(self::classRefsIn($source)), 'classRefsIn() claimed a type-hint.');
+
+        // The constant map can answer for both, and it knows which file each came from - the
+        // half that turns "unclaimed" into "out of bounds".
+        $constants = self::constantDefinitions();
+
+        self::assertSame('trace.php', $constants['wpmcp_trace_text_bytes'] ?? null);
+        self::assertSame('tools.php', $constants['wpmcp_page_cap'] ?? null);
+    }
+
     /* ------------------------------------------------------------------ the detector */
 
     /**
-     * Every `wpmcp_*` function CALLED in $source, from PHP's own tokeniser - so a name in a
-     * comment or a string is not one.
+     * Every name of THIS PLUGIN in $source, with the POSITION it appears in.
      *
-     * A `T_STRING` immediately followed by `(` is a call; a `T_STRING` preceded by `function`
-     * is a declaration and is skipped, so a module's own definitions do not count as calls to
-     * themselves.
+     * ONE SCANNER, IN tests/Support/PhpSymbols.php, AND NOT A SECOND COPY HERE. Two gates now ask
+     * the same question of the same source - this file about the plugin's own symbols,
+     * ModuleApiFaceTest about another plugin's - and the one thing seam round 4 measured about
+     * token scanning is that its holes are in the positions nobody enumerated. Two scanners would
+     * be two sets of those holes to find twice. So position is decided in one place and this file
+     * only says which names it cares about.
+     *
+     * CASE-INSENSITIVE, because PHP resolves BOTH function and class names that way.
+     * `new wpmcp\schemavalidator()` is the same class as `new WpMcp\SchemaValidator()`. The name
+     * is carried AS WRITTEN so a failure can quote what the author typed; every comparison
+     * downstream lower-cases.
+     *
+     * @return list<array{name: string, lower: string, kind: string, line: int}>
+     */
+    private static function pluginSymbols(string $source): array
+    {
+        $mine = [];
+
+        foreach (PhpSymbols::scan($source) as $symbol) {
+            if (strpos($symbol['lower'], 'wpmcp_') === 0 || strpos($symbol['lower'], 'wpmcp\\') === 0) {
+                $mine[] = $symbol;
+            }
+        }
+
+        return $mine;
+    }
+
+    /**
+     * Every `wpmcp_*` function CALLED in $source - so a name in a comment or a string is not one,
+     * and neither is a declaration, a constructor, a method or a type-hint.
+     *
+     * A NAMESPACED NAME IS NEVER A GLOBAL FUNCTION HERE. This plugin declares no function inside a
+     * namespace, so `WpMcp\Something` can only be a class - classRefsIn()'s business, and leaving
+     * it out here is what keeps the two detectors from double-counting.
      *
      * @return list<string>
      */
     private static function callsIn(string $source): array
     {
-        $tokens = token_get_all($source);
-        $found  = [];
+        $found = [];
 
-        foreach (self::pluginNames($tokens) as [$i, $name]) {
-            // A NAMESPACED NAME IS NEVER A GLOBAL FUNCTION HERE. This plugin declares no function
-            // inside a namespace, so `WpMcp\Something` can only be a class - classRefsIn()'s
-            // business, and skipping it here is what keeps the two detectors from double-counting.
-            if (strpos($name, '\\') !== false) {
-                continue;
-            }
-
-            // WALK BACK OVER WHITESPACE, AND REFUSE THE SHAPES THAT ARE NOT A FUNCTION CALL.
-            // `function foo(` is a declaration. `new Foo(` is a CONSTRUCTOR - which the round-3
-            // lower-casing made visible, because `WpMcp_Menu_Collector` lower-cases into the
-            // `wpmcp_` prefix and the menus module instantiates one, so this detector reported a
-            // call that does not exist. `Foo::bar(` and `$foo->bar(` are methods, reached through
-            // a class, so the same detector owns them; `instanceof`, `extends`, `implements` and
-            // `use` are class positions for the same reason.
-            for ($b = $i - 1; $b >= 0; $b--) {
-                if (is_array($tokens[$b]) && $tokens[$b][0] === T_WHITESPACE) {
-                    continue;
-                }
-                if (is_array($tokens[$b]) && in_array($tokens[$b][0], self::CLASS_POSITION, true)) {
-                    continue 2;
-                }
-                if (is_array($tokens[$b]) && $tokens[$b][0] === T_FUNCTION) {
-                    continue 2;
-                }
-                break;
-            }
-
-            // Walk forward over whitespace to the `(`.
-            for ($f = $i + 1; $f < count($tokens); $f++) {
-                if (is_array($tokens[$f]) && $tokens[$f][0] === T_WHITESPACE) {
-                    continue;
-                }
-                if ($tokens[$f] === '(') {
-                    $found[strtolower($name)] = true;
-                }
-                break;
+        foreach (self::pluginSymbols($source) as $symbol) {
+            if ($symbol['kind'] === 'call' && strpos($symbol['name'], '\\') === false) {
+                $found[$symbol['lower']] = true;
             }
         }
 
@@ -542,66 +706,62 @@ final class ModuleBoundaryTest extends TestCase
     }
 
     /**
-     * The token shapes that put a name in CLASS position rather than call position.
+     * Every `wpmcp_*` function DECLARED in $source, lower-cased.
      *
-     * `T_USE` covers both `use WpMcp\Foo;` at the top of a file and a trait use inside a class;
-     * neither is a function call, so either way this list is the right side to err on.
+     * TOKENISED, NOT `^function` (round 3). The regex it replaced anchored on column 0, so an
+     * indented declaration - inside an `if`, or a conditionally defined helper - was invisible,
+     * and a module calling it resolved to null, which is the fail-open path round 3 closed. PHP
+     * function names are case-insensitive, so the names are lower-cased on both sides.
+     *
+     * @return list<string>
      */
-    private const CLASS_POSITION = [T_NEW, T_DOUBLE_COLON, T_OBJECT_OPERATOR, T_INSTANCEOF, T_EXTENDS, T_IMPLEMENTS, T_USE];
-
-    /**
-     * Every token naming something of THIS PLUGIN, as `[token index, name without a leading
-     * backslash]` - the one scanner both detectors read, so a token shape either is covered for
-     * both of them or is covered for neither.
-     *
-     * THREE TOKEN SHAPES, AND THE THIRD WAS A HOLE IN BOTH DETECTORS UNTIL ROUND 4. Measured on
-     * PHP 8.2.29 with token_get_all():
-     *
-     *   wpmcp_cannot            T_STRING
-     *   WpMcp\SchemaValidator   T_NAME_QUALIFIED
-     *   \wpmcp_cannot           T_NAME_FULLY_QUALIFIED   <- one token, no T_STRING anywhere
-     *   \WpMcp_Menu_Collector   T_NAME_FULLY_QUALIFIED   <- same, and not `WpMcp\`-prefixed
-     *
-     * A leading backslash is legal, resolves identically, and arrives as a SINGLE token. The
-     * first version of callsIn() read only T_STRING and the first classRefsIn() matched only a
-     * `WpMcp\` prefix, so `\wpmcp_cannot()` and `new \WpMcp_Menu_Collector()` were invisible to
-     * both - a module could have reached a core symbol by typing one extra character. No module
-     * does; the point of this file is that nobody has to check.
-     *
-     * CASE-INSENSITIVE, because PHP resolves BOTH function and class names that way.
-     * `new wpmcp\schemavalidator()` is the same class as `new WpMcp\SchemaValidator()`, and a
-     * case-sensitive scan would have let it past. The name is returned AS WRITTEN so a failure
-     * message can quote it; every comparison downstream lower-cases.
-     *
-     * @param list<array{0:int,1:string}|string> $tokens
-     * @return list<array{0:int,1:string}>
-     */
-    private static function pluginNames(array $tokens): array
+    private static function definitionsIn(string $source): array
     {
         $found = [];
 
-        foreach ($tokens as $i => $token) {
-            if (!is_array($token)) {
-                continue;
-            }
-
-            if (!in_array($token[0], [T_STRING, T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED], true)) {
-                continue;
-            }
-
-            $name  = ltrim($token[1], '\\');
-            $lower = strtolower($name);
-
-            if (strpos($lower, 'wpmcp_') === 0 || strpos($lower, 'wpmcp\\') === 0) {
-                $found[] = [$i, $name];
+        foreach (self::pluginSymbols($source) as $symbol) {
+            if ($symbol['kind'] === 'function_declaration') {
+                $found[$symbol['lower']] = true;
             }
         }
+
+        return array_keys($found);
+    }
+
+    /**
+     * Every class of THIS PLUGIN referenced in $source: `lower-cased name => name as written`.
+     *
+     * POSITION DECIDES, NOT THE NAME'S SHAPE, and that is round 4's correction. The plugin's flat
+     * class convention is `WpMcp_Something` and its functions are `wpmcp_something`, which are the
+     * SAME STRING once case is ignored - and case has to be ignored, because PHP ignores it. So a
+     * shape test cannot tell a class from a function, and PhpSymbols reads the CONTEXT instead.
+     *
+     * A TYPE-HINT IS DELIBERATELY NOT ONE OF THESE, and that is not an oversight: a name in type
+     * position is reported by testEveryNameOfThisPluginInAModuleIsClaimedByADetector() above, with
+     * its own message, because folding it in here would have changed what three round-4 fixtures
+     * assert about this method while silently widening it.
+     *
+     * `Walker`, `WP_Error`, `stdClass` and the rest are WordPress's or PHP's, and out of scope.
+     *
+     * @return array<string, string>
+     */
+    private static function classRefsIn(string $source): array
+    {
+        $found = [];
+
+        foreach (self::pluginSymbols($source) as $symbol) {
+            if ($symbol['kind'] === 'class') {
+                $found[$symbol['lower']] = $symbol['name'];
+            }
+        }
+
+        ksort($found);
 
         return $found;
     }
 
     /**
-     * function name => the plugin-relative file it is declared in.
+     * `wpmcp_*` function name => the plugin-relative file it is declared in.
      *
      * @return array<string, string>
      */
@@ -633,96 +793,45 @@ final class ModuleBoundaryTest extends TestCase
     }
 
     /**
-     * Every `wpmcp_*` function DECLARED in $source, lower-cased.
+     * LOWER-CASED `WPMCP_*` constant name => the plugin-relative file that defines it.
      *
-     * TOKENISED, NOT `^function` (round 3). The regex it replaces anchored on column 0, so an
-     * indented declaration - inside an `if`, or a conditionally defined helper - was invisible,
-     * and a module calling it resolved to null. PHP function names are case-insensitive, so the
-     * names are lower-cased on both sides of the comparison.
+     * READ FROM `define()`'s STRING ARGUMENT, because that is where this plugin's constants are:
+     * all forty-odd arrive through `define('WPMCP_X', ...)`, whose name is a string literal and
+     * therefore not a token at all. A `const X = 1` would be a token and is collected too, so the
+     * map does not depend on which of the two a future author reaches for.
      *
-     * @return list<string>
-     */
-    private static function definitionsIn(string $source): array
-    {
-        $tokens = token_get_all($source);
-        $found  = [];
-
-        foreach ($tokens as $i => $token) {
-            if (!is_array($token) || $token[0] !== T_FUNCTION) {
-                continue;
-            }
-
-            for ($f = $i + 1; $f < count($tokens); $f++) {
-                if (is_array($tokens[$f]) && $tokens[$f][0] === T_WHITESPACE) {
-                    continue;
-                }
-                if (is_array($tokens[$f]) && $tokens[$f][0] === T_STRING
-                    && strpos(strtolower($tokens[$f][1]), 'wpmcp_') === 0) {
-                    $found[strtolower($tokens[$f][1])] = true;
-                }
-                break;
-            }
-        }
-
-        return array_keys($found);
-    }
-
-    /**
-     * Every class of THIS PLUGIN referenced in $source: `lower-cased name => name as written`,
-     * from the tokeniser, so a name in a docblock or a string is not a reference.
-     *
-     * POSITION DECIDES, NOT THE NAME'S SHAPE, and that is round 4's correction. The plugin's flat
-     * class convention is `WpMcp_Something` and its functions are `wpmcp_something`, which are the
-     * SAME STRING once case is ignored - and case has to be ignored, because PHP ignores it. So a
-     * shape test cannot tell a class from a function and this reads the CONTEXT instead: a name
-     * preceded by `new`, `instanceof`, `extends`, `implements` or `use`, or followed by `::`, is a
-     * class; a name followed by `(` is a call and belongs to callsIn(). A NAMESPACED name is
-     * always a class here, because this plugin declares no function inside a namespace.
-     *
-     * `Walker`, `WP_Error`, `stdClass` and the rest are WordPress's or PHP's, and out of scope.
-     *
-     * @param string $source
      * @return array<string, string>
      */
-    private static function classRefsIn(string $source): array
+    private static function constantDefinitions(): array
     {
-        $tokens = token_get_all($source);
-        $found  = [];
+        static $map = null;
 
-        foreach (self::pluginNames($tokens) as [$i, $name]) {
-            $isClass = strpos($name, '\\') !== false;
+        if ($map !== null) {
+            return $map;
+        }
 
-            if (!$isClass) {
-                for ($b = $i - 1; $b >= 0; $b--) {
-                    if (is_array($tokens[$b]) && $tokens[$b][0] === T_WHITESPACE) {
-                        continue;
-                    }
-                    $isClass = is_array($tokens[$b])
-                        && in_array($tokens[$b][0], self::CLASS_POSITION, true)
-                        && $tokens[$b][0] !== T_DOUBLE_COLON
-                        && $tokens[$b][0] !== T_OBJECT_OPERATOR;
-                    break;
-                }
+        $map   = [];
+        $files = array_merge(
+            (array) glob(\WPMCP_PLUGIN_DIR . '/*.php'),
+            (array) glob(\WPMCP_PLUGIN_DIR . '/modules/*.php'),
+            (array) glob(\WPMCP_PLUGIN_DIR . '/src/*.php')
+        );
+
+        foreach ($files as $path) {
+            $path     = (string) $path;
+            $source   = (string) file_get_contents($path);
+            $relative = self::relative($path);
+
+            foreach (PhpSymbols::defineNames($source) as $name) {
+                if (strpos($name, 'wpmcp_') === 0) { $map[$name] = $relative; }
             }
 
-            if (!$isClass) {
-                for ($f = $i + 1; $f < count($tokens); $f++) {
-                    if (is_array($tokens[$f]) && $tokens[$f][0] === T_WHITESPACE) {
-                        continue;
-                    }
-                    $isClass = is_array($tokens[$f]) && $tokens[$f][0] === T_DOUBLE_COLON;
-                    break;
-                }
-            }
-
-            if ($isClass) {
-                $found[strtolower($name)] = $name;
+            foreach (PhpSymbols::of($source, 'const_declaration') as $lower => $name) {
+                if (strpos($lower, 'wpmcp_') === 0) { $map[$lower] = $relative; }
             }
         }
 
-        ksort($found);
-
-        return $found;
+        return $map;
     }
 
     /**

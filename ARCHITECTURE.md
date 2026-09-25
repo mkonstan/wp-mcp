@@ -110,7 +110,12 @@ unresolved call rather than skipping it, refuses any reference to one of this pl
 from a module (both the namespaced `src/` shape and the flat `WpMcp_*` one, case-insensitively and
 with or without a leading backslash), and holds the five helpers above to being exactly the five,
 because an unenforced sentence in the seam's own contract is the ACF `permission_callback` mistake
-in our own words.
+in our own words. **And since 1.2.0 it asserts that the set of this plugin's names a module uses
+in NEITHER position is empty** - a `WPMCP_*` constant read, or a flat `WpMcp_*` class in a
+type-hint, a return type or a `catch`, each of which fell between the detector and silence until
+the ACF sprint. A constant read is held to the same boundary as a call: it must be defined in a
+file a module may call into, because no rule can tell `WPMCP_DB_VER` from
+`WPMCP_TRACE_TEXT_BYTES` by name.
 
 **And what that gate cannot see, because a mechanism that does not state its limit invites the
 trust this is here to remove: an INDIRECT call.** It resolves names that are written, so a variable
@@ -127,11 +132,38 @@ process, and asserts the registry comes back as exactly the 24 core tools. A cor
 needed a module would fatal there and name the symbol.
 
 **A module's own availability guard goes at the top of its own file**, before the registration
-call - `function_exists('acf')` and the like - so a module that cannot work does not register
-and its tools do not exist. Not "exist but refuse": absent, so `tools/call` answers the same
-`-32602 Unknown tool` a name nobody registered gets. That is the same rule the code tools,
-`sql-select` and the post-meta pair already obey, for the same reason: a distinct "it exists
-but is off" tells an unauthorised caller a fact about this site's configuration for free.
+call, so a module that cannot work does not register and its tools do not exist. Not "exist but
+refuse": absent, so `tools/call` answers the same `-32602 Unknown tool` a name nobody registered
+gets. That is the same rule the code tools, `sql-select` and the post-meta pair already obey, for
+the same reason: a distinct "it exists but is off" tells an unauthorised caller a fact about this
+site's configuration for free.
+
+**Since 1.2.0 that guard is a GATE too, and `function_exists('acf')` is not sufficient** (D30):
+it proves the other plugin is there, not that the FACE the module needs is there. A module that
+depends on another plugin declares that face as DATA -
+
+```php
+wpmcp_register_module_face('acf', 'wpmcp_acf_api_face');
+```
+
+- returning `required` symbols (functions, classes, constants, and methods reached through a
+probe the module supplies) and, separately, `optional` capabilities the module can do without.
+`wpmcp_module_face_missing($slug)` is the single check, asked at registration AND again inside
+the tool's own `run` - because clients cache tool lists, so a client that listed a tool while the
+other plugin was active can call it after that plugin is deactivated, and that call must be a
+refusal with a trace id rather than a PHP fatal on somebody's site.
+
+**`tests/unit/ModuleApiFaceTest.php` is what keeps the declaration honest:** it tokenises every
+module file, sorts every name it finds into this plugin's / PHP's / WordPress's / the declared
+face, and asserts the leftover set is `[]`. A guard that can fall behind the code it guards is
+the same defect as a check that reports nothing when it sees nothing, so the assertion is the
+positive one. It walks `wpmcp_module_manifest()` rather than knowing about ACF, so a module added
+without a declaration fails on the day it is added.
+
+**And the absence is explicable.** `wpmcp_module_status()` reports, per manifest entry, whether
+the file is there, whether it registered, what its face is missing and which optional
+capabilities this site provides; Settings > WP MCP prints it. Without that, "no ACF tools" and
+"wp-mcp is broken" look identical to an administrator.
 
 **And nothing a module returns is trusted.** Registration records a callable and checks nothing;
 the gate is on the way OUT, in `wpmcp_module_tools()`, and it is the same function a

@@ -31,11 +31,29 @@
  * tokenises every module file and resolves each wpmcp_* call to the file that declares it - and
  * the tools.php helpers the modules call today are five: wpmcp_cannot(),
  * wpmcp_decode_specialchars(), wpmcp_listable_statuses(), wpmcp_post_type_ok() and
- * wpmcp_raw_title(). A sixth is a change to this contract and that test says so. (2) Its own availability guard - function_exists('acf') and the
- * like - goes at the top of its own file, before the registration call, so a module that
- * cannot work does not register and its tools do not exist. That is the bare-site rule, and
- * it is the module's to apply because only the module knows what it needs. (3) It may not
- * re-declare a name the core, or an earlier module, already uses.
+ * wpmcp_raw_title(). A sixth is a change to this contract and that test says so.
+ *
+ * (2) Its own availability guard goes at the top of its own file, before the registration
+ * call, so a module that cannot work does not register and its tools do not exist. That is
+ * the bare-site rule, and it is the module's to apply because only the module knows what it
+ * needs.
+ *
+ * (2a) AND SINCE 1.2.0 THAT GUARD IS A GATE RATHER THAN A CONVENTION (D30). Rule (1) has
+ * always been enforced; rule (2) was a sentence, and nothing proved a guard was present or
+ * complete - which is the same defect as a check that reports nothing when it sees nothing.
+ * `function_exists('acf')` is the example this paragraph used to give and it is NOT
+ * sufficient: it proves the other plugin is there, not that the FACE the module needs is
+ * there. So a module that depends on another plugin DECLARES that face as data -
+ *
+ *     wpmcp_register_module_face('<slug>', '<callable returning the face>');
+ *
+ * - and registers only when wpmcp_module_face_missing('<slug>') is empty.
+ * tests/unit/ModuleApiFaceTest.php tokenises every module file, collects every symbol it
+ * ACTUALLY calls that is neither this plugin's nor WordPress's nor PHP's, and asserts that the
+ * set CALLED BUT NOT DECLARED is `[]`. A guard that can fall behind the code it guards is
+ * worth nothing, so the test is what keeps the declaration honest.
+ *
+ * (3) It may not re-declare a name the core, or an earlier module, already uses.
  *
  * THE SEAM'S SIDE is the only half with a security property: NOTHING A MODULE RETURNS IS
  * TRUSTED. Registration records a callable and checks nothing. The gate is on the way OUT,
@@ -136,6 +154,228 @@ function wpmcp_module_providers($slug = null, $provider = null) {
     }
 
     return $providers;
+}
+
+/**
+ * THE OTHER DOOR: a module declares the API FACE it needs from ANOTHER PLUGIN (D30).
+ *
+ * WHY A DECLARATION AND NOT JUST A GUARD. A guard is code, and code drifts from the thing it
+ * guards without anybody noticing - `function_exists('acf')` stays green while the module
+ * starts calling a function ACF added two releases later. A DECLARATION is data, so a test can
+ * compare it against the symbols the module actually calls and fail when the two disagree
+ * (tests/unit/ModuleApiFaceTest.php). That is the difference between rule (2) and rule (1) in
+ * this file's contract, and closing it is all D30 asks for.
+ *
+ * THE FACE'S SHAPE, and both halves are needed for a DIFFERENT reason:
+ *
+ *     array(
+ *         'required' => array(
+ *             'functions' => array('acf_format_value_for_rest', ...),
+ *             'classes'   => array(),
+ *             'constants' => array(),
+ *             'methods'   => array(
+ *                 array('probe' => '<callable returning the object or null>',
+ *                       'names' => array('get_disabled_layouts', ...)),
+ *             ),
+ *         ),
+ *         'optional' => array(
+ *             '<capability name>' => array( the same four keys ),
+ *         ),
+ *     )
+ *
+ * `required` is the registration gate: one missing symbol and the module does not register, so
+ * its tools do not exist. `optional` is a FEATURE the module can do without, detected and
+ * reported rather than demanded - because a face that demanded everything would refuse to
+ * serve values on an ACF that merely cannot report disabled Flexible Content layouts, and the
+ * honest answer there is "values, and this capability is off" rather than nothing at all
+ * (D30's closing paragraph; item 7 of the ACF sprint).
+ *
+ * METHODS NEED A PROBE AND NOTHING ELSE DOES. `function_exists`, `class_exists` and `defined`
+ * take a name; `method_exists` takes an OBJECT, and only the module knows how to reach it -
+ * ACF's is `acf_get_field_type('flexible_content')`, which is itself a symbol that may be
+ * absent. So the module supplies a callable that returns the object or null, and the checking
+ * still happens HERE, once, for both call sites.
+ *
+ * FIRST DECLARATION OF A SLUG WINS, for the reason wpmcp_module_providers() gives.
+ *
+ * @param string   $slug the module's slug, the same one it registers under
+ * @param callable $face returns the face array described above
+ */
+function wpmcp_register_module_face($slug, $face) {
+    wpmcp_module_faces((string) $slug, $face);
+}
+
+/**
+ * The declared faces, and the one place they are stored. Two arguments records; none reads.
+ *
+ * @param string|null   $slug
+ * @param callable|null $face
+ * @return array<string, callable>
+ */
+function wpmcp_module_faces($slug = null, $face = null) {
+    static $faces = array();
+
+    if ($slug !== null && !array_key_exists($slug, $faces)) {
+        $faces[$slug] = $face;
+    }
+
+    return $faces;
+}
+
+/**
+ * One module's declared face, normalised - so every reader below can assume the four keys
+ * exist and hold lists, whatever the module wrote.
+ *
+ * A SLUG THAT DECLARED NOTHING GETS AN EMPTY FACE rather than a warning, because most modules
+ * depend on nothing but WordPress and have nothing to declare. The test is what decides
+ * whether an empty face is honest for a given module; this function only reports.
+ *
+ * @return array{required: array<string, array>, optional: array<string, array<string, array>>}
+ */
+function wpmcp_module_face($slug) {
+    $faces = wpmcp_module_faces();
+    $face  = array();
+
+    if (isset($faces[(string) $slug]) && is_callable($faces[(string) $slug])) {
+        $face = call_user_func($faces[(string) $slug]);
+    }
+
+    $face = is_array($face) ? $face : array();
+
+    $normal = array('required' => wpmcp_module_face_part($face['required'] ?? array()), 'optional' => array());
+
+    foreach ((array) ($face['optional'] ?? array()) as $capability => $part) {
+        $normal['optional'][(string) $capability] = wpmcp_module_face_part($part);
+    }
+
+    return $normal;
+}
+
+/** One `required`/`optional` block with all four keys present and every one a list. */
+function wpmcp_module_face_part($part) {
+    $part = is_array($part) ? $part : array();
+
+    return array(
+        'functions' => array_values(array_map('strval', (array) ($part['functions'] ?? array()))),
+        'classes'   => array_values(array_map('strval', (array) ($part['classes'] ?? array()))),
+        'constants' => array_values(array_map('strval', (array) ($part['constants'] ?? array()))),
+        'methods'   => array_values((array) ($part['methods'] ?? array())),
+    );
+}
+
+/**
+ * THE CHECK, AND IT IS ONE IMPLEMENTATION FOR BOTH CALL SITES (D30, point 3).
+ *
+ * Registration time is not enough on its own, and the reason is measured rather than
+ * imagined: clients CACHE tool lists at connect time
+ * (claude_code_memory/cold-client-reads-cached-tool-descriptions.md). A client that listed
+ * tools while the other plugin was active can call one after it has been deactivated or
+ * downgraded, and that call must produce a refusal, never a PHP fatal on somebody's site. So
+ * the module asks this same function again inside its own `run` - the same names, the same
+ * probes, the same answer - and a second copy of the rule cannot drift from the first because
+ * there is no second copy.
+ *
+ * @param string $slug
+ * @return list<string> the missing REQUIRED symbols, named as a human would look them up;
+ *                      empty when the face is fully present
+ */
+function wpmcp_module_face_missing($slug) {
+    return wpmcp_module_face_part_missing(wpmcp_module_face($slug)['required']);
+}
+
+/**
+ * Which OPTIONAL capabilities of a module's face this site actually provides.
+ *
+ * Reported rather than demanded, and reported by NAME, because the answer belongs in the
+ * tool's own output: "values, and layout metadata is unavailable on this ACF" is information,
+ * where a silently missing half is the vacuous silence this project keeps catching.
+ *
+ * @return array<string, bool> capability name => every symbol it needs is present
+ */
+function wpmcp_module_face_capabilities($slug) {
+    $capabilities = array();
+
+    foreach (wpmcp_module_face($slug)['optional'] as $name => $part) {
+        $capabilities[$name] = (wpmcp_module_face_part_missing($part) === array());
+    }
+
+    return $capabilities;
+}
+
+/**
+ * The missing symbols of ONE face block.
+ *
+ * A METHOD WHOSE PROBE RETURNS NOTHING IS REPORTED AS THE METHOD, not as the probe, because
+ * "get_disabled_layouts is missing" is what an operator can look up and "the probe returned
+ * null" is not. `method_exists` accepts an object or a class name and answers false for
+ * anything else, so a probe that returns null, false or a string nobody declared all give the
+ * same honest answer without a branch per case.
+ *
+ * @param array{functions: list<string>, classes: list<string>, constants: list<string>, methods: list<array>} $part
+ * @return list<string>
+ */
+function wpmcp_module_face_part_missing($part) {
+    $missing = array();
+
+    foreach ($part['functions'] as $name) {
+        if (!function_exists($name)) { $missing[] = $name . '()'; }
+    }
+
+    foreach ($part['classes'] as $name) {
+        if (!class_exists($name)) { $missing[] = 'class ' . $name; }
+    }
+
+    foreach ($part['constants'] as $name) {
+        if (!defined($name)) { $missing[] = 'constant ' . $name; }
+    }
+
+    foreach ($part['methods'] as $group) {
+        $probe  = is_array($group) ? ($group['probe'] ?? null) : null;
+        $object = is_callable($probe) ? call_user_func($probe) : null;
+
+        foreach ((array) (is_array($group) ? ($group['names'] ?? array()) : array()) as $name) {
+            if (!is_object($object) || !method_exists($object, (string) $name)) {
+                $missing[] = '->' . (string) $name . '()';
+            }
+        }
+    }
+
+    return $missing;
+}
+
+/**
+ * EVERY MODULE THE MANIFEST NAMES, AND WHY IT IS OR IS NOT SERVING TOOLS (D30, point 4).
+ *
+ * THE ABSENCE HAS TO BE EXPLICABLE. "No ACF tools" and "the plugin is broken" must not look
+ * identical to the administrator, and a module that refuses to register is by construction
+ * silent about itself - that is what makes it safe and also what makes it unreadable. This is
+ * the one place the two states can be told apart, and admin.php prints it on the settings
+ * screen the operator already opens to see which surfaces are on.
+ *
+ * IT ASKS THE SEAM AND NEVER A MODULE. Faces and providers are registered callables held here,
+ * exactly as wpmcp_module_providers() holds providers, so the core reads a registry rather than
+ * naming a module's function - which is what keeps the plugin working when a module file is
+ * deleted.
+ *
+ * @return array<string, array{file: string, present: bool, declares_face: bool, missing: list<string>, capabilities: array<string, bool>, registered: bool}>
+ */
+function wpmcp_module_status() {
+    $providers = wpmcp_module_providers();
+    $faces     = wpmcp_module_faces();
+    $status    = array();
+
+    foreach (wpmcp_module_manifest() as $slug => $relative) {
+        $status[$slug] = array(
+            'file'          => $relative,
+            'present'       => is_file(plugin_dir_path(__FILE__) . $relative),
+            'declares_face' => array_key_exists($slug, $faces),
+            'missing'       => wpmcp_module_face_missing($slug),
+            'capabilities'  => wpmcp_module_face_capabilities($slug),
+            'registered'    => array_key_exists($slug, $providers),
+        );
+    }
+
+    return $status;
 }
 
 /**
