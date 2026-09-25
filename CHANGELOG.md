@@ -4,8 +4,8 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.1.2
 
-**Unreleased.** The private trace log stops being a file, and the tool surface starts moving out
-of `tools.php` behind a declared seam.
+**Released 2026-09-25.** The private trace log stops being a file, and the tool surface starts
+moving out of `tools.php` behind a declared seam.
 
 ### Added: `list-content-types`, so a site's real content is findable
 
