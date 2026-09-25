@@ -86,6 +86,7 @@ final class ModuleApiFaceTest extends TestCase
         'is_post_type_viewable',
         'is_taxonomy_viewable',
         'is_wp_error',
+        'post_password_required',
         'post_type_exists',
         'remove_filter',
         'sanitize_key',
@@ -105,7 +106,7 @@ final class ModuleApiFaceTest extends TestCase
     ];
 
     /** The WordPress classes the modules name, in any position. */
-    private const PLATFORM_CLASSES = ['Walker', 'WP_Error', 'WP_Post', 'WP_Term'];
+    private const PLATFORM_CLASSES = ['Walker', 'WP_Error', 'WP_Post', 'WP_Term', 'WP_User'];
 
     /**
      * Methods the modules call on a WordPress object.
@@ -222,6 +223,51 @@ final class ModuleApiFaceTest extends TestCase
         // WordPress's own is not reported, and neither is the module's own declaration.
         self::assertStringNotContainsString('get_post', implode(' ', $reported));
         self::assertStringNotContainsString('wpmcp_pretend', implode(' ', $reported));
+
+        // A FOREIGN METHOD WHOSE NAME COLLIDES WITH A PLUGIN FUNCTION IS STILL FOREIGN, and this
+        // fixture is the one that was missing. `wpmcp_module_face_missing` is a plugin FUNCTION,
+        // never a method of anything - but the exemption list was filled from every `function name(`
+        // in the plugin, free functions included, so `$thing->wpmcp_module_face_missing()` was
+        // excused, and so was every other function name in the plugin. An exemption that wide means
+        // the guard CAN fall behind the code it guards, which is the one thing D30 exists to
+        // prevent. `get_disabled_layouts` is here beside it because it is ACF's - a name the face
+        // DOES declare for the ACF module, and which must still be reported for a module that does
+        // not declare it.
+        self::assertSame(
+            ['wpmcp_module_face_missing (method, line 2)', 'get_disabled_layouts (method, line 2)'],
+            self::undeclared(
+                "<?php\n" . '$x = $thing->wpmcp_module_face_missing() . $other->get_disabled_layouts();',
+                []
+            ),
+            'A foreign method was excused because this plugin happens to declare a FUNCTION of the'
+            . " same name. The exemption must be the methods of the plugin's own CLASSES and"
+            . ' nothing else.'
+        );
+
+        // AND A METHOD OF THIS PLUGIN'S OWN CLASS IS STILL EXCUSED, or a module calling its own
+        // collector would be told to declare a dependency on itself.
+        self::assertSame(
+            [],
+            self::undeclared('<?php $w = new WpMcp_Menu_Collector(); $w->start_el($a, $b, $c);', []),
+            "A method of this plugin's own class was reported as another plugin's."
+        );
+
+        // THE RESIDUAL LIMIT, HELD BY AN ASSERTION RATHER THAN DESCRIBED. A method name cannot say whose object
+        // it is on, so "declared by one of our own classes" is the best excuse rule available - and
+        // it means every name below is a name a module could call on a FOREIGN object with no
+        // declaration. Twelve names is a limit a reviewer can hold in their head; the five hundred
+        // free-function names it used to be were not. Adding a method to a plugin class WIDENS this
+        // gate, so it goes red here and the author has to notice.
+        self::assertSame(
+            [
+                'aslist', 'asmap', 'check', 'checkobject', 'escape', 'failure',
+                'length', 'matches', 'start_el', 'typename', 'validate', 'validatearguments',
+            ],
+            self::sorted(array_keys(self::pluginDeclarations()['methods'])),
+            'The set of method names the face gate excuses has changed. Every name in it is one a'
+            . " module may call on ANOTHER plugin's object without declaring it, so growing the list"
+            . ' is a deliberate widening of this gate and not a detail.'
+        );
 
         // AND A NAMED ARGUMENT IS NOT A CONSTANT READ, which it was until this assertion existed:
         // `str_contains(haystack: $a, needle: $b)` would have been reported as two undeclared
@@ -448,6 +494,14 @@ final class ModuleApiFaceTest extends TestCase
         return array_map('strtolower', $names);
     }
 
+    /** @param list<string> $names @return list<string> */
+    private static function sorted(array $names): array
+    {
+        sort($names);
+
+        return $names;
+    }
+
     /**
      * Every foreign symbol in $source that $declared does not name, as a readable report.
      *
@@ -552,12 +606,18 @@ final class ModuleApiFaceTest extends TestCase
             foreach (PhpSymbols::defineNames($source) as $lower) {
                 $map['constants'][$lower] = true;
             }
-            // A method DECLARED by this plugin's own classes, so a module calling one of its own
-            // collector's methods is not reported as reaching into another plugin.
-            if (preg_match_all('/\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $source, $matches) > 0) {
-                foreach ($matches[1] as $name) {
-                    $map['methods'][strtolower($name)] = true;
-                }
+            // A method DECLARED BY ONE OF THIS PLUGIN'S OWN CLASSES - a `function name(` INSIDE a
+            // class body, which is what PhpSymbols::methodDeclarations() counts by brace depth.
+            //
+            // THIS WAS A REGEX OVER EVERY `function name(` IN THE FILE, free functions included,
+            // AND IT WAS THE WIDEST HOLE IN THIS GATE. The plugin declares hundreds of functions,
+            // so the excuse set was every one of their names: a module writing `$acf->validate()`,
+            // `->check()`, `->escape()`, `->matches()`, `->latest()` or `->wpmcp_anything()` passed
+            // with no declaration at all. methodDeclarations() was written for exactly this in the
+            // same commit and was then never called - the helper was right and nothing used it,
+            // which is the two-things-agreeing-by-construction failure with one of them absent.
+            foreach (PhpSymbols::methodDeclarations($source) as $lower) {
+                $map['methods'][$lower] = true;
             }
         }
 

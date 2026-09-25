@@ -840,9 +840,21 @@ value path, and since 6.8.7 and 6.8.10 it reduces User, Relationship, Post Objec
 File and Icon Picker values to bare IDs for a caller who cannot read the referenced object - but
 only in its REST path. ACF's own Security Principles page draws that line: `get_field()` is a
 trusted-context accessor, REST is the permission-checked surface. So a Post Object pointing at
-somebody else's draft comes back as `1234` for a token that may not read it and as the full post
-for one that may, and that decision is ACF's, delegated to the target post type's own REST
-controller.
+somebody else's draft comes back as `1234` for a token that may not read it and expanded for one
+that may, and that decision is ACF's, delegated to the target post type's own REST controller.
+
+**An expanded reference is a NAMED SUBSET, never the database row.** ACF's `return_format: object`
+hands back a live `WP_Post` or `WP_User`, and JSON-encoding one of those serialises every public
+property - which for a `WP_Post` includes `post_password` in plaintext and for a `WP_User` includes
+`user_pass`. Neither reaches a caller here. A post arrives as `id`, `type`, `status`, `title`,
+`slug`, `author`, `parent`, `menu_order`, `date`, `date_gmt`, `modified`, `mime_type`,
+`password_protected`, and `excerpt` and `content` only when the post is not password-protected -
+core's own `post_password_required()` decides, the same function `wp/v2` reasons with, and the
+withholding is reported rather than silent. A user arrives as `id` and `name`, plus `login`,
+`email`, `roles` and `registered` for a caller with `list_users` or `edit_user` on that user, which
+is exactly what `get-user` gives the same caller. A term arrives as `id`, `taxonomy`, `name`,
+`slug`, `parent`, `count`. Any other object is replaced by its class name and its id rather than
+serialised.
 
 **Only fields the object has already saved are listed.** ACF resolves a field by name through a
 hidden reference row, and a field never saved has none - the same fact the post-meta note above
@@ -857,16 +869,20 @@ with nothing saying a fourth exists. A `flexible_content` field therefore also r
 "rows": [
   { "index": 0, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false },
   { "index": 1, "layout": "gallery", "label": "Autumn set", "renamed": true,  "disabled": true,
-    "values": { "blocks_1_heading": "...", "blocks_1_target": 1234 } },
+    "values": { "blocks_1_heading": "...", "blocks_1_target": 1234,
+                "blocks_1_meta": { "caption": "..." } } },
   { "index": 2, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false }
 ]
 ```
 
 `label` is the label the editor sees, which is the rename when a layout has one. A disabled row
-carries its own `values`, formatted and permission-reduced like everything else. Rows are reported
-this way only on ACF **Pro 6.5** or newer, where the feature exists at all; below that `acf`
-reports `layout_metadata: false` and there are no disabled layouts to report. Nothing about this
-is guessed from a hidden meta key - the state comes from ACF's own public accessors.
+carries its own `values`, formatted and permission-reduced like everything else - including a
+sub-field that is itself a group, a clone, a repeater or another Flexible Content field, because
+those values are loaded with `acf_get_value()`, the same call ACF's own row loader makes. Rows are
+reported this way only on ACF **Pro 6.5** or newer, where the feature exists at all; below that
+`acf` reports `layout_metadata: false` and there are no disabled layouts to report. Nothing about
+this is guessed from a hidden meta key - the state comes from ACF's own public accessors, and the
+values from its own loader.
 
 **No ACF schema tools.** Field structure reaches a caller as metadata on a values read - the key,
 name, type and label of the fields this object holds, and the layout of each row it has - and never

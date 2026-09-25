@@ -250,6 +250,90 @@ final class AcfModuleTest extends TestCase
     }
 
     /**
+     * THE REQUIRED HALF OF THE FACE DECLARES NO METHOD, and this is a GATE rather than the comment
+     * it replaces (review 74, S3).
+     *
+     * MEASURED: ACF's field types arrive on `acf/include_field_types`, fired from `ACF::init()`,
+     * which is hooked to `init` at priority 5 - NOT at ACF's load time, which the module's docblock
+     * used to claim. So at `plugins_loaded` priority 0, where this module decides whether to
+     * register, `acf_get_field_type('flexible_content')` is null and every method probe answers
+     * "missing". That is harmless only while the required block has no methods in it, and the next
+     * author promoting one would get a module that never registers on a site with everything
+     * present, while the docblock told them it could not happen.
+     *
+     * So the rule is asserted instead of described. The fix, if a required method is ever genuinely
+     * needed, is in the failure message: move the registration to `init` - nothing reads the tool
+     * registry before then.
+     *
+     * @group sprint-acf-read
+     */
+    public function testTheRequiredHalfOfTheAcfFaceDeclaresNoMethod(): void
+    {
+        $face = \wpmcp_module_face('acf');
+
+        self::assertSame(
+            [],
+            $face['required']['methods'],
+            'The ACF face requires a METHOD, and the guard that reads the required block runs on'
+            . ' plugins_loaded - where ACF has not yet fired acf/include_field_types (it is on init'
+            . ' priority 5), so acf_get_field_type() is null and the probe reports the method'
+            . ' missing. The module would never register on a site that has everything. Either keep'
+            . " the method in the OPTIONAL block, or move this module's registration to `init`."
+        );
+
+        // AND THE OPTIONAL BLOCK IS WHERE THE METHODS ARE, or this assertion is about an empty face.
+        self::assertSame(
+            ['get_disabled_layouts', 'get_renamed_layouts'],
+            $face['optional']['layout_metadata']['methods'][0]['names'],
+            'The layout-metadata capability no longer declares the two accessors it is named for.'
+        );
+    }
+
+    /**
+     * THE USER FIELDS THIS MODULE PUBLISHES ARE `get-user`'s, EXACTLY - so a `WP_User` arriving
+     * through an ACF field cannot disclose more than the tool whose whole job is users.
+     *
+     * WHY THE LIST IS REPEATED AT ALL: a module may not call into `tools.php` beyond the five named
+     * helpers, so `wpmcp_get_user_shape()` is out of reach and the field names live in the module.
+     * A repetition nothing checks is a drift waiting to happen; this is the check. It runs in the
+     * unit tier because both are plain functions - no ACF, no WordPress, no site.
+     *
+     * THE REASON IT MATTERS IS MEASURED. `wp_json_encode()` on a `WP_User` serialises its `data`
+     * property, which carries `user_pass` and `user_activation_key`, plus `allcaps`. `get-user`'s
+     * own description promises "Never returns passwords, keys, sessions or user meta", and before
+     * round 2 this module would have broken that promise on the same server.
+     *
+     * @group sprint-acf-read
+     */
+    public function testTheModulesUserFieldsAreTheOnesGetUserPublishes(): void
+    {
+        $fields = \wpmcp_acf_user_fields();
+
+        self::assertSame(
+            array_keys(\wpmcp_get_user_shape()),
+            array_merge($fields['always'], $fields['privileged']),
+            "The ACF module publishes a different set of user fields from get-user. The two are the"
+            . ' same decision about what a user looks like, and this module cannot call the other'
+            . " one's shape function, so they can only be kept together here."
+        );
+
+        // AND THE SPLIT IS THE SAME SPLIT: the four that get-user gives only to a privileged caller
+        // are the four this module gates. get-user marks them with a `when` closure.
+        $privileged = [];
+
+        foreach (\wpmcp_get_user_shape() as $name => $field) {
+            if (isset($field['when'])) { $privileged[] = $name; }
+        }
+
+        self::assertSame(
+            $privileged,
+            $fields['privileged'],
+            'The ACF module gates a different subset of the user fields than get-user does, so one'
+            . ' of the two hands a caller something the other withholds.'
+        );
+    }
+
+    /**
      * THE MODULE'S REGISTRATION IS DEFERRED TO `plugins_loaded`, and that is a property of the
      * SOURCE worth pinning rather than a detail.
      *

@@ -83,23 +83,22 @@ final class ModuleStatusScreenTest extends FixtureIntegrationTestCase
             . ' why a module is serving nothing.'
         );
 
+        $disagreed = [];
+
         foreach (self::$status as $slug => $module) {
-            $row = self::row((string) $slug);
+            $expected = $module['registered'] ? 'Serving' : 'Not serving';
 
-            self::assertStringContainsString(
-                $module['registered'] ? 'Serving' : 'Not serving',
-                $row,
-                "The screen disagrees with wpmcp_module_status() about whether {$slug} is serving."
-            );
-
-            if (!$module['registered']) {
-                self::assertStringContainsString(
-                    'Not serving',
-                    $row,
-                    "{$slug} did not register and the screen does not say so."
-                );
+            if (!str_contains(self::row((string) $slug), $expected)) {
+                $disagreed[] = $slug . ' should read "' . $expected . '"';
             }
         }
+
+        self::assertSame(
+            [],
+            $disagreed,
+            "The screen disagrees with wpmcp_module_status() about which modules are serving:\n"
+            . implode("\n", $disagreed)
+        );
     }
 
     /**
@@ -111,11 +110,20 @@ final class ModuleStatusScreenTest extends FixtureIntegrationTestCase
      * and the optional capabilities are reported instead. Both directions, one test, because
      * either alone is passable by a screen that prints a fixed sentence.
      *
+     * COLLECTED AND ASSERTED ONCE, WHICH IS WHY THE COUNT IS THE SAME ON EVERY SITE (review 74,
+     * S1). The first version asserted once PER missing symbol and once per capability, so the
+     * gate group's assertion total was a function of what the site had installed - 114 on a site
+     * with ACF, 117 on one without. A counted invariant the queen reads every sprint stops being
+     * an invariant the moment its value depends on the machine, and the fix is the SHAPE rather
+     * than a sentence explaining the number. `assertGreaterThan(0, ...)` below is what keeps the
+     * collected form from passing vacuously.
+     *
      * @group sprint-acf-read
      */
     public function testAModuleThatIsNotServingPrintsTheSymbolsItNeeds(): void
     {
-        $checked = 0;
+        $unprinted = [];
+        $checked   = 0;
 
         foreach (self::$status as $slug => $module) {
             $row = self::row((string) $slug);
@@ -123,35 +131,31 @@ final class ModuleStatusScreenTest extends FixtureIntegrationTestCase
             foreach ((array) $module['missing'] as $symbol) {
                 ++$checked;
 
-                self::assertStringContainsString(
-                    htmlspecialchars((string) $symbol, ENT_QUOTES),
-                    $row,
-                    "{$slug} is missing {$symbol} and the screen does not name it, so the"
-                    . ' administrator is told there are no tools and not why.'
-                );
-            }
-
-            foreach ((array) $module['capabilities'] as $capability => $on) {
-                if ($module['missing'] !== []) {
-                    continue;
+                if (!str_contains($row, htmlspecialchars((string) $symbol, ENT_QUOTES))) {
+                    $unprinted[] = $slug . ' is missing ' . $symbol . ' and does not say so';
                 }
-
-                ++$checked;
-
-                self::assertStringContainsString(
-                    htmlspecialchars((string) $capability, ENT_QUOTES),
-                    $row,
-                    "{$slug} declares the optional capability {$capability} and the screen does not"
-                    . ' report whether this site provides it.'
-                );
             }
 
-            self::assertStringNotContainsString(
-                'That is a bug in wp-mcp',
-                $row,
-                "{$slug} has everything it declared and still did not register."
-            );
+            if ((array) $module['missing'] === []) {
+                foreach ((array) $module['capabilities'] as $capability => $on) {
+                    ++$checked;
+
+                    if (!str_contains($row, htmlspecialchars((string) $capability, ENT_QUOTES))) {
+                        $unprinted[] = $slug . ' does not report its optional capability ' . $capability;
+                    }
+                }
+            }
+
+            if (str_contains($row, 'That is a bug in wp-mcp')) {
+                $unprinted[] = $slug . ' has everything it declared and still did not register';
+            }
         }
+
+        self::assertSame(
+            [],
+            $unprinted,
+            "The screen leaves an administrator without the reason:\n" . implode("\n", $unprinted)
+        );
 
         self::assertGreaterThan(
             0,

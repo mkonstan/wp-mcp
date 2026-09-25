@@ -62,7 +62,11 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
     private static int $draft = 0;
     private static int $published = 0;
     private static int $emptyHost = 0;
+    private static int $protected = 0;
     private static string $skip = '';
+
+    /** The per-request header that makes the mu-plugin warm ACF's value store before we read. */
+    private const WARM_HEADER = 'X-Wpmcp-Warm-Acf';
 
     /** The ACF field names this run registers. Underscores: they become meta keys. */
     private static function fieldPrefix(): string
@@ -168,6 +172,19 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             'public'
         );
 
+        // A PASSWORD-PROTECTED PUBLISHED POST, which is the shape that makes the disclosure
+        // question answerable: `post_status` is `publish`, so core's own check_read_permission()
+        // says YES to anybody and ACF's 6.8.10 reduction does not fire - the whole WP_Post,
+        // `post_password` in plaintext included, is what PHP would serialise.
+        self::$protected = Fixtures::createPostWith([
+            'post_type'     => 'post',
+            'post_status'   => 'publish',
+            'post_title'    => Fixtures::name('acf-protected-target'),
+            'post_content'  => 'THE PROTECTED BODY',
+            'post_password' => 'wpmcp-fixture-secret',
+            'post_author'   => self::$adminId,
+        ]);
+
         // THE HOST IS THE AUTHOR'S OWN, so the Author passes the tool's edit_post gate and the
         // only thing they cannot do is read the draft the field points at.
         self::$host = Fixtures::createPost(
@@ -203,10 +220,14 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         WpCli::evaluate(sprintf(
             'update_field(%s, %d, %d);'
             . ' update_field(%s, %d, %d);'
+            . ' update_field(%s, %d, %d);'
+            . ' update_field(%s, %d, %d);'
             . ' update_field(%s, array('
             . '   array("acf_fc_layout" => "hero", "heading" => "Row zero"),'
             . '   array("acf_fc_layout" => "gallery", "heading" => "Row one is switched off",'
             . '         "target" => %d,'
+            . '         "meta" => array("caption" => "Caption inside a group"),'
+            . '         "inner" => array(array("acf_fc_layout" => "block", "body" => "Body inside a nested block")),'
             . '         "acf_fc_layout_disabled" => 1,'
             . '         "acf_fc_layout_custom_label" => %s),'
             . '   array("acf_fc_layout" => "hero", "heading" => "Row two")'
@@ -217,6 +238,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             self::$host,
             self::phpString($prefix . 'open_ref'),
             self::$published,
+            self::$host,
+            self::phpString($prefix . 'protected_ref'),
+            self::$protected,
+            self::$host,
+            self::phpString($prefix . 'user_obj'),
+            self::$adminId,
             self::$host,
             self::phpString($prefix . 'blocks'),
             self::$draft,
@@ -256,6 +283,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             . '    array("key" => "field_' . $run . '_open", "name" => "' . $prefix . 'open_ref",'
             . '          "label" => "Public reference", "type" => "post_object",'
             . '          "post_type" => array("post"), "return_format" => "object"),'
+            . '    array("key" => "field_' . $run . '_prot", "name" => "' . $prefix . 'protected_ref",'
+            . '          "label" => "Protected reference", "type" => "post_object",'
+            . '          "post_type" => array("post"), "return_format" => "object"),'
+            . '    array("key" => "field_' . $run . '_uo", "name" => "' . $prefix . 'user_obj",'
+            . '          "label" => "User as an object", "type" => "user",'
+            . '          "return_format" => "object"),'
             . '    array("key" => "field_' . $run . '_fc", "name" => "' . $prefix . 'blocks",'
             . '          "label" => "Blocks", "type" => "flexible_content", "layouts" => array('
             . '      "layout_' . $run . '_hero" => array("key" => "layout_' . $run . '_hero",'
@@ -269,13 +302,44 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             . '                "label" => "Heading", "type" => "text"),'
             . '          array("key" => "field_' . $run . '_gt", "name" => "target",'
             . '                "label" => "Target", "type" => "post_object",'
-            . '                "post_type" => array("post"), "return_format" => "object")'
+            . '                "post_type" => array("post"), "return_format" => "object"),'
+            // A GROUP AND A NESTED FLEXIBLE CONTENT, and they are the fixture round 1 did not have -
+            // which is the whole reason its blocker passed. For a CONTAINER sub-field the stored meta
+            // is a MARKER, not a value: a group stores nothing at its own key, a nested Flexible
+            // Content stores its layout-name array. A reconstruction that read the meta directly got
+            // `false` for the first and a TypeError for the second.
+            . '          array("key" => "field_' . $run . '_gg", "name" => "meta",'
+            . '                "label" => "Meta", "type" => "group", "sub_fields" => array('
+            . '                  array("key" => "field_' . $run . '_ggc", "name" => "caption",'
+            . '                        "label" => "Caption", "type" => "text")'
+            . '                )),'
+            . '          array("key" => "field_' . $run . '_gn", "name" => "inner",'
+            . '                "label" => "Inner blocks", "type" => "flexible_content", "layouts" => array('
+            . '                  "layout_' . $run . '_inner" => array("key" => "layout_' . $run . '_inner",'
+            . '                    "name" => "block", "label" => "Inner block", "display" => "block",'
+            . '                    "sub_fields" => array('
+            . '                      array("key" => "field_' . $run . '_gnb", "name" => "body",'
+            . '                            "label" => "Body", "type" => "text")'
+            . '                    ))'
+            . '                ))'
             . '      ))'
             . '    ))'
             . '  ),'
             . '  "location" => array(array(array("param" => "post_type", "operator" => "==", "value" => "post")))'
             . ' ));'
-            . '});';
+            . '});'
+            // AND THE STORE WARMER, which is the only way to reproduce S4 from outside the site.
+            // ACF's value store is per-request and `acf_get_value()` returns from it before
+            // `acf/load_value` fires, so a disabled row's index reaches the tool only if something
+            // put it there. On a real site the warmer is another plugin - jaygroup runs ACF Extended
+            // on exactly this field type. Here it is one read on `rest_api_init`, which runs before
+            // the route callback and therefore before the tool attaches its own subscriber, and it is
+            // gated on a PER-REQUEST header so the same class can read the same object both ways.
+            . ' add_action("rest_api_init", function () {'
+            . '  if (empty($_SERVER["HTTP_' . str_replace('-', '_', strtoupper(self::WARM_HEADER)) . '"])) { return; }'
+            . '  $id = (int) $_SERVER["HTTP_' . str_replace('-', '_', strtoupper(self::WARM_HEADER)) . '"];'
+            . '  if ($id > 0 && function_exists("get_field")) { get_field("' . $prefix . 'blocks", $id); }'
+            . ' }, 20);';
     }
 
     private static function destroy(): void
@@ -293,11 +357,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
      *
      * @return array<string, mixed>
      */
-    private function read(string $token, array $arguments = []): array
+    private function read(string $token, array $arguments = [], array $headers = []): array
     {
         $result = $this->mcp($token)->callTool(
             'get-acf-values',
-            array_merge(['object_type' => 'post', 'id' => self::$host], $arguments)
+            array_merge(['object_type' => 'post', 'id' => self::$host], $arguments),
+            $headers
         );
 
         self::assertFalse(
@@ -399,7 +464,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         $values = $rows[1]['values'];
 
         self::assertSame(
-            [$prefix . 'blocks_1_heading', $prefix . 'blocks_1_target'],
+            [
+                $prefix . 'blocks_1_heading',
+                $prefix . 'blocks_1_target',
+                $prefix . 'blocks_1_meta',
+                $prefix . 'blocks_1_inner',
+            ],
             array_keys($values),
             "The dropped row's values are keyed by something other than its sub-fields, or a"
             . ' sub-field with nothing stored was omitted instead of reported as empty.'
@@ -417,8 +487,40 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         );
         self::assertSame(
             self::$draft,
-            (int) $values[$prefix . 'blocks_1_target']['ID'],
+            (int) $values[$prefix . 'blocks_1_target']['id'],
             'The dropped row\'s reference does not point at the fixture target.'
+        );
+
+        // THE TWO CONTAINER SUB-FIELDS, WHICH ARE THE ROUND-1 BLOCKER. For a container the stored
+        // meta is a MARKER and not a value, so reading the meta directly and formatting it gives
+        // `false` for a group and a TypeError for a nested Flexible Content. Only
+        // `acf_get_value()` - the call ACF's own load_value() makes for each sub-field of a row -
+        // runs the sub-field type's loader and turns the marker into rows. jaygroup's entire layout
+        // set is a seamless clone, which fails the same way, so this is the case the feature exists
+        // for rather than an edge.
+        self::assertSame(
+            ['caption' => 'Caption inside a group'],
+            $values[$prefix . 'blocks_1_meta'],
+            'A GROUP sub-field of a dropped row came back as something other than its own fields.'
+            . ' `false` here means the value was read straight out of the meta table, where a'
+            . ' group stores nothing at its own key.'
+        );
+        self::assertIsArray(
+            $values[$prefix . 'blocks_1_inner'],
+            'A NESTED flexible_content sub-field of a dropped row is not an array of rows. Read'
+            . " from the meta table it is the stored layout-name array, and ACF's own"
+            . ' format_value() then indexes a string - a TypeError on PHP 8.3 that turns the whole'
+            . ' read into -32603.'
+        );
+        self::assertSame(
+            'block',
+            $values[$prefix . 'blocks_1_inner'][0]['acf_fc_layout'] ?? null,
+            'The nested block did not come back with its layout.'
+        );
+        self::assertStringContainsString(
+            'Body inside a nested block',
+            (string) json_encode($values[$prefix . 'blocks_1_inner']),
+            "The nested block's own sub-value is missing."
         );
 
         // A ROW THAT IS *NOT* DISABLED CARRIES NO `values`, because its values are already in the
@@ -448,7 +550,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         $authorHidden = self::field($asAuthor, $prefix . 'ref')['value'];
 
         self::assertIsArray($adminHidden, 'The administrator did not get an expanded post object.');
-        self::assertSame(self::$draft, (int) $adminHidden['ID']);
+        self::assertSame(self::$draft, (int) $adminHidden['id']);
 
         self::assertSame(
             self::$draft,
@@ -466,7 +568,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             'A reference to a PUBLISHED post was reduced for the Author, so the reduction is a'
             . ' blanket flattening rather than a permission gate.'
         );
-        self::assertSame(self::$published, (int) $authorOpen['ID']);
+        self::assertSame(self::$published, (int) $authorOpen['id']);
 
         // AND INSIDE THE DROPPED ROW, which is the path that does NOT go through ACF's own
         // container recursion - we rebuild it - so it needs its own assertion.
@@ -586,6 +688,177 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
 
         // AND THE FIELD IS REALLY THERE, or this test is about a field nothing returned.
         self::assertSame('flexible_content', $blocks['type']);
+    }
+
+    /**
+     * S4, AND THE QUEEN RANKED IT ABOVE THE BLOCKER: a disabled row survives a WARM value store.
+     *
+     * `acf_get_value()` returns from ACF's per-request values store BEFORE `acf/load_value` fires,
+     * so the priority-9 subscriber that captures the raw layout-name array never runs if anything
+     * read the field earlier in the same request. The first version built the row index set from the
+     * formatted keys plus that capture, so the disabled index was in NEITHER and the row simply was
+     * not there - no marker, no error, nothing. That is worse than a wrong value: a wrong value is
+     * visible and a missing row is not, and D29 exists for exactly this.
+     *
+     * THE WARMING IS REAL AND NOT SIMULATED. The mu-plugin reads the field on `rest_api_init`, which
+     * runs before the route callback and therefore before the tool attaches its own subscriber - the
+     * same position another plugin occupies. jaygroup runs ACF Extended on this field type.
+     *
+     * A TEST THAT ONLY EVER RUNS COLD CANNOT FAIL ON THIS, which is why the header exists.
+     *
+     * @group acf-data
+     */
+    public function testADisabledRowSurvivesAWarmValueStore(): void
+    {
+        $prefix = self::fieldPrefix();
+        $rows   = self::field(
+            $this->read(self::$adminToken, [], [self::WARM_HEADER => (string) self::$host]),
+            $prefix . 'blocks'
+        )['rows'];
+
+        self::assertSame(
+            [0, 1, 2],
+            array_column($rows, 'index'),
+            'With ACF\'s value store already warm, a row is missing. The union of row indices must'
+            . ' include the disabled ones from get_disabled_layouts(), which reads meta and never'
+            . ' the store, or a row can vanish with nothing anywhere saying it was there.'
+        );
+        self::assertSame([false, true, false], array_column($rows, 'disabled'));
+
+        // AND IT IS STILL FULLY DESCRIBED, because the tool flushes that one field's three store
+        // keys and reads it again when the capture came back empty - so the layout NAME, the
+        // editor's label and the row's own values all survive a warm store too.
+        self::assertSame(
+            ['hero', 'gallery', 'hero'],
+            array_column($rows, 'layout'),
+            "A warm store cost the dropped row its layout NAME. acf_flush_value_cache() on that one"
+            . ' field is what makes acf/load_value fire on the second read.'
+        );
+        self::assertSame('Editor renamed me', $rows[1]['label']);
+        self::assertSame(
+            'Row one is switched off',
+            $rows[1]['values'][$prefix . 'blocks_1_heading'] ?? null,
+            "A warm store cost the dropped row its values."
+        );
+    }
+
+    /**
+     * NO LIVE WORDPRESS OBJECT REACHES THE WIRE - measured on the bytes, not on the shape.
+     *
+     * `wp_json_encode()` on a `WP_Post` serialises all 24 properties, `post_password` in PLAINTEXT
+     * among them; on a `WP_User` it serialises `data`, which carries `user_pass` and
+     * `user_activation_key`. Both are values ACF's `'standard'` formatter really produces for
+     * `return_format: object`, and neither is stopped by ACF's own reduction - a password-protected
+     * post is `publish`, so core's `check_read_permission()` says yes to anybody, and the 6.8.7 user
+     * sanitiser short-circuits for a caller with `list_users`.
+     *
+     * ASSERTED ON THE SERIALISED TEXT because that is what the caller receives: a decoded-structure
+     * assertion cannot tell a property that is absent from one nested three levels down.
+     * `get-user`'s own description promises "Never returns passwords, keys, sessions or user meta",
+     * so this is a promise this server already makes.
+     *
+     * @group acf-data
+     */
+    public function testNoPasswordHashOrPostPasswordReachesTheWire(): void
+    {
+        $prefix = self::fieldPrefix();
+        $result = $this->mcp(self::$adminToken)->callTool(
+            'get-acf-values',
+            ['object_type' => 'post', 'id' => self::$host]
+        );
+
+        self::assertFalse($result->isError, $result->text);
+
+        foreach ([
+            'post_password'        => 'a post password field',
+            'wpmcp-fixture-secret' => "the protected post's password in plaintext",
+            'THE PROTECTED BODY'   => "the protected post's body",
+            'user_pass'            => "a user's password hash",
+            'user_activation_key'  => 'a user activation key',
+            'allcaps'              => "a user's whole capability map",
+        ] as $needle => $what) {
+            self::assertStringNotContainsString(
+                $needle,
+                $result->text,
+                "The read put {$what} on the wire. wp/v2 serves none of these and neither does this"
+                . " plugin's get-post or get-user, so an ACF field must not be the way round them."
+            );
+        }
+
+        $read = $result->data();
+
+        // AND THE FIELDS ARE STILL THERE AND STILL USEFUL, or this test would pass on a tool that
+        // returned nothing at all.
+        $protected = self::field($read, $prefix . 'protected_ref')['value'];
+
+        self::assertSame(self::$protected, (int) $protected['id']);
+        self::assertTrue(
+            (bool) $protected['password_protected'],
+            'A password-protected target is not marked as one, so its missing body reads as an'
+            . ' empty post rather than as a withheld one.'
+        );
+        self::assertArrayNotHasKey('content', $protected, "A protected post's body was returned.");
+
+        $open = self::field($read, $prefix . 'open_ref')['value'];
+
+        self::assertFalse((bool) $open['password_protected']);
+        self::assertArrayHasKey(
+            'content',
+            $open,
+            'An unprotected post lost its body too, so the withholding is not conditional.'
+        );
+
+        $user = self::field($read, $prefix . 'user_obj')['value'];
+
+        self::assertSame(self::$adminId, (int) $user['id']);
+        self::assertArrayHasKey(
+            'login',
+            $user,
+            'An administrator reading a user field did not get the privileged fields get-user gives'
+            . ' the same caller.'
+        );
+    }
+
+    /**
+     * AND A USER FIELD IS ALREADY REDUCED BY ACF ITSELF for a caller without `list_users` - which is
+     * the 6.8.7 sanitiser, and it is why this module's own user narrowing is defence in depth rather
+     * than the only gate.
+     *
+     * MEASURED, AND IT CORRECTED MY EXPECTATION: the Author gets a bare integer, not a narrowed
+     * object. `acf_rest_apply_user_data_sanitizer()` short-circuits for
+     * `current_user_can('list_users')` and otherwise reduces the user to its ID, so the only caller
+     * who reaches `wpmcp_acf_user_out()`'s privileged branch is one who HAS `list_users` - exactly
+     * the caller `get-user` gives those four fields to. The narrowing still matters for the case
+     * ACF's sanitiser does not cover: any other field type, now or later, that returns a `WP_User`.
+     *
+     * @group acf-data
+     */
+    public function testAUserFieldIsReducedByAcfForACallerWithoutListUsers(): void
+    {
+        $user = self::field(
+            $this->read(self::$authorToken),
+            self::fieldPrefix() . 'user_obj'
+        )['value'];
+
+        self::assertSame(
+            self::$adminId,
+            $user,
+            "An Author was handed something other than the user's bare ID. ACF's own 6.8.7 user"
+            . ' sanitiser reduces a user field for a caller without list_users, and this read goes'
+            . ' through it.'
+        );
+
+        // AND THE ADMINISTRATOR IS NOT REDUCED, or the assertion above would pass on a tool that
+        // returned an ID to everybody - and the shape it gets must still be get-user's field set
+        // rather than the whole WP_User row.
+        $asAdmin = self::field($this->read(self::$adminToken), self::fieldPrefix() . 'user_obj')['value'];
+
+        self::assertIsArray($asAdmin, 'An administrator was reduced to an ID too.');
+        self::assertSame(
+            ['id', 'name', 'login', 'email', 'roles', 'registered'],
+            array_keys($asAdmin),
+            "A user reaching a caller with list_users does not carry get-user's own field set."
+        );
     }
 
     /** Single-quoted for `wp eval`, which carries the snippet as one argv element. */

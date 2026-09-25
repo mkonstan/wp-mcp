@@ -23,13 +23,28 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   somebody else's draft comes back as a bare ID for a token that may not read it and expanded for
   one that may, and that answer is ACF's rather than ours. Measured on genuine ACF Pro 6.8.10 before
   any of it was written.
+- **An expanded reference is a named subset, and never a database row.** ACF's
+  `return_format: object` hands back a live `WP_Post` or `WP_User`, and JSON-encoding one of those
+  serialises every public property: `post_password` in plaintext for a post, `user_pass` and
+  `user_activation_key` for a user. Measured, and neither is stopped by ACF's own reduction - a
+  password-protected post is `publish`, so core's `check_read_permission()` says yes to anybody, and
+  ACF's user sanitiser short-circuits for a caller with `list_users`. So a post comes back as a
+  named subset with no password and with `content` withheld - and `password_protected: true`
+  reported - whenever core's own `post_password_required()` says so, and a user comes back with
+  exactly the fields `get-user` gives the same caller. `wp/v2` serves none of the rest, and neither
+  does `get-post` or `get-user`.
 - **A Flexible Content layout an editor SWITCHED OFF is returned and MARKED, never silently
   dropped.** ACF 6.5 added that toggle and implemented it in `load_value`, keeping the row only when
   `is_admin()` - which is never true for a REST request. So wp-admin shows four blocks and ACF hands
   a REST caller three, with nothing saying a fourth exists. A read feeds a write, so a silently
   dropped block becomes a silently deleted one. The row now comes back with `disabled: true` and its
   own values, and a RENAMED layout reports the label the editor sees rather than the original. The
-  state comes from ACF's own public `get_disabled_layouts()` and `get_renamed_layouts()`.
+  state comes from ACF's own public `get_disabled_layouts()` and `get_renamed_layouts()`, and the
+  row's own values from `acf_get_value()` - the same call ACF's own row loader makes, so a sub-field
+  that is a group, a clone, a repeater or another Flexible Content field is expanded by its own
+  type's loader rather than read as the marker its meta row holds. A disabled row is reported even
+  when something else on the site has already read the field in the same request, which is the one
+  way it could still have disappeared silently.
 - **The capability gate is ours, because ACF has none, and it is the capability that opens the
   wp-admin screen these fields are rendered on:** `edit_post`, `edit_term`, `edit_user` or
   `manage_options`. A post you may not read answers byte-identically to a post that is not there, as

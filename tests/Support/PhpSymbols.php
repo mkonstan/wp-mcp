@@ -46,10 +46,25 @@
  * and a regex over the raw text would have to be weakened the first time somebody did.
  *
  * WHAT IT CANNOT SEE, said here because a mechanism that does not state its limit invites the
- * trust it has not earned. It resolves names that are WRITTEN, so an INDIRECT reference is
- * outside it: `$fn('x')`, `call_user_func('wpmcp_trace', ...)`, `add_action('x', 'wpmcp_trace')`,
- * `['WpMcp_Thing', 'make']()`. Every one reaches a symbol and none is a token this class can
- * attribute. See ModuleBoundaryTest's header for the one hand check that covers them.
+ * trust it has not earned.
+ *
+ * 1. An INDIRECT reference. It resolves names that are WRITTEN, so `$fn('x')`,
+ *    `call_user_func('wpmcp_trace', ...)`, `add_action('x', 'wpmcp_trace')` and
+ *    `['WpMcp_Thing', 'make']()` each reach a symbol that is not a token here. See
+ *    ModuleBoundaryTest's header for the one hand check that covers them.
+ * 2. A CLASS CONSTANT's own name. `Foo::BAR` reports `Foo` as a class - which is the dependency
+ *    that matters and is checked - and DROPS `BAR` as a member, so a face cannot be made to
+ *    verify it and a missing one fatals with the class present. No module has one. If ever
+ *    needed, `defined('Foo::BAR')` is true for a class constant in PHP, so a face's `constants`
+ *    list can hold the qualified name without any new mechanism.
+ * 3. A METHOD OF AN ENUM. `methodDeclarations()` counts brace depth from `class`, `trait` and
+ *    `interface`, not `enum`, so `WpMcp\ProtocolVersion::latest()` is not in the excuse set. That
+ *    errs LOUD - a module calling `->latest()` on a foreign object is reported - so it is a limit
+ *    and not a hole.
+ * 4. It does NOT skip attributes. A name inside `#[Attr(...)]` lands in the `constant` bucket,
+ *    which is reported rather than excused, so an attribute on a module's function errs loud too.
+ *    (An earlier draft of significant() claimed to skip them and did not; the claim is gone
+ *    rather than the behaviour, because the behaviour is the safe one.)
  */
 
 declare(strict_types=1);
@@ -218,7 +233,10 @@ final class PhpSymbols
     }
 
     /**
-     * The nearest token in $direction that is not whitespace, a comment or an attribute.
+     * The nearest token in $direction that is not whitespace or a comment.
+     *
+     * NOT attributes: `#[` arrives as T_ATTRIBUTE and is left in place, so a name inside one is
+     * classified by its own position. See limit 4 in the header.
      *
      * @param list<array{0:int,1:string,2:int}|string> $tokens
      * @return array{0:int,1:string,2:int}|string|null

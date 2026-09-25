@@ -71,34 +71,62 @@
  * every request to the site and a filter left attached would run on every front-end page load
  * for the benefit of a tool nobody called.
  *
- * AND THE DROPPED ROW'S VALUES ARE NOT READ THE WAY THE SPRINT BRIEF SAID, because the brief's
- * route is both broken and unsafe here. MEASURED on jaygroup, which is 71.5% clone composites:
+ * AND THE DROPPED ROW'S VALUES ARE READ THE WAY ACF READS THEM, which took two rounds to get
+ * right and the first round was wrong in the way that mattered.
+ *
+ * THE SPRINT BRIEF'S ROUTE - `get_field("{$fc}_{$i}_{$sub}", $id)` - IS A TRAP, and that part of
+ * round 1 stands. MEASURED on jaygroup, which is 71.5% clone composites:
  *
  *   - `get_field_object("content_0_fields_title", $page)` returns **false**. The flattened
  *     reference row `_content_0_fields_title` holds `field_69d89b38e8de9_field_69d89b0959509` -
  *     a clone COMPOSITE key, not a field key - and `acf_get_field()` cannot resolve it, so
- *     `acf_get_meta_field()` gives up. `analysis/72` §2c concluded that
- *     `acf_maybe_get_field()` "resolves exactly those"; it does not, and the reference row the
- *     scout itself quoted is a composite too.
- *   - `get_field("content_0_fields_title", $page)` DOES return "Zero is off" - but only because
- *     `get_field` falls back to a DUMMY text field and returns the RAW meta with `$format_value`
- *     forced to false (`analysis/71` §6.3b). So an Image sub-field comes back as a bare ID with
- *     no formatting AND no permission reduction. That is the exact disclosure this module exists
- *     to avoid, arriving through the one route that looked safe.
+ *     `acf_get_meta_field()` gives up. `analysis/72` §2c concluded that `acf_maybe_get_field()`
+ *     "resolves exactly those"; it does not, and the reference row the scout itself quoted is a
+ *     composite too.
+ *   - `get_field("content_0_fields_title", $page)` DOES answer - but only because `get_field`
+ *     falls back to a DUMMY text field and returns the RAW meta with `$format_value` forced to
+ *     false (`analysis/71` §6.3b). So an Image sub-field comes back as a bare ID with no
+ *     formatting AND no permission reduction: the exact disclosure this module exists to avoid,
+ *     arriving through the one route that looked safe.
  *
- * So a dropped row's values are rebuilt from the parent field's OWN layout definition - which
- * `get_field_object()` already handed us - with each sub-field's name rewritten to
- * `{$parent}_{$index}_{$sub}` exactly as ACF's `load_value()` rewrites it, the stored value read
- * with core's own meta API, and the result handed to the SAME
- * `acf_format_value_for_rest(..., 'standard')` every other value in this file goes through. One
- * read primitive, so the reduction cannot be skipped for the rows ACF hid.
+ * WHAT ROUND 1 THEN DID WAS ALSO WRONG, and it failed at the only thing the feature does. It read
+ * each sub-field's stored meta directly and formatted that. For a LEAF sub-field the stored meta IS
+ * the value and the answer was right. For a CONTAINER the stored meta is a MARKER:
  *
- * THE ONE ASSUMPTION THAT IS OURS AND NOT ACF'S, stated because it is the module's only
- * undocumented storage dependency: that ACF stores a flattened sub-field under
- * `{$parent}_{$index}_{$sub}` in the object's own meta. D29 authorised exactly this class of
- * narrow, module-scoped, READ-ONLY exception, and `analysis/72` §2b establishes that there is no
- * accessor at all for these values - `Flexible_Content::load_value()` drops them with no filter
- * of any kind in a 1,700-line class whose only `apply_filters` is unrelated.
+ *   - a `group` and a seamless `clone` store NOTHING at their own key, so the read was `''` and
+ *     `Clone::format_value('')` / `Group::format_value('')` returned `false` at their `empty()`
+ *     guard. jaygroup's one Flexible Content field has a seamless clone (`prefix_name = 1`) as the
+ *     SOLE sub-field of all 35 layouts, and no `content_N_fields` row exists on any of its 294
+ *     posts - so every disabled row on the site this was built for would have reported
+ *     `values: {…: false}`, which reads to a caller as "the row was empty";
+ *   - a `repeater` stores its row COUNT, which fails `is_array` and returns `false`;
+ *   - a nested `flexible_content` stores its layout-NAME array, and
+ *     `Flexible_Content::format_value()` then indexes a string. MEASURED at runtime: `TypeError:
+ *     Cannot access offset of type string on string` at
+ *     `pro/fields/class-acf-field-flexible-content.php:696`, which the error boundary turns into
+ *     `-32603` - so ONE disabled row with a nested block cost the whole object read.
+ *
+ * THERE IS AN ACCESSOR AND ACF USES IT ITSELF. `analysis/72` §2b says "there is no supported
+ * accessor" for these values and that claim, carried into the sprint brief and then into this
+ * file's own comments as measured fact, is FALSE. `Flexible_Content::load_value()` builds a
+ * surviving row's values with exactly two lines:
+ *
+ *     $sub_field['name'] = "{$field['name']}_{$i}_{$sub_field['name']}";   // :590
+ *     $sub_value         = acf_get_value( $post_id, $sub_field );          // :593
+ *
+ * and this module now makes the same two calls for a row ACF dropped. `acf_get_value()` runs the
+ * sub-field type's own `load_value`, so a clone expands by prefixed name, a repeater and a nested
+ * Flexible Content expand their rows, and the nested one drops ITS disabled rows exactly as ACF
+ * would. The result still goes through the one `wpmcp_acf_format()` primitive, so the permission
+ * reduction cannot be skipped for the rows ACF hid.
+ *
+ * SO D29'S AUTHORISED EXCEPTION IS NOT USED, and the module has no meta-layout assumption left.
+ * D29 priced in reading a protected meta key directly; `analysis/72`'s public layout accessors
+ * removed that for the STATE, and `acf_get_value()` removes it for the VALUES - including the
+ * multilingual-options caveat round 1 had to write down, because ACF resolves the meta through its
+ * own per-location classes. WHAT REMAINS IS ONE UNDOCUMENTED DEPENDENCY AND IT IS A NAMING
+ * CONVENTION, NOT A STORAGE LAYOUT: that a Flexible Content sub-field's name is
+ * `{$parent}_{$index}_{$sub}`. It is the line above ACF's own `acf_get_value()` call, copied.
  *
  * ------------------------------------------------------------------------------
  * WHAT THIS FILE MAY CALL: WordPress, two core helpers in tools.php - wpmcp_cannot() and
@@ -117,9 +145,25 @@
  * differently-named directory, would load us first and answer "no ACF" on a site that has it.
  * `plugins_loaded` is the earliest hook at which the question is about the site, and it is still
  * long before anything reads the registry: wpmcp_module_tools() is only reached from
- * wpmcp_tools(), inside a REST request. ACF registers its field types at its own load time -
- * `acf()` is called at its file scope and `initialize()` includes every field class - so
- * `acf_get_field_type('flexible_content')` is answerable by then too.
+ * wpmcp_tools(), inside a REST request.
+ *
+ * AND THE REQUIRED HALF - AND ONLY THE REQUIRED HALF - IS ANSWERABLE THERE. This paragraph used to
+ * claim that ACF registers its field types at its own load time. IT DOES NOT, and the correction
+ * matters to the next author (review 74, S3). `acf_format_value_for_rest()` and the two documented
+ * getters ARE defined at load: `acf.php:261` includes `includes/rest-api.php` from `initialize()`,
+ * which runs at ACF's file scope. But the FIELD TYPES arrive on `acf/include_field_types`, fired
+ * from `ACF::init()`, which is hooked to `init` at priority 5 (`acf.php:315`, `:410`; PRO hooks
+ * the same action at 5 in `pro/acf-pro.php:64`). So at `plugins_loaded` priority 0,
+ * `acf_get_field_type('flexible_content')` is NULL.
+ *
+ * That is harmless BECAUSE OF WHERE EACH HALF IS ASKED, which is the thing to keep true rather
+ * than the hook number: `wpmcp_module_face_missing()` reads the REQUIRED block only, and the
+ * OPTIONAL block - the one with the method probe - is asked by
+ * wpmcp_acf_layout_metadata_available() inside the tool's own run, and by the settings screen,
+ * both long after `init`. **So a future author must not promote a method entry to `required`**:
+ * it would be checked at `plugins_loaded`, answer "missing", and the module would never register
+ * on a site that has everything. If a required method ever becomes necessary, move the
+ * registration to `init` - nothing reads the registry before then.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -150,9 +194,19 @@ function wpmcp_acf_api_face() {
     return array(
         'required' => array(
             'functions' => array(
+                // The formatter, and the two documented reads that feed it.
                 'acf_format_value_for_rest',
                 'get_field_object',
                 'get_field_objects',
+                // ADDED IN ROUND 2, and both are on the value path rather than beside it.
+                // acf_get_value() is what ACF's own Flexible_Content::load_value() calls for each
+                // sub-field of a row, and what the documented get_field_object() is built on; it
+                // is `@since 5.0.0`, so it is present wherever the three above are.
+                // acf_flush_value_cache() is `@since 5.7.10` and is how the value store is made to
+                // miss, which is what forces acf/load_value to fire - see
+                // wpmcp_acf_reload_gapped_rows() for the one thing that depends on it.
+                'acf_get_value',
+                'acf_flush_value_cache',
             ),
         ),
         'optional' => array(
@@ -193,9 +247,9 @@ function wpmcp_acf_layout_metadata_available() {
 /**
  * The object kinds this tool reads, and the ACF object id each one maps to.
  *
- * ONE PLACE, because the enum in the inputSchema, the mapping in the run closure and the meta
- * read in wpmcp_acf_raw_meta() are three views of the same list and a fourth kind added to one of
- * them would otherwise be missing from the others. The identifiers are the ones public
+ * ONE PLACE, because the enum in the inputSchema and the mapping in the run closure are two views
+ * of the same list and a third kind added to one of them would otherwise be missing from the
+ * other. The identifiers are the ones public
  * `acf_get_valid_post_id()` already produces and accepts - the bare id for a post, and
  * `term_%s` / `user_%s` otherwise - so nothing here reaches for that internal normaliser.
  *
@@ -287,7 +341,11 @@ function wpmcp_acf_resolve($type, $id) {
  * @return mixed the formatted, permission-reduced value
  */
 function wpmcp_acf_format($raw, $acfId, $field) {
-    return acf_format_value_for_rest($raw, $acfId, $field, 'standard');
+    // TWO STEPS, AND THE SECOND IS A DISCLOSURE GATE RATHER THAN A FORMATTER. ACF decides WHICH
+    // objects this caller may see expanded; wpmcp_acf_no_objects() decides what an expanded one is
+    // allowed to contain, because wp_json_encode() on a WP_Post or a WP_User serialises the whole
+    // database row - post_password in plaintext, user_pass as a hash. See that function.
+    return wpmcp_acf_no_objects(acf_format_value_for_rest($raw, $acfId, $field, 'standard'));
 }
 
 /**
@@ -359,9 +417,19 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         $renamed  = (array) $type->get_renamed_layouts($object['acf_id'], $field);
     }
 
+    // THE UNION IS THREE SETS AND THE THIRD IS NOT OPTIONAL (review 74, S4 - and the queen ranked
+    // it above the blocker, correctly). The first version used the formatted keys plus the
+    // priority-9 capture, and the capture is the one that can be EMPTY: acf_get_value() returns
+    // from the values store before `acf/load_value` ever fires, so any earlier read of this field
+    // in the same request - another plugin, ACF Extended, a theme - meant the subscriber never ran,
+    // the disabled index was in neither set, and the row VANISHED WITH NO MARKER. That is the exact
+    // silence D29 exists to prevent, and it is worse than a loud wrong value: nothing anywhere says
+    // a row was there. `get_disabled_layouts()` reads meta and never the value store, so adding it
+    // to the union means the row cannot disappear however warm the cache is. Held by a test that
+    // WARMS the store first; a test that only ever runs cold cannot fail on this.
     $indices = array_map('intval', array_keys($formatted));
 
-    foreach (array_keys((array) $raw) as $index) {
+    foreach (array_merge(array_keys((array) $raw), $disabled) as $index) {
         if (!in_array((int) $index, $indices, true)) { $indices[] = (int) $index; }
     }
 
@@ -410,10 +478,20 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
 /**
  * The values of a row ACF dropped, keyed by sub-field name.
  *
- * COMPLETE BY CONSTRUCTION. The keys come from the LAYOUT DEFINITION rather than from what
- * happens to be stored, so a sub-field with nothing saved is present and null instead of absent -
- * which is the whole point of reporting a dropped row at all. A tab or a message sub-field has no
- * name and holds no value, so it is skipped rather than reported as an empty one.
+ * THE KEY SET IS COMPLETE BY CONSTRUCTION, and the VALUES are as complete as ACF's own row loading
+ * - which is a narrower claim than round 1 made and the only one this code can support. The keys
+ * come from the LAYOUT DEFINITION rather than from what happens to be stored, so a sub-field with
+ * nothing saved is present and empty instead of absent, which is the whole point of reporting a
+ * dropped row at all. A tab or a message sub-field has no name and holds no value, so it is skipped
+ * rather than reported as an empty one. Each value then comes from `acf_get_value()` - the same call
+ * `Flexible_Content::load_value()` makes for a row it kept - so a container sub-field is expanded by
+ * its own type's loader rather than read as the marker its meta row actually holds.
+ *
+ * WHAT IS STILL NOT INHERITED, because `acf_get_value()` is where the value path starts and not
+ * where it ends: nothing here re-enters the PARENT field's `format_value`, so a sub-value is
+ * formatted by `wpmcp_acf_format()` on its own rather than as part of a row. For every field type
+ * measured that is the same answer; it is written down because it is the seam where a future ACF
+ * change would show up first.
  *
  * @param array<string, array> $layouts layout name => the layout definition
  * @return array<string, mixed>
@@ -429,47 +507,36 @@ function wpmcp_acf_dropped_row_values($field, $object, $index, $layouts, $layout
     foreach ((array) $layouts[$layoutName]['sub_fields'] as $sub) {
         if (!is_array($sub) || !isset($sub['name']) || (string) $sub['name'] === '') { continue; }
 
-        $selector = $parent . '_' . (int) $index . '_' . (string) $sub['name'];
-
-        // RENAMED THE WAY ACF'S OWN load_value() RENAMES IT, which is what makes the stored meta
-        // key and the sub-field array agree - and what makes the formatter produce the same value
-        // it would have produced for a row ACF had not dropped.
-        $sub['name'] = $selector;
+        // RENAMED AND THEN LOADED EXACTLY AS ACF'S OWN load_value() DOES IT, two lines apart:
+        //
+        //     $sub_field['name'] = "{$field['name']}_{$i}_{$sub_field['name']}";   // :590
+        //     $sub_value         = acf_get_value( $post_id, $sub_field );          // :593
+        //
+        // (pro/fields/class-acf-field-flexible-content.php). READING THE META DIRECTLY WAS THE
+        // BLOCKER OF ROUND 1 and it was wrong in the only way that mattered: acf_get_value() runs
+        // the SUB-FIELD TYPE'S OWN load_value, and for every container type the stored meta is a
+        // MARKER rather than a value. jaygroup's one Flexible Content field has a seamless clone
+        // (`prefix_name = 1`) as the sole sub-field of all 35 layouts, and there is no
+        // `content_N_fields` meta row on any of its 294 posts - so a bare get_post_meta() returned
+        // '' for every disabled row, Clone::format_value('') returned false at its empty() guard,
+        // and the feature reported `values: {..: false}` on the only site it was built for. A
+        // repeater's stored row COUNT and a nested Flexible Content's stored LAYOUT-NAME ARRAY fail
+        // the same way, the second as a TypeError on PHP 8.3 that turns the whole read into -32603.
+        //
+        // acf_get_value() is not on D9's fenced list (acf_update_value, acf_validate_value,
+        // acf_*_metadata, acf_get_valid_post_id), is `@since 5.0.0`, is the function the documented
+        // get_field_object() is built on, and it resolves the meta through ACF's own per-location
+        // classes - which also removed this module's multilingual-options caveat.
+        $sub['name'] = $parent . '_' . (int) $index . '_' . (string) $sub['name'];
 
         $values[(string) $sub['name']] = wpmcp_acf_format(
-            wpmcp_acf_raw_meta($object, $selector),
+            acf_get_value($object['acf_id'], $sub),
             $object['acf_id'],
             $sub
         );
     }
 
     return $values;
-}
-
-/**
- * The stored value of one flattened selector, read with CORE's own meta API.
- *
- * THIS IS THE MODULE'S ONE UNDOCUMENTED STORAGE DEPENDENCY and it is here rather than spread
- * about, so a reviewer can see all of it at once: ACF stores a Flexible Content sub-field under
- * `{$parent}_{$index}_{$sub}` on the object itself, and the options location prefixes the key
- * with `options_` (measured: ACF's own `src/Meta/Option.php`). `analysis/72` §2b establishes that
- * there is no accessor for these values at all, and D29 authorised exactly this narrow,
- * module-scoped, read-only exception.
- *
- * @return mixed
- */
-function wpmcp_acf_raw_meta($object, $selector) {
-    if ($object['type'] === 'term')    { return get_term_meta($object['id'], $selector, true); }
-    if ($object['type'] === 'user')    { return get_user_meta($object['id'], $selector, true); }
-    // THE ONE PLACE THIS IS NOT EXACT, said rather than left to be found: on a MULTILINGUAL site
-    // acf_get_valid_post_id() appends a language code to `options`, and that normaliser is
-    // internal (D9 fences it), so this read uses the unsuffixed option name. It affects only the
-    // recovered values of a DISABLED Flexible Content row on an options page - every other value
-    // on this path goes through ACF's own resolution. A translated options page would report
-    // those sub-values as empty rather than wrong.
-    if ($object['type'] === 'options') { return get_option('options_' . $selector); }
-
-    return get_post_meta($object['id'], $selector, true);
 }
 
 /**
@@ -556,6 +623,196 @@ function wpmcp_acf_field_objects($object, $selectors) {
     return $fields;
 }
 
+/**
+ * MAKE THE VALUE STORE MISS FOR A FLEXIBLE CONTENT FIELD WHOSE ROW LIST WE DID NOT SEE.
+ *
+ * `acf_get_value()` returns from the values store BEFORE `acf/load_value` runs, so any earlier read
+ * of the same field in the same request - another plugin, ACF Extended (which jaygroup runs on this
+ * very field), a theme - means our priority-9 subscriber never fires and the raw layout-name array
+ * is not captured. The row still cannot vanish, because the disabled indices go into the union on
+ * their own; but WITHOUT the raw array a dropped row has no layout NAME, with no name there is no
+ * layout definition, and with no definition there are no sub-field values to recover. The read
+ * would mark the row and then say nothing about it.
+ *
+ * So: for each Flexible Content field whose capture is empty, flush that field's three store keys
+ * and read it once more. The second read misses the store, `load_value` runs, the subscriber fires.
+ * It costs one extra read per affected field, and only when the store was already warm.
+ *
+ * `acf_flush_value_cache()` IS THE NARROW TOOL ON PURPOSE. It removes `"$id:$name"`,
+ * `"$id:$name:formatted"` and `"$id:$name:escaped"` and nothing else, where
+ * `acf_get_store('values')->reset()` - which is what ACF's own REST controller calls - would throw
+ * away every field of every object this request has read. A memo we did not fill is not ours to
+ * empty.
+ *
+ * @param array<string, array> $fields name => field array, as get_field_object(s) returned them
+ * @return array<string, array>
+ */
+function wpmcp_acf_reload_gapped_rows($fields, $object) {
+    foreach ($fields as $key => $field) {
+        if (!isset($field['type'], $field['name']) || $field['type'] !== 'flexible_content') { continue; }
+        if (wpmcp_acf_captured_rows($object['acf_id'], (string) $field['name']) !== array()) { continue; }
+
+        acf_flush_value_cache($object['acf_id'], (string) $field['name']);
+
+        $again = get_field_object((string) $field['name'], $object['acf_id'], false, true);
+
+        if (is_array($again) && isset($again['type'])) { $fields[$key] = $again; }
+    }
+
+    return $fields;
+}
+
+/**
+ * NO LIVE WORDPRESS OBJECT REACHES THE WIRE, and this is a DISCLOSURE fix rather than a tidying
+ * one (review 74, S5 - which under-rated it; measured in round 2).
+ *
+ * `wp_json_encode()` on an object serialises its PUBLIC PROPERTIES, which for WordPress's own
+ * classes is the whole database row. MEASURED on jaygroup, on the values ACF's `'standard'`
+ * formatter actually produces:
+ *
+ *   - a Post Object / Relationship field with `return_format: object` gives a `WP_Post`, whose 24
+ *     properties include `post_password` - the PLAINTEXT password - and `post_content`. A
+ *     password-protected post is `post_status = publish`, and core's own
+ *     `check_read_permission()` returns TRUE on a published post for anybody, so ACF's 6.8.10
+ *     reduction does not stop it: measured, an anonymous caller was handed `hunter2` and
+ *     `THE SECRET BODY`. `wp/v2` serves neither - it has no password field at all and answers
+ *     `content: {protected: true, rendered: ""}` - and neither does this plugin's own `get-post`.
+ *   - a User field with `return_format: object` gives a `WP_User`, whose `data` property carries
+ *     **`user_pass`** (the hash) and `user_activation_key`, plus `allcaps`. ACF's 6.8.7 user
+ *     sanitiser short-circuits for a caller with `list_users`, which every administrator-bound
+ *     token has. `get-user`'s own description promises, in writing, *"Never returns passwords,
+ *     keys, sessions or user meta."* This module would have broken that promise on the same server.
+ *
+ * ACF's `return_format: array` for a User, and its Image / File arrays, are clean - so the defect
+ * is not ACF's formatter. It is that a SITE MAY CHOOSE `object`, and PHP's default object
+ * serialisation then decides what a token holder receives.
+ *
+ * SO THE RULE IS AN ALLOW-LIST, NOT A DENYLIST. A denylist leaks the next property WordPress adds.
+ * Every object is replaced by a named subset, and anything this function does not know is replaced
+ * by its class name and its id - which is the shape ACF's own `'light'` format would have returned,
+ * so nothing unknown is ever serialised and nothing is silently dropped either.
+ *
+ * IT RUNS ON THE FORMATTED, ALREADY-REDUCED VALUE, so it composes with ACF's permission reduction
+ * rather than replacing it: a reference this caller may not read is a bare ID long before it reaches
+ * here, and this narrows what is left.
+ *
+ * @return mixed
+ */
+function wpmcp_acf_no_objects($value) {
+    if (is_array($value)) {
+        $out = array();
+
+        foreach ($value as $key => $item) { $out[$key] = wpmcp_acf_no_objects($item); }
+
+        return $out;
+    }
+
+    if (!is_object($value)) { return $value; }
+
+    if ($value instanceof WP_Post) { return wpmcp_acf_post_out($value); }
+    if ($value instanceof WP_User) { return wpmcp_acf_user_out($value); }
+
+    if ($value instanceof WP_Term) {
+        return array(
+            'id'       => (int) $value->term_id,
+            'taxonomy' => (string) $value->taxonomy,
+            'name'     => (string) $value->name,
+            'slug'     => (string) $value->slug,
+            'parent'   => (int) $value->parent,
+            'count'    => (int) $value->count,
+        );
+    }
+
+    // ANYTHING ELSE: named, with its id if it has one, and never serialised. A future ACF field
+    // type that returns some other object arrives here rather than on the wire.
+    $id = null;
+
+    foreach (array('ID', 'id', 'term_id', 'comment_ID') as $property) {
+        if (isset($value->$property)) { $id = (int) $value->$property; break; }
+    }
+
+    return array('object' => get_class($value), 'id' => $id);
+}
+
+/**
+ * One `WP_Post` as this module reports it.
+ *
+ * `post_password` IS ABSENT AND `content` IS WITHHELD FOR A PROTECTED POST, which is core's own rule
+ * rather than ours: `post_password_required()` is the function `wp/v2` reasons with, and in a REST
+ * request there is no password cookie, so it answers true for every protected post and this caller.
+ * The withholding is REPORTED - `password_protected: true` - because a silently empty body is the
+ * failure this whole module is written against.
+ *
+ * @return array<string, mixed>
+ */
+function wpmcp_acf_post_out($post) {
+    $protected = post_password_required($post);
+
+    $out = array(
+        'id'                 => (int) $post->ID,
+        'type'               => (string) $post->post_type,
+        'status'             => (string) $post->post_status,
+        'title'              => (string) $post->post_title,
+        'slug'               => (string) $post->post_name,
+        'author'             => (int) $post->post_author,
+        'parent'             => (int) $post->post_parent,
+        'menu_order'         => (int) $post->menu_order,
+        'date'               => (string) $post->post_date,
+        'date_gmt'           => (string) $post->post_date_gmt,
+        'modified'           => (string) $post->post_modified,
+        'mime_type'          => (string) $post->post_mime_type,
+        'password_protected' => $protected,
+    );
+
+    if (!$protected) {
+        $out['excerpt'] = (string) $post->post_excerpt;
+        $out['content'] = (string) $post->post_content;
+    }
+
+    return $out;
+}
+
+/**
+ * The fields `get-user` publishes, and the four it publishes only to a privileged caller.
+ *
+ * DECLARED AS DATA so a test can hold it against `wpmcp_get_user_shape()` in `tools.php`. A module
+ * may not reach into `tools.php` beyond the five named helpers, so the list is repeated here - and
+ * a repetition nothing checks is a drift waiting to happen, which is what the test is for.
+ *
+ * @return array{always: list<string>, privileged: list<string>}
+ */
+function wpmcp_acf_user_fields() {
+    return array(
+        'always'     => array('id', 'name'),
+        'privileged' => array('login', 'email', 'roles', 'registered'),
+    );
+}
+
+/**
+ * One `WP_User` as this module reports it - THE SAME FIELDS AND THE SAME GATE `get-user` USES.
+ *
+ * `id` and `name` always; `login`, `email`, `roles` and `registered` only for a caller with
+ * `list_users`, or `edit_user` on that user, or themselves. That is core's own line and it is
+ * `get-user`'s, so the two tools cannot disagree about what a user looks like.
+ *
+ * @return array<string, mixed>
+ */
+function wpmcp_acf_user_out($user) {
+    $id  = (int) $user->ID;
+    $out = array('id' => $id, 'name' => (string) $user->display_name);
+
+    if (!current_user_can('list_users') && !current_user_can('edit_user', $id)) {
+        return $out;
+    }
+
+    $out['login']      = (string) $user->user_login;
+    $out['email']      = (string) $user->user_email;
+    $out['roles']      = array_values(array_map('strval', (array) $user->roles));
+    $out['registered'] = (string) $user->user_registered;
+
+    return $out;
+}
+
 /** The module's tools. Registered through the seam at the foot of this file. */
 function wpmcp_acf_tools() {
     return array(
@@ -570,17 +827,17 @@ function wpmcp_acf_tools() {
         ),
         'description' => 'Read ACF field values on one object. Args: object_type (post, term,'
             . ' user or options; default post), id (required except for options), fields'
-            . ' (optional list of field names; omit for every field the object has saved).'
-            . ' Returns object, acf (which guarantees this site\'s ACF provides) and fields -'
-            . ' each with key, name, type, label and value. Values come from ACF\'s own REST'
-            . ' path, so a Relationship, Post Object, Image, Gallery, File or User you may not'
-            . ' read arrives as bare IDs rather than expanded, exactly as wp/v2 would answer.'
-            . ' A flexible_content field also returns rows: one per layout ROW, with index,'
-            . ' layout, the label the editor sees after a rename, renamed, and disabled. A'
-            . ' layout an editor switched OFF is hidden by ACF from every read outside'
-            . ' wp-admin; it is reported here with disabled true and its own values, never'
-            . ' dropped. Only fields the object has already saved are listed. Needs permission'
-            . ' to edit the object - edit_post, edit_term, edit_user or manage_options.',
+            . ' (optional field names; omit for every field the object has saved). Returns'
+            . ' object, acf (the guarantees this site\'s ACF provides) and fields - each with'
+            . ' key, name, type, label, value. Values come from ACF\'s own REST path, so a'
+            . ' Relationship, Post Object, Image, Gallery, File or User you may not read arrives'
+            . ' as bare IDs, as wp/v2 does. An expanded post or user is a NAMED SUBSET: never'
+            . ' post_password or a password hash, and no content for a password-protected post,'
+            . ' which is marked password_protected. A flexible_content field also returns rows:'
+            . ' one per layout ROW, with index, layout, the label the editor sees after a rename,'
+            . ' renamed, disabled. A layout switched OFF is hidden by ACF outside wp-admin; it is'
+            . ' reported with disabled true and its own values, never dropped. Only fields the'
+            . ' object has saved are listed. Needs permission to edit the object.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
             'object_type' => array(
                 'type' => 'string',
@@ -641,7 +898,10 @@ function wpmcp_acf_tools() {
             // front-end page load for the benefit of a tool nobody called.
             add_filter('acf/load_value/type=flexible_content', 'wpmcp_acf_capture_rows', 9, 3);
 
-            $fields  = wpmcp_acf_field_objects($object, $selectors);
+            $fields  = wpmcp_acf_reload_gapped_rows(
+                wpmcp_acf_field_objects($object, $selectors),
+                $object
+            );
             $entries = array();
 
             foreach ($fields as $field) {
