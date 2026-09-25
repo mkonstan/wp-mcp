@@ -175,6 +175,14 @@ final class PhpSymbols
             return 'call';
         }
 
+        // A NAMED ARGUMENT IS NOT A CONSTANT, and it would otherwise be reported as one - a
+        // module writing `str_contains(haystack: $a, needle: $b)` would be told it reads two
+        // undeclared constants. `name:` after a `(` or a `,` is the only place that shape occurs,
+        // and a ternary's `:` is covered separately below because its colon comes BEFORE the name.
+        if (($before === '(' || $before === ',') && $after === ':') {
+            return '';
+        }
+
         // NEITHER A CALL NOR A CLASS, which is the position that used to fall through
         // silently. A TYPE is recognisable from what follows it - a variable
         // (`function f(WpMcp_Thing $x)`, `catch (WpMcp_Thing $e)`), a union or intersection
@@ -193,6 +201,11 @@ final class PhpSymbols
      */
     private static function looksLikeType($before, $after): bool
     {
+        // `?Foo`, `Foo|Bar`, `Foo&Bar` and `: Foo` are all type positions. A TERNARY's else branch
+        // is also preceded by `:` - `$x = $c ? 1 : WPMCP_PAGE_CAP;` - so a constant read there is
+        // reported as a type rather than as a constant. That is a MISATTRIBUTION and it is left
+        // deliberately: it errs LOUD, because the rider assertion reports any name in type
+        // position that no detector claims, so the author is told rather than passed.
         if ($before === '?' || $before === '|' || $before === '&' || $before === ':') {
             return true;
         }

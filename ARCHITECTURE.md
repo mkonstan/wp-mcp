@@ -120,9 +120,10 @@ file a module may call into, because no rule can tell `WPMCP_DB_VER` from
 **And what that gate cannot see, because a mechanism that does not state its limit invites the
 trust this is here to remove: an INDIRECT call.** It resolves names that are written, so a variable
 function, a string handed to `call_user_func`, `add_action` or `add_filter`, or a callable array
-reaches a core symbol without being a token the test can attribute. No module uses one today - the
-only string callable under `modules/` is a module's own provider name, handed to
-`wpmcp_register_module()`, which is the front door. **So one thing stays a hand check in review of
+reaches a core symbol without being a token the test can attribute. No module reaches the core
+through one today: the string callables under `modules/` are each a module naming ITS OWN function -
+a provider, a face, a filter callback, a registration callback, and a method probe named inside a
+face, five of them in `modules/acf.php` - and every one resolves inside the module that wrote it. **So one thing stays a hand check in review of
 any module diff:** read every string literal that looks like a symbol name, and every `$variable(`
 call, and ask what it resolves to. The gate exists so that this is a short bounded reading rather
 than the whole file. Nothing in the core calls

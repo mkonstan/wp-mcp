@@ -343,9 +343,15 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         if (isset($layout['name'])) { $layouts[(string) $layout['name']] = $layout; }
     }
 
-    $raw      = wpmcp_acf_captured_rows($object['acf_id'], $name);
-    $disabled = array();
-    $renamed  = array();
+    // AND `(array) $formatted` IS NOT GOOD ENOUGH, which is a defect this file shipped for about
+    // an hour. An EMPTY Flexible Content field formats to `''` or `false`, and `(array) ''` is
+    // `array('')` - one element at index 0 - so an object with the field present and no rows at
+    // all would have reported a phantom row 0 with a blank layout name. `is_array()` is the whole
+    // fix and the empty-value case now has a test.
+    $formatted = is_array($formatted) ? $formatted : array();
+    $raw       = wpmcp_acf_captured_rows($object['acf_id'], $name);
+    $disabled  = array();
+    $renamed   = array();
 
     if (wpmcp_acf_layout_metadata_available()) {
         $type     = wpmcp_acf_flexible_content();
@@ -353,7 +359,7 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         $renamed  = (array) $type->get_renamed_layouts($object['acf_id'], $field);
     }
 
-    $indices = array_map('intval', array_keys((array) $formatted));
+    $indices = array_map('intval', array_keys($formatted));
 
     foreach (array_keys((array) $raw) as $index) {
         if (!in_array((int) $index, $indices, true)) { $indices[] = (int) $index; }
@@ -455,6 +461,12 @@ function wpmcp_acf_dropped_row_values($field, $object, $index, $layouts, $layout
 function wpmcp_acf_raw_meta($object, $selector) {
     if ($object['type'] === 'term')    { return get_term_meta($object['id'], $selector, true); }
     if ($object['type'] === 'user')    { return get_user_meta($object['id'], $selector, true); }
+    // THE ONE PLACE THIS IS NOT EXACT, said rather than left to be found: on a MULTILINGUAL site
+    // acf_get_valid_post_id() appends a language code to `options`, and that normaliser is
+    // internal (D9 fences it), so this read uses the unsuffixed option name. It affects only the
+    // recovered values of a DISABLED Flexible Content row on an options page - every other value
+    // on this path goes through ACF's own resolution. A translated options page would report
+    // those sub-values as empty rather than wrong.
     if ($object['type'] === 'options') { return get_option('options_' . $selector); }
 
     return get_post_meta($object['id'], $selector, true);

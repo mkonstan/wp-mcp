@@ -61,6 +61,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
     private static int $host = 0;
     private static int $draft = 0;
     private static int $published = 0;
+    private static int $emptyHost = 0;
     private static string $skip = '';
 
     /** The ACF field names this run registers. Underscores: they become meta keys. */
@@ -176,6 +177,16 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             'host'
         );
 
+        // A SECOND HOST WITH THE SAME FIELD SAVED AND EMPTY, for the phantom-row case below. It is
+        // a separate post because emptying the first one would destroy the fixture every other
+        // test in this class reads.
+        self::$emptyHost = Fixtures::createPost(
+            Fixtures::name('acf-empty-host'),
+            'publish',
+            self::$authorId,
+            'empty host'
+        );
+
         self::writeValues();
     }
 
@@ -211,6 +222,19 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             self::$draft,
             self::phpString('Editor renamed me'),
             self::$host
+        ));
+
+        // SAVED AND EMPTY. ACF's update_value stores '' for an empty Flexible Content value, so the
+        // hidden reference row exists - the field IS listed by get_field_objects() - and its value
+        // formats to '' rather than to an array.
+        WpCli::evaluate(sprintf(
+            'update_field(%s, array("acf_fc_layout" => "hero", "heading" => "temporary"), %d);'
+            . ' update_field(%s, array(), %d);'
+            . ' echo "ok";',
+            self::phpString(self::fieldPrefix() . 'blocks'),
+            self::$emptyHost,
+            self::phpString(self::fieldPrefix() . 'blocks'),
+            self::$emptyHost
         ));
     }
 
@@ -532,6 +556,36 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             array_column($read['fields'], 'name'),
             'The fields argument returned something other than the one field that exists.'
         );
+    }
+
+    /**
+     * AN EMPTY FLEXIBLE CONTENT FIELD HAS NO ROWS - and `rows: []` rather than one phantom row.
+     *
+     * THIS IS A DEFECT THIS MODULE SHIPPED AND THIS TEST CAUGHT. The row indices were taken from
+     * `array_keys((array) $formatted)`, and an empty Flexible Content value formats to the empty
+     * STRING, not to an array - `(array) ''` is `array('')`, one element at index 0. So an object
+     * with the field saved and no rows reported a row 0 with a blank layout name and a blank label,
+     * which reads to a caller as "there is a block here and we could not identify it". A cast is
+     * not a guard.
+     *
+     * @group acf-data
+     */
+    public function testAnEmptyFlexibleContentFieldHasNoRowsRatherThanOnePhantomRow(): void
+    {
+        $blocks = self::field(
+            $this->read(self::$adminToken, ['id' => self::$emptyHost]),
+            self::fieldPrefix() . 'blocks'
+        );
+
+        self::assertSame(
+            [],
+            $blocks['rows'],
+            'An empty Flexible Content field reported a row. Its value is the empty STRING, and'
+            . " (array) '' is array('') - one element at index 0."
+        );
+
+        // AND THE FIELD IS REALLY THERE, or this test is about a field nothing returned.
+        self::assertSame('flexible_content', $blocks['type']);
     }
 
     /** Single-quoted for `wp eval`, which carries the snippet as one argv element. */

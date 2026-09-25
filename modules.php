@@ -331,10 +331,20 @@ function wpmcp_module_face_part_missing($part) {
     }
 
     foreach ($part['methods'] as $group) {
-        $probe  = is_array($group) ? ($group['probe'] ?? null) : null;
+        // A MALFORMED ENTRY IS REPORTED, NOT IGNORED, and that is the difference between a check
+        // and a decoration. `'methods' => array('get_disabled_layouts')` - a flat list where the
+        // group shape was meant - would otherwise check nothing and the module would register with
+        // the methods it needs unverified: absence of a declaration is not a declaration of
+        // safety, the same rule the tool registry applies to `write`.
+        if (!is_array($group) || !isset($group['names']) || (array) $group['names'] === array()) {
+            $missing[] = 'a malformed method declaration in this face';
+            continue;
+        }
+
+        $probe  = $group['probe'] ?? null;
         $object = is_callable($probe) ? call_user_func($probe) : null;
 
-        foreach ((array) (is_array($group) ? ($group['names'] ?? array()) : array()) as $name) {
+        foreach ((array) $group['names'] as $name) {
             if (!is_object($object) || !method_exists($object, (string) $name)) {
                 $missing[] = '->' . (string) $name . '()';
             }

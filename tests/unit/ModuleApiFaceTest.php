@@ -223,6 +223,16 @@ final class ModuleApiFaceTest extends TestCase
         self::assertStringNotContainsString('get_post', implode(' ', $reported));
         self::assertStringNotContainsString('wpmcp_pretend', implode(' ', $reported));
 
+        // AND A NAMED ARGUMENT IS NOT A CONSTANT READ, which it was until this assertion existed:
+        // `str_contains(haystack: $a, needle: $b)` would have been reported as two undeclared
+        // constants, and the first module to use named arguments would have had to weaken the gate
+        // to get a green run - the failure mode this whole file is written against.
+        self::assertSame(
+            [],
+            self::undeclared('<?php function wpmcp_named($a, $b) { return str_contains(haystack: $a, needle: $b); }', []),
+            'A named argument was reported as an undeclared symbol.'
+        );
+
         // AND THE SAME SOURCE GOES QUIET once the face declares them - which is the half that
         // proves the gate reads the declaration rather than ignoring it.
         self::assertSame(
@@ -335,6 +345,20 @@ final class ModuleApiFaceTest extends TestCase
             'A missing symbol of some kind is not reported, so a module could register without it'
             . ' and fatal on the first call.'
         );
+
+        // A MALFORMED METHOD ENTRY IS REPORTED, NOT IGNORED. `'methods' => ['get_disabled_layouts']`
+        // is the shape a future author will write - a flat list where the group shape was meant -
+        // and an earlier version of this check silently verified NOTHING for it, so the module
+        // registered with the methods it needs unchecked. Absence of a declaration is not a
+        // declaration of safety, which is the rule the tool registry already applies to `write`.
+        foreach ([['get_disabled_layouts'], [['probe' => 'strlen']], [['names' => []]], ['nonsense']] as $malformed) {
+            self::assertSame(
+                ['a malformed method declaration in this face'],
+                \wpmcp_module_face_part_missing(\wpmcp_module_face_part(['methods' => $malformed])),
+                'A malformed method declaration checked nothing and reported nothing: '
+                . json_encode($malformed)
+            );
+        }
 
         // A PROBE THAT CANNOT REACH ITS OBJECT REPORTS THE METHOD, which is what an operator can
         // look up. Three ways to fail to reach it, one answer.

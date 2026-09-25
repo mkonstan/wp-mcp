@@ -53,8 +53,12 @@
  *     ['WpMcp_Thing', 'make']()                // a callable array
  *
  * Every one of those reaches a core symbol and none of them is a token this file can attribute.
- * No module uses one today - the only string callable in `modules/` is the discovery module's own
- * provider name, handed to wpmcp_register_module(), which is the seam's own front door.
+ * No module reaches the CORE through one today, and the string callables that exist in `modules/`
+ * are each a module naming ITS OWN function - a provider handed to wpmcp_register_module(), a face
+ * handed to wpmcp_register_module_face(), a filter callback handed to add_filter(), a registration
+ * callback handed to add_action(), and a method probe named inside a face. Five of those live in
+ * modules/acf.php. Every one resolves inside the module that wrote it, which is why the hand check
+ * below is a reading and not a rewrite.
  *
  * SO WHAT A REVIEWER MUST DO BY HAND, and it is one grep per module file: read every string
  * literal that looks like a symbol name. Concretely, in a module diff, look at every
