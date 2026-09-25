@@ -4,8 +4,82 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.2.0
 
-**Unreleased.** Open for the next cycle: ACF field VALUES, read first and then written, in
-their own module behind the seam 1.1.2 established.
+**Unreleased.** ACF field VALUES, read first and then written, in their own module behind the seam
+1.1.2 established. The read half is here.
+
+### Added: `get-acf-values`, and it reads through ACF's own permission-checked path
+
+- **New read tool, `get-acf-values`.** One tool, values only. It takes `object_type` (`post`,
+  `term`, `user` or `options`), an `id`, and an optional `fields` list, and returns `object`, `acf`
+  (which of ACF's two guarantees this site provides) and `fields` - each with `key`, `name`, `type`,
+  `label` and `value`. A `flexible_content` field also returns `rows`: one entry per layout ROW with
+  its `index`, `layout`, the `label` the editor sees, `renamed`, and `disabled`.
+- **The values come from `acf_format_value_for_rest($raw, $id, $field, 'standard')`, not from
+  `get_field()`, and that is the whole security story.** ACF checks no capability on its value path.
+  Since 6.8.7 and 6.8.10 it reduces User, Relationship, Post Object, Image, Gallery, File and Icon
+  Picker values to bare IDs when the caller cannot read the referenced object - but only in its REST
+  path, which is exactly what ACF's own Security Principles page says: `get_field()` is a
+  trusted-context accessor and REST is the permission-checked surface. So a Post Object pointing at
+  somebody else's draft comes back as a bare ID for a token that may not read it and expanded for
+  one that may, and that answer is ACF's rather than ours. Measured on genuine ACF Pro 6.8.10 before
+  any of it was written.
+- **A Flexible Content layout an editor SWITCHED OFF is returned and MARKED, never silently
+  dropped.** ACF 6.5 added that toggle and implemented it in `load_value`, keeping the row only when
+  `is_admin()` - which is never true for a REST request. So wp-admin shows four blocks and ACF hands
+  a REST caller three, with nothing saying a fourth exists. A read feeds a write, so a silently
+  dropped block becomes a silently deleted one. The row now comes back with `disabled: true` and its
+  own values, and a RENAMED layout reports the label the editor sees rather than the original. The
+  state comes from ACF's own public `get_disabled_layouts()` and `get_renamed_layouts()`.
+- **The capability gate is ours, because ACF has none, and it is the capability that opens the
+  wp-admin screen these fields are rendered on:** `edit_post`, `edit_term`, `edit_user` or
+  `manage_options`. A post you may not read answers byte-identically to a post that is not there, as
+  `get-post` and `get-post-meta` already do.
+- **Only fields the object has actually saved are listed**, which is `get_field_objects()`'s own
+  rule: it resolves a field by name through a hidden reference row, and a field never saved has
+  none.
+- **No ACF schema tools.** Field structure reaches a caller as metadata on a values read, not as a
+  catalogue of what a site could hold.
+- **The catalog is 40 tools on a site with ACF, and 39 without.**
+
+### Added: a module's availability guard is now a gate rather than a convention
+
+- **A module that depends on another plugin DECLARES the API face it needs, as data**, through
+  `wpmcp_register_module_face()`, and registers only when every required symbol is present.
+  `function_exists('acf')` is not sufficient - it proves the other plugin is there, not that the
+  face the module needs is there, and it stays green forever while the module starts calling
+  something that plugin added two releases later.
+- **A test keeps the declaration honest.** `tests/unit/ModuleApiFaceTest.php` tokenises every module
+  file, sorts every name into this plugin's / PHP's / WordPress's / the declared face, and asserts
+  the leftover set is empty. It walks the manifest rather than knowing about ACF, so a module added
+  without a declaration fails on the day it is added.
+- **The same check runs at CALL time.** Clients cache tool lists at connect time, and
+  `wpmcp_acf_tools()` is a public function anything on the site can publish through the
+  `wpmcp_tools` filter, so a call can arrive with the face incomplete. It produces the ordinary
+  generic refusal with a trace id, with the missing symbols in the private trace table - never a
+  PHP fatal, and never a sentence telling a caller which plugins this site has.
+- **A face has an OPTIONAL half**, so a site whose ACF cannot report disabled Flexible Content
+  layouts is served values with that capability reported as off, rather than refused everything.
+  Values work down to a detected ACF 5.11; layout metadata needs ACF Pro 6.5, below which the
+  feature does not exist and "none" is the right answer rather than a degraded one.
+- **Settings > WP MCP now prints a Feature modules table**: per module, serving or not, and which
+  symbols are missing. Without it, "no ACF tools" and "wp-mcp is broken" look identical to the one
+  person who can fix either.
+
+### Changed: the module-boundary gate sees the position that used to fall through
+
+- **A name a module uses in NEITHER call nor class position was silent.** The detector decides by
+  position, so a `WPMCP_*` constant read, or a flat `WpMcp_*` class in a type-hint, a return type or
+  a `catch`, was seen by neither half and round 3's unresolved-call assertion did not cover it - it
+  only reports unresolved names followed by `(`. Both were empty, which is the argument for closing
+  them before the first module that could use one.
+- **The assertion is now the positive one:** the set of this plugin's names a module uses that
+  NEITHER detector claimed is empty.
+- **And a constant read is held to the same boundary as a call** - it must be defined in a file a
+  module may call into - because no rule can tell `WPMCP_DB_VER` from `WPMCP_TRACE_TEXT_BYTES` by
+  name.
+- **Position is decided in one place now**, `tests/Support/PhpSymbols.php`, because two gates ask
+  the same question of the same source and two token scanners would be two sets of these holes to
+  find twice.
 
 ## 1.1.2
 

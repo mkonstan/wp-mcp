@@ -236,8 +236,9 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Thirty-nine tools. Each declares the four MCP annotation hints, so a client can tell a
-listing from a deletion before it asks you to approve anything.
+Thirty-nine tools, and a fortieth - `get-acf-values` - on a site that has Advanced Custom
+Fields. Each declares the four MCP annotation hints, so a client can tell a listing from a
+deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
 |---|---|:--:|:--:|:--:|:--:|
@@ -256,6 +257,7 @@ listing from a deletion before it asks you to approve anything.
 | `get-user` | read | yes | no | yes | no |
 | `get-option` | read | yes | no | yes | no |
 | `list-content-types` | read | yes | no | yes | no |
+| `get-acf-values` (needs ACF) | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -808,8 +810,69 @@ a site running ACF Pro:
   would normally build.
 
 So: set a field once in wp-admin before handing it to an agent, or keep the tools to
-simple field types. There is no ACF-specific code in this plugin, deliberately - it is one
-vendor's convention, and a plugin that special-cased it would be wrong for the next one.
+simple field types. **And prefer `get-acf-values` for reading them** - it asks ACF rather
+than the meta table, so it gets the formatted value, the permission reduction and the
+layout metadata that a raw meta read cannot have. The section below is the whole of it.
+
+### ACF field values (`get-acf-values`)
+
+Present only on a site that has Advanced Custom Fields, and only if the three functions the
+module declares are there - `acf_format_value_for_rest`, `get_field_object` and
+`get_field_objects`, which is a detected ACF **5.11** or newer. On any other site the tool is
+absent from `tools/list` entirely, and **Settings > WP MCP** says which symbols were missing.
+
+```json
+{ "object_type": "post", "id": 42 }
+```
+
+`object_type` is `post`, `term`, `user` or `options` (default `post`); `id` is required for the
+first three; an optional `fields` list narrows the read to named fields. It returns `object`, an
+`acf` object saying which guarantees this site provides, and `fields` - each with `key`, `name`,
+`type`, `label` and `value`.
+
+**It needs permission to EDIT the object**, not just to read it: `edit_post`, `edit_term`,
+`edit_user` or `manage_options`. These fields are rendered on the editor screen, and a read that
+mirrors that screen is gated by what opens it. A post you may not read answers exactly as a post
+that does not exist does.
+
+**Values come from ACF's own REST path, not from `get_field()`.** ACF checks no capability on its
+value path, and since 6.8.7 and 6.8.10 it reduces User, Relationship, Post Object, Image, Gallery,
+File and Icon Picker values to bare IDs for a caller who cannot read the referenced object - but
+only in its REST path. ACF's own Security Principles page draws that line: `get_field()` is a
+trusted-context accessor, REST is the permission-checked surface. So a Post Object pointing at
+somebody else's draft comes back as `1234` for a token that may not read it and as the full post
+for one that may, and that decision is ACF's, delegated to the target post type's own REST
+controller.
+
+**Only fields the object has already saved are listed.** ACF resolves a field by name through a
+hidden reference row, and a field never saved has none - the same fact the post-meta note above
+describes from the other side.
+
+**A Flexible Content layout an editor switched OFF comes back marked rather than missing.** ACF
+6.5 added that toggle and implemented it in `load_value`, keeping the row only when `is_admin()` -
+never true for a REST request. So wp-admin shows four blocks and ACF hands a REST caller three,
+with nothing saying a fourth exists. A `flexible_content` field therefore also returns `rows`:
+
+```json
+"rows": [
+  { "index": 0, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false },
+  { "index": 1, "layout": "gallery", "label": "Autumn set", "renamed": true,  "disabled": true,
+    "values": { "blocks_1_heading": "...", "blocks_1_target": 1234 } },
+  { "index": 2, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false }
+]
+```
+
+`label` is the label the editor sees, which is the rename when a layout has one. A disabled row
+carries its own `values`, formatted and permission-reduced like everything else. Rows are reported
+this way only on ACF **Pro 6.5** or newer, where the feature exists at all; below that `acf`
+reports `layout_metadata: false` and there are no disabled layouts to report. Nothing about this
+is guessed from a hidden meta key - the state comes from ACF's own public accessors.
+
+**No ACF schema tools.** Field structure reaches a caller as metadata on a values read - the key,
+name, type and label of the fields this object holds, and the layout of each row it has - and never
+as a catalogue of what the site could hold. ACF's own abilities already describe field groups.
+
+**Nothing here writes.** `get-acf-values` is a read-scope tool and the module has no write half yet.
 
 ## HTTPS enforcement depends on your proxy
 
@@ -1173,10 +1236,18 @@ and a callable `run`. An entry missing any of them is refused at registration ra
 given a default, and it cannot re-declare a built-in's name.
 
 Since 1.1.2 the plugin's own feature files register through the same checks. The menu tools
-live in `modules/menus.php` and `list-content-types` in `modules/discovery.php`, each one line
-of `wpmcp_register_module()` and nothing trusted: the entries a module returns meet the very
-list above, on the way out of registration, and a rejected one is named in the log with its
-reason. See **The module seam** in ARCHITECTURE.md. It changes nothing for this filter.
+live in `modules/menus.php`, `list-content-types` in `modules/discovery.php` and
+`get-acf-values` in `modules/acf.php`, each one line of `wpmcp_register_module()` and nothing
+trusted: the entries a module returns meet the very list above, on the way out of registration,
+and a rejected one is named in the log with its reason. See **The module seam** in
+ARCHITECTURE.md. It changes nothing for this filter.
+
+A module that needs another plugin also declares the API face it needs, and registers only when
+every symbol in it is present - so on a site without Advanced Custom Fields there is no
+`get-acf-values` in `tools/list` at all, and a call to that name answers the same
+`Unknown tool` a name nobody registered gets. **Settings > WP MCP prints a Feature modules
+table** saying, per module, whether it is serving and which symbols it is missing, so an absent
+feature can be told apart from a broken plugin.
 
 Two things about the description. A `description`, or any
 `inputSchema.properties.*.description`, over 1,000 characters is refused: clients cap
