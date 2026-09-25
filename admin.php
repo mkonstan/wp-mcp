@@ -306,6 +306,23 @@ function wpmcp_render_admin() {
         }
     }
 
+    // Handle the trace lookup. ONE ID IN, ONE ENTRY OUT - see the section that renders it.
+    //
+    // THE CAPABILITY GATE IS THE wp_die() AT THE TOP OF THIS FUNCTION, and it is the only one
+    // this needs: nothing below runs for a user without `manage_options`, and the menu page
+    // itself is registered under the same capability. It is worth naming because of WHAT this
+    // renders - the class, the message, the absolute file:line, the WP_Error data and the
+    // stack, which is precisely the detail the error boundary keeps from a caller. A reader
+    // of this page sees what a token holder may not.
+    $lookup = null;
+
+    if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'trace_lookup') {
+        check_admin_referer('wpmcp_trace_lookup');
+
+        $asked  = isset($_POST['trace_id']) ? (string) wp_unslash($_POST['trace_id']) : '';
+        $lookup = array('id' => trim($asked), 'rows' => wpmcp_trace_find($asked));
+    }
+
     // Handle revoke
     if (isset($_POST['wpmcp_action']) && $_POST['wpmcp_action'] === 'revoke' && isset($_POST['id'])) {
         check_admin_referer('wpmcp_revoke');
@@ -548,6 +565,83 @@ function wpmcp_render_admin() {
         <?php endforeach; endif; ?>
         </tbody>
       </table>
+
+      <?php
+      /*
+       * LOOK UP A TRACE ID.
+       *
+       * THE ONE THING ADDED WHEN THE TRACE LOG BECAME A TABLE (1.1.2), and it is not a
+       * convenience. The error boundary hands a client an eight-hex id and tells it to quote
+       * that id to the operator; while the traces were a file, the operator opened the file.
+       * Now they cannot, so without this the change would have made diagnosis strictly harder
+       * for exactly the person the id is for.
+       *
+       * ONE ID, ONE ENTRY, AND DELIBERATELY NOTHING ELSE. Not a log browser, not a list, no
+       * pagination and no search: those would turn a page an administrator visits into a
+       * reading surface for every failure the site has had, and every one of those rows holds
+       * absolute paths, a stack and sometimes SQL. wpmcp_trace_find() accepts eight lower-case
+       * hex digits or nothing at all, so a paste cannot be widened into a query.
+       *
+       * EVERYTHING RENDERED IS ESCAPED, including the stack: a trace's `message` is whatever a
+       * throwable carried, and a tool argument's array KEY reaches the stack line (as a key,
+       * not a value - see wpmcp_trace_arg_shape). A caller can therefore put a chosen string
+       * in front of an administrator's browser, which makes this the one place in the plugin
+       * where a stored value from the wire is printed on an admin screen.
+       */
+      ?>
+      <h2>Look up a trace id</h2>
+      <p>A client that hits an unexpected failure is told <code>Internal error (trace
+         1a2b3c4d)</code> and nothing more. Paste that id here to see what actually broke.</p>
+      <form method="post">
+        <?php wp_nonce_field('wpmcp_trace_lookup'); ?>
+        <input type="hidden" name="wpmcp_action" value="trace_lookup">
+        <input name="trace_id" id="wpmcp-trace-id" type="text" size="12" maxlength="8"
+               style="font-family:monospace" placeholder="1a2b3c4d"
+               value="<?php echo esc_attr($lookup ? $lookup['id'] : ''); ?>">
+        <?php submit_button('Look up', 'secondary', '', false); ?>
+        <p class="description">Traces are kept
+           <?php echo esc_html((string) wpmcp_trace_keep_days()); ?> days and at most
+           <?php echo esc_html((string) wpmcp_trace_keep_rows()); ?> of them, then the hourly
+           clean-up removes the oldest. They are rows in
+           <code><?php echo esc_html(wpmcp_traces_table()); ?></code>, which no web server can
+           serve and which <code>sql-select</code> refuses to read.</p>
+      </form>
+
+      <?php if ($lookup !== null): ?>
+        <?php if ($lookup['rows'] === array()): ?>
+          <div class="notice notice-warning inline"><p>No trace with that id. Either it is past
+             retention, it was mistyped, or the failure could not be stored at all &mdash; in
+             which case the whole entry went to the PHP error log instead, prefixed
+             <code>wp-mcp trace (could not be stored)</code>.</p></div>
+        <?php else: ?>
+          <?php
+          /*
+           * A SHARED ID IS LABELLED, NOT SILENTLY DISAMBIGUATED (round 2). `trace_id` is a KEY
+           * and not a UNIQUE KEY on purpose - a duplicate must not make the INSERT fail and lose
+           * the entry whose id has just gone out on the wire - so two rows CAN carry one id.
+           * Eight hex digits against the 2,000-row cap puts that at about one in two million
+           * traces, which at the measured rate is a once-in-decades event; the cost of not
+           * saying so is that an operator reads the newest match as "the" trace and diagnoses
+           * the wrong failure, which is not a cost that scales with the odds.
+           */
+          ?>
+          <?php if (count($lookup['rows']) > 1): ?>
+            <div class="notice notice-warning inline"><p><strong><?php
+                echo (int) count($lookup['rows']);
+            ?> traces share this id.</strong> Eight hex digits can collide, so all of them are
+               below, newest first &mdash; read the time and the tool to tell which failure you
+               were told about.</p></div>
+          <?php endif; ?>
+        <?php foreach ($lookup['rows'] as $wpmcp_trace_row): ?>
+          <?php // WHITE-SPACE PRESERVED, because the stack's indentation is how an entry is
+                // read - and it is the same text the error-log fallback writes, so an operator
+                // who has seen one form has seen both. ?>
+          <pre style="background:#fff;border:1px solid #c3c4c7;padding:12px;overflow:auto;white-space:pre-wrap"><?php
+              echo esc_html(wpmcp_trace_entry($wpmcp_trace_row));
+          ?></pre>
+        <?php endforeach; ?>
+        <?php endif; ?>
+      <?php endif; ?>
 
       <h2>Code editing, SQL reads and post meta</h2>
       <?php

@@ -14,17 +14,21 @@ who checks that pass on every knock and then does the work as that user.
 
 | File | Its job |
 |---|---|
-| `wp-mcp.php` | Bootstrap, the two tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, and the class loader for `src/`. |
+| `wp-mcp.php` | Bootstrap, the three tables, and the pass system: mint, validate, revoke, flush expired. Also the file-version store the code tools write to, the hourly sweep of dead tokens and old traces, and the class loader for `src/`. |
 | `endpoint.php` | The front door. The REST routes, the ten gates, JSON-RPC framing, the handshake, scope enforcement, the tool registry, and the error boundary. Defines no tools. |
-| `tools.php` | The thirty-eight tools and the helpers they share. |
+| `tools.php` | The thirty-three core tools and the helpers they share. |
+| `modules.php` | The module seam: the manifest, the loader, `wpmcp_register_module()`, and the gate that checks what comes through it. Defines no tools. |
+| `modules/menus.php` | Module: the five classic menu tools. |
+| `modules/discovery.php` | Module: `list-content-types`. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
-| `trace.php` | The private side of the error boundary: the log, its unguessable name, the daily self-check, and the admin warnings. |
+| `trace.php` | The private side of the error boundary: one row per traced failure, the lookup by id, the retention sweep, and the `error_log()` fallback. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
 | `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
-| `uninstall.php` | Deleting the plugin: both tables, the options, the log directory, the cron hook. |
+| `uninstall.php` | Deleting the plugin: all three tables, the options, the cron hook, and whatever 1.1.1 left in `wp-content/wpmcp/`. |
 | `build.txt` | Three git placeholders. The only `export-subst` file: `git archive` writes the commit into it when a zip is cut. |
 
-`src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
+`modules/` is loaded by `wpmcp_module_load()` from the manifest in `modules.php`; see **The
+module seam** below for what a module may and may not do. `src/` is namespaced `WpMcp\`, one class per file, loaded by a nine-line
 `spl_autoload_register` in `wp-mcp.php`. There is no Composer at runtime: `composer.json`
 is dev-only and nothing is vendored, so the plugin ships as plain PHP. Code moves out of
 the flat files into `src/` when something needs a type rather than a convention, which so
@@ -60,7 +64,101 @@ Not built once at startup and kept. Assembling a few small arrays per request co
 nothing, and in exchange there is no stored state to drift or go stale, and no "the
 registry says X but the code does Y" bug class, because there is no registry. That is also
 why the functions are named `wpmcp_content_tools()` rather than `wpmcp_register_content_tools()`:
-you ask, they return a list, they register nothing.
+you ask, they return a list, they register nothing. A module's provider is the same kind of
+function; `wpmcp_register_module()` records which function to ask, not what it answered.
+
+## The module seam
+
+**The core is what is left when every module is gone.** A module is one file that adds tools
+and can be deleted without the core noticing. Two exist: `modules/menus.php` (the five classic
+menu tools) and `modules/discovery.php` (`list-content-types`).
+
+**Why, and it is not tidiness.** `tools.php` was 6,987 lines of a 12,266-line plugin - one file
+with a small core beside it. The next feature in the queue writes ACF values, which is the
+highest blast radius anything here has proposed, and a feature in its own file behind its own
+guard costs a site without ACF nothing and can break nothing there. **What the seam does NOT
+buy is a lighter review.** Scrutiny follows blast radius, not file boundaries: five of the six
+reviewed sprints in this project failed their first review with a green test suite and not one
+of those defects was in the dispatch path. A locked core makes a diff smaller. It does not make
+new code safer.
+
+**How a module registers.** One statement, at the foot of the file:
+
+```php
+wpmcp_register_module('menus', 'wpmcp_menu_tools');
+```
+
+A slug, and a callable that returns the same `array('write' => ..., 'annotations' => ...,
+'description' => ..., 'inputSchema' => ..., 'run' => ...)` shape `tools.php` uses. The file is
+loaded by `wpmcp_module_load()` from a literal manifest in `modules.php`, called by
+`wpmcp_bootstrap()`. **The manifest is not filterable and there is no hook that adds a file to
+it** - a hook that loaded arbitrary PHP would be a remote-code-execution surface wearing the
+clothes of extensibility. Third-party tools arrive through the `wpmcp_tools` filter, which adds
+arrays rather than files.
+
+**What a module may call:** WordPress, and five helpers in `tools.php` - `wpmcp_cannot()`, `wpmcp_decode_specialchars()`, `wpmcp_listable_statuses()`,
+`wpmcp_post_type_ok()` and `wpmcp_raw_title()`.
+
+**What it may not:** anything in `endpoint.php`, `admin.php`, `trace.php` or `src/`. A module
+does not reach into the request path, the settings screen, the log or the transport's types.
+
+**Both halves of that are a GATE and not a convention**, which is the whole point of
+`tests/unit/ModuleBoundaryTest.php`: it tokenises every module file, resolves each `wpmcp_*` call
+to the file that declares it, and fails when one resolves anywhere but `tools.php`, `modules.php`
+or a module - so a core file nobody thought to forbid is forbidden by default. It reports an
+unresolved call rather than skipping it, refuses any reference to one of this plugin's own classes
+from a module (both the namespaced `src/` shape and the flat `WpMcp_*` one, case-insensitively and
+with or without a leading backslash), and holds the five helpers above to being exactly the five,
+because an unenforced sentence in the seam's own contract is the ACF `permission_callback` mistake
+in our own words.
+
+**And what that gate cannot see, because a mechanism that does not state its limit invites the
+trust this is here to remove: an INDIRECT call.** It resolves names that are written, so a variable
+function, a string handed to `call_user_func`, `add_action` or `add_filter`, or a callable array
+reaches a core symbol without being a token the test can attribute. No module uses one today - the
+only string callable under `modules/` is a module's own provider name, handed to
+`wpmcp_register_module()`, which is the front door. **So one thing stays a hand check in review of
+any module diff:** read every string literal that looks like a symbol name, and every `$variable(`
+call, and ask what it resolves to. The gate exists so that this is a short bounded reading rather
+than the whole file. Nothing in the core calls
+into a module either, asserted the same way there and again by `tests/unit/BareCoreTest.php`,
+which copies the core into a temporary directory WITHOUT `modules/`, loads it in a fresh PHP
+process, and asserts the registry comes back as exactly the 24 core tools. A core file that
+needed a module would fatal there and name the symbol.
+
+**A module's own availability guard goes at the top of its own file**, before the registration
+call - `function_exists('acf')` and the like - so a module that cannot work does not register
+and its tools do not exist. Not "exist but refuse": absent, so `tools/call` answers the same
+`-32602 Unknown tool` a name nobody registered gets. That is the same rule the code tools,
+`sql-select` and the post-meta pair already obey, for the same reason: a distinct "it exists
+but is off" tells an unauthorised caller a fact about this site's configuration for free.
+
+**And nothing a module returns is trusted.** Registration records a callable and checks nothing;
+the gate is on the way OUT, in `wpmcp_module_tools()`, and it is the same function a
+third-party filter entry has always faced - `wpmcp_registry_reject_reason()` in `endpoint.php`,
+one function, called from both paths. **A module that returns a write tool without declaring
+`write` publishes nothing:** the entry is dropped, it is absent from `tools/list`, it cannot be
+called, and a `module_reject` event names the module, the tool and the reason. The same for a
+`write` that is truthy but not a boolean, a missing `description` or `inputSchema`, an
+incomplete `annotations` block, a `run` that is not callable, and a description over 1,000
+characters. Two refusals are the module path's own: a **provider** that cannot be called or does
+not return an array drops the whole module, and a **name the core or an earlier module already
+uses** is refused - `array_merge` lets a later string key win, so without that check a module
+could replace `delete-post` with its own closure, and a built-in's `write` flag is the gate a
+read-scope token is refused on.
+
+`wpmcp_register_module()` is a public function and anything on the site can call it. That is
+deliberate: the gate is identical to the filter's, so the most a third party gains by using this
+door is the right to be checked the same way, and it is what lets
+`tests/integration/ModuleSeamTest.php` register a deliberately broken module on a real site and
+prove its tools do not exist. **The trust boundary is the gate, never the door.**
+
+**A core edit is a visible event.** `bin/code-fingerprint.sh` hashes the shipped PHP three
+times - `core` over everything but `modules/`, `modules` over `modules/` alone, and `code` over
+the union, which is still the only number the CI reuse decision reads. `bin/code-fingerprint.sh
+HEAD verdict <base>` prints which half moved, and CI prints it per run, so "a module changed,
+the core did not" is a line a machine wrote rather than a claim in a commit message. It gates
+nothing; it is the record.
 
 ## What happens on a request
 
@@ -111,8 +209,8 @@ runs.
 
 One catch-all around dispatch. Anything unexpected becomes `-32603`
 **`Internal error (trace 1f53b972)`** plus the same id in `error.data.trace_id`, and nothing
-else crosses. The throwable goes to `wp-content/wpmcp/trace-<32 hex>.log` under that id, with
-its class, message, file, line, `WP_Error` data and stack.
+else crosses. The throwable goes to one row of **`wp_wpmcp_traces`** under that id, with its
+class, message, file, line, `WP_Error` data and stack.
 
 **The id is in the message as well as in `data` since 1.1.1**, and the reason is a measurement:
 a cold client rendered `error.message` and nothing else, so the one identifier that makes a
@@ -122,8 +220,9 @@ could not be found. Eight hex digits generated per event disclose nothing.
 **The stack carries argument SHAPES, never argument values.** PHP's own `getTraceAsString()`
 prints the first fifteen characters of every string argument - verified on this project's PHP,
 8.2.29 with `zend.exception_ignore_args=0` - which is the start of a URL, a title, or whatever
-a caller sent. The log now writes `{closure}(array{source_url,filename}, string(41), stdClass)`
-instead: an array's KEYS, a string's length, an object's class.
+a caller sent. The stack is stored as `{closure}(array{source_url,filename}, string(41),
+stdClass)` instead: an array's KEYS, a string's length, an object's class. It is bounded at 200
+frames, which is the one value the file's byte cap used to bound and a column does not.
 
 `trace.php` is the only file allowed to touch a throwable's `getMessage()`, `getFile()`,
 `getTraceAsString()` or a string cast of it. Every one of those puts the filesystem layout,
@@ -131,26 +230,76 @@ and often the arguments, somewhere a client can read, so `tests/unit/NoDisclosur
 greps the other files and fails if one appears. The only value that crosses back out is a
 line number, as an integer.
 
-The log's file name is random and stored in an option, so its URL cannot be derived from
-anything a client sees. Once a day the plugin fetches that URL and, on a `200`, raises an
-error notice on every admin screen. The first version of this used an `.htaccess` and the
-name `trace.log`, which nginx happily served to anybody.
+**A TABLE AND NOT A FILE, SINCE 1.1.2, AND THE REASON IS THE WEB SERVER.** The log was
+`wp-content/wpmcp/trace-<32 hex>.log` behind an `.htaccess`, and `.htaccess` is an APACHE file:
+nginx has no per-directory configuration and never reads it. MEASURED on the development host -
+`GET /wp-content/wpmcp/trace.log` answered `200` with 14 KB of absolute paths, the OS username,
+the plugin inventory, tool names, user ids and every stack frame, to anybody, with no token. The
+plugin's own daily self-check NOTICED and the plugin carried on writing, which made it an
+observation rather than a guard; randomising the file name hid the URL without removing it. **No
+web server can serve a table**, so the class of failure is gone rather than mitigated - and with
+it the two guard files, the self-check, both admin notices, the 2 MiB size cap, the
+keep-newest-75% rewrite, the absorb-and-retry trim, the short-write retry, `flock`, `fstat` and
+`ftruncate`. Atomicity became the database's problem: one INSERT either happens or does not.
 
-**The log is bounded at 2 MiB since 1.1.1, and it is the OLDEST entries that go.** It used to grow
-for ever - 1.7 MB and 1.5 MB measured on two development sites in eleven days, nothing rotating or
-ageing it out - which on a customer host has no end. The direction of the cut is the contract, not
-an implementation detail: this boundary hands a caller an id and tells it to quote that id, so the
-file is read by id and the ids most likely to be asked about are the newest. A cap that dropped
-the newest entries would discard an id in the same millisecond it went out on the wire, which is
-worse than no cap. So the newest three quarters of the cap survive, the cut lands between entries
-rather than through one, and the first line of a trimmed file says `truncated=1` with the cap, the
-bytes removed and the bytes kept - a shorter file must not read as a damaged one. The ceiling is
-`wpmcp_trace_log_max_bytes`, filterable, and a filtered value under one entry's worth is REJECTED
-back to the default rather than clamped - honouring an obvious mistake quietly is worse than
-ignoring it. Enforcing the cap costs one `fstat()` on the descriptor the append already holds, on a
-path that only runs when something has already broken. The trim also refuses to discard bytes it has
-not read and refuses to treat a short write as a finished one, because `flock` is a no-op on NFS and
-a disk can be full: either would otherwise lose the newest entry, which is the one the id names.
+The objection that did not survive is worth recording, because it is the obvious one: a trace
+must survive a broken database, since database failures are among the things it records. It
+cannot happen. A database that is genuinely down means WordPress never boots and this plugin is
+not running to log anything; the realistic case is a SINGLE query failing - bad SQL in
+`sql-select`, a missing table, a deadlock - where the connection is fine and an INSERT succeeds.
+
+**The two costs of a table were designed against, not discovered.** (1) A trace now rides in
+every database backup, export and staging clone, where a file did not - so retention is DAYS:
+seven of them, and at most 2,000 rows, swept on the hourly `wpmcp_flush_expired` event that
+already clears dead tokens, oldest first for the same reason the file's cap cut that way. The
+sweep deletes in batches of 500 with a round cap - 20 for the age pass, 200 for the row pass,
+which is a PRIMARY KEY range delete and the cheap one - because the site that most needs it is the
+site whose cron died a month ago, and an unbounded `DELETE` is one transaction inside somebody's
+page load. **A ROW CAP IS NOT A SIZE CAP UNLESS THE ROW IS BOUNDED, which round 1 of this sprint
+got wrong and documented wrongly:** every field is now capped in bytes against its own column
+and the stack at 8 KiB as well as 200 frames, so one row is at most 12,960 bytes and 2,000 rows
+is **under 26 MB of column data** - where a count cap over a `longtext` bounded only in frames put
+the real worst case in the hundreds of megabytes, because the runaway recursion a frame cap exists
+for writes 40-400 KB rows.
+
+**And two things the first version of that figure left out.** Column data is not what a disk
+carries: MEASURED by planting 500 rows at exactly those caps on MySQL 8.4 (InnoDB
+`innodb_file_per_table` and `ROW_FORMAT=Dynamic`), the worst case at the cap is about **48 MB of tablespace** - 23,888 bytes a
+row, because an 8 KiB `stack` does not fit in half a 16 KB page and goes off-page into a page of
+its own - and about **27 MB in a `mysqldump`**, where escaping costs 4.2% rather than the 10-15% a
+first estimate assumed. And the tablespace number is a HIGH-WATER MARK: deleting rows frees them
+for reuse, which is what bounds the table, but does not hand the space back to the filesystem
+(measured: the file stayed at 12 MB after the rows went, and only `OPTIMIZE TABLE` returned it to
+112 KB) **whose two conditions are the ones in brackets above**: on a host that keeps InnoDB in
+the shared `ibdata1` tablespace, `OPTIMIZE TABLE` frees pages for reuse inside that file and
+returns nothing at all to the filesystem, and under the older `COMPACT` row format the first 768
+bytes of the stack stay in the row with the remainder off-page, which moves the per-row figure. Every one of those figures also has a CONDITION - the sweep removes at most 100,000 rows
+an hour, so the ceiling holds up to about **27 traced failures a second sustained**, roughly ten
+times an AI client retry-looping at ~350 ms a call; above it the table grows until the rate drops.
+
+The measured mean entry is 2,283 bytes and lives inside its own page, so a development site's 69
+failures a day fills 486 rows, about 1.1 MB, in seven days. Both retention numbers are
+filterable and a useless value is ignored rather than obeyed.
+(2) `sql-select` must refuse this table, and does - it is the third name in
+`wpmcp_sql_denied_identifiers()` beside the tokens and the file-version tables. A trace row is
+exactly the detail the boundary withholds, so leaving it readable would undo the boundary
+through the back door for any admin-scope token that had just caused a failure.
+
+**A trace id still resolves, and that is the whole promise.** `trace_id` is indexed, and
+**Settings > WP MCP > Look up a trace id** takes the eight hex digits a client was given and
+prints that one entry, `manage_options` only. It is deliberately not a log browser: no list, no
+search, no pagination, because what it renders is the detail the API is refused. An INSERT that
+fails still sends the whole entry to `error_log()`, exactly as an unwritable directory did.
+
+**The upgrade DELETES an existing site's log, its directory and its three options.** That is the
+only way the exposure goes away; the old entries are not migrated, because they would then ride
+in every backup, and the changelog tells an operator with a live support case to take a copy
+first. **An upgrade that could not manage it says so on every admin screen** - the one notice
+this change adds, having deleted three, and the difference is that this one describes a file the
+plugin has FINISHED with and could not delete, which on nginx is still being served. A symlinked
+`wp-content/wpmcp` is reported the same way and deliberately not followed: `glob()` and
+`unlink()` follow a link, so acting would delete files somewhere the plugin has never written
+and would take the link while leaving every exposed byte in place.
 
 ## Five error codes and no more
 
@@ -177,8 +326,8 @@ kilobyte of and which in the measured case was a whole HTML error page.
 Three surfaces, and each answers a different question without the plugin inventing a log format:
 
 - **the auth events** (`wpmcp_auth_event`) - was a credential accepted, and whose;
-- **the trace log** - what broke, keyed by the id the caller was given, newest kept when the 2 MiB
-  cap trims it;
+- **the trace store** - what broke, keyed by the id the caller was given; a table since 1.1.2,
+  kept seven days and 2,000 rows, looked up by id on the settings screen;
 - **`do_action('wpmcp_tool_call', $tool, $ok, $context)`**, since 1.1.1 - what a token is
   actually DOING. One firing per `tools/call`, in a `finally` so a crash fires it too, with `ok`
   read off the response so a scope refusal, a schema failure, a tool's own error and a thrown
@@ -261,11 +410,13 @@ direction of running something. Letting the server be the parser has one impleme
 and no second opinion to drift.
 
 What the server cannot decide is what the WordPress database user should not have been
-given. It created the plugin's own two tables and can read them; on many hosts it also holds
-`FILE`, which makes `LOAD_FILE()` - a query expression, and a read, so accepted by both walls
-- a way to read the server's disk. Those three names are therefore the tool's only string
-inspection, and it refuses the statement if any of them appears anywhere in it, comments and
-string literals included. It is a short denylist over a surface whose real fence is the
+given. It created the plugin's own three tables and can read them - the tokens, the theme-file
+versions, and, since 1.1.2, the TRACES, which is the one that most has to be refused, because a
+trace row is precisely the detail the error boundary hands a caller eight hex digits instead of.
+On many hosts the same user also holds `FILE`, which makes `LOAD_FILE()` - a query expression,
+and a read, so accepted by both walls - a way to read the server's disk. Those four names are
+therefore the tool's only string inspection, and it refuses the statement if any of them appears
+anywhere in it, comments and string literals included. It is a short denylist over a surface whose real fence is the
 server, not a second fence: `secure_file_priv` and the `FILE` grant are the operator's, and
 [SECURITY.md](SECURITY.md) says so.
 

@@ -2,6 +2,184 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.1.2
+
+**Released 2026-09-25.** The private trace log stops being a file, and the tool surface starts
+moving out of `tools.php` behind a declared seam.
+
+### Added: `list-content-types`, so a site's real content is findable
+
+- **New read tool, `list-content-types`.** It takes no arguments and returns `post_types` and
+  `taxonomies`: for each post type its `name`, `label`, `singular_label`, `description`,
+  `hierarchical`, `public`, `show_in_rest`, `rest_base`, the `taxonomies` attached to it and
+  `counts` - a status to a number of posts; for each taxonomy the same first eight fields plus the
+  `post_types` it covers and how many `terms` it holds, empty ones included.
+- **It exists because of a measured mislead, and it was the worst one on the list.** A client
+  working blind against a real customer site called `list-posts`, got ONE item back, and had no
+  way to learn that the site's content sat in five custom post types - `list-posts` defaults to
+  `post_type: "post"` and nothing in the tool surface named anything else. It eventually found
+  them by reverse-engineering the `object` field of `get-menu` results. `list-terms` defaults to
+  `category`, which on that site held a single term, because none of the five types registered
+  one. A migration cannot copy post types it cannot discover.
+- **A tool rather than a field inside `site-info`,** because a cold client reads the tool LIST: an
+  inventory buried in another tool's result is exactly as invisible as the custom types were. And
+  taxonomies in the SAME tool, because "what kinds of content are here" is one question and two
+  tools would be two chances not to be called.
+- **The counts say only what your capabilities let you see listed.** They carry the statuses
+  `list-posts` would query for you and no others, so a token bound to an Author is told how many
+  posts are published and nothing about anybody's drafts. They do not add in your own unpublished
+  posts, which `list-posts` finds through a second query - a count that silently mixed two
+  visibility rules would be worse than one that states its rule.
+- **Only post types and taxonomies WordPress itself treats as viewable are listed, and never
+  `attachment`.** Every name it gives is one `list-posts` and `get-post` accept, so the answer is
+  usable and not just informative; and a type or taxonomy a plugin registered for its own
+  bookkeeping is absent on purpose, because an unfiltered list is a plugin inventory by another
+  route and `list-plugins` is admin-scope for a reason.
+- **The catalog is 39 tools.**
+
+### Changed: the menu tools moved to their own file, behind a seam that checks them
+
+- **Nothing about the menu tools changed** - not an argument, not a result, not a refusal. They
+  are the same 1,089 lines, byte for byte, in `modules/menus.php` instead of in the middle of
+  `tools.php`. The two test classes that cover them were run before and after and neither was
+  edited: 18 cases and 273 assertions on `--group sprint-13`, 3 and 11 on `MenuOrphanOrderTest`,
+  identical on both development sites.
+- **One observable consequence, and only one:** the menu tools now appear at the END of
+  `tools/list` rather than between the comment tools and the inventory tools. `tools/list` pages
+  at 50 and the catalog is 39, so there is no second page and no cursor is affected. MCP clients
+  treat the listing as a set.
+- **`tools.php` is 1,084 lines shorter - 6,987 down to 5,903 at this commit**, and a new file, `modules.php`, carries the
+  seam: the manifest of module files, the loader, `wpmcp_register_module()`, and the gate.
+- **The seam checks rather than trusts, which is the whole of its security value.** A module's
+  entries face the SAME function a third-party `wpmcp_tools` filter entry has always faced -
+  `wpmcp_registry_reject_reason()`, one function, called from both paths - applied on the way OUT
+  of registration. **A module that returns a write tool without declaring `write` publishes
+  nothing:** the entry is dropped, absent from `tools/list`, uncallable, and named in a new
+  `module_reject` auth event with the module, the tool and the reason. Two refusals are the module
+  path's own - a provider that cannot be called or does not return an array drops the whole
+  module, and a name the core already uses is refused, because `array_merge` would otherwise let a
+  module replace `delete-post` with its own closure and a built-in's `write` flag is the gate a
+  read-scope token is refused on.
+- **What it does NOT buy is a lighter review, and that is written down where it will be read.**
+  Five of the six reviewed sprints in this project failed their first review with a green suite
+  and not one of those defects was in the dispatch path. Scrutiny follows blast radius, not file
+  boundaries. A locked core makes a diff smaller; it does not make new code safer.
+- **A new auth event, `module_reject`** - `module`, `tool`, `reason` - beside the existing
+  `registry_reject`, which keeps meaning "the `wpmcp_tools` filter did this".
+- **ARCHITECTURE.md gains "The module seam"**: how a module registers, what it may call
+  (WordPress plus four helpers in `tools.php`), what it may not (anything in `endpoint.php`,
+  `admin.php` or `trace.php`), and what happens to one that does not declare `write`.
+- **Nothing changed for the `wpmcp_tools` filter or for the two opt-in switches.** The code tools
+  and `sql-select` are gated exactly where and how they were, including that a switched-off tool
+  does not EXIST rather than reporting itself disabled.
+- **For anyone building a zip by hand: `modules.php` and `modules/*.php` now have to be in it.**
+  `docs/RELEASE.md` has the updated file list. The release workflow and its extraction gate were
+  updated with it.
+
+### Fixed: a one-frame stack trace no longer hides that the rest of the stack is gone
+
+- **When the innermost frame alone is bigger than the whole 8 KiB stack budget, the truncation
+  marker now says that every other frame went, `{main}` included.** It used to read `#0 ...[frame
+  cut, 8072 of 20003 bytes kept, under the 8192-byte stack cap]` and nothing else - which an
+  operator has every reason to read as "one very long frame, nothing else to see", when in fact
+  the stack had been reduced to a fragment of its innermost call. The other truncation path has
+  always counted what it dropped. The bytes reserved for that sentence went from 120 to 176 to
+  fit the extra clause, which costs 56 bytes of the frame being cut, out of 8,192.
+
+### Changed: the trace log is a table, and the file is deleted
+
+- **BEFORE YOU UPDATE, IF YOU HAVE A LIVE SUPPORT CASE: take a copy of
+  `wp-content/wpmcp/trace-*.log`.** The upgrade DELETES that file, its directory, its two guard
+  files, three options and a transient, and it does NOT copy the old entries into the new table.
+  A trace id issued before the update stops resolving. This is deliberate twice over: the file is
+  the exposure the change exists to remove, so leaving it would make the fix cosmetic, and
+  importing a year of unswept entries would carry that whole history into every database backup
+  you ever take from then on.
+- **Traced failures now go to a new table, `{prefix}wpmcp_traces`, instead of
+  `wp-content/wpmcp/trace-<32 hex>.log`.** The reason is the web server: the log sat behind an
+  `.htaccess`, and `.htaccess` is an APACHE file. nginx has no per-directory configuration and
+  never reads it - MEASURED on the development host, `GET /wp-content/wpmcp/trace.log` answered
+  `200` with 14 KB of absolute paths, the OS username, the plugin inventory, tool names, user ids
+  and every stack frame, to anybody, with no token. The random file name hid that URL; it did not
+  remove it. **No web server can serve a table.**
+- **Both trace-log admin notices are gone**, and an operator will notice: the red "the trace log
+  is readable from the web" and the amber "could not check whether the trace log is readable"
+  both described a file that no longer exists. So did the daily outbound HTTP request the plugin
+  made to fetch its own log on every admin page load. A third notice, "the trace log could not be
+  written", is also gone; an INSERT that fails still sends the whole entry to the PHP error log,
+  now prefixed `wp-mcp trace (could not be stored)`.
+- **`wp-content/wpmcp/` is removed entirely** - the log, the empty `index.php`, the `.htaccess`
+  and the directory. Nothing in the plugin writes outside the database any more except the theme
+  files the code tools are asked to edit.
+- **Traces are kept 7 days and at most 2,000 of them**, swept on the hourly `wpmcp_flush_expired`
+  event that already clears dead tokens, oldest first. The file was never swept at all: two
+  development sites reached 1.7 MB and 1.5 MB in eleven days, and on a customer host nothing ever
+  came along to clean it up. Retention is now days rather than for ever for a cost the file did
+  not have - a row rides in every database backup, export and staging clone. Both numbers are
+  filterable, `wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows`, and a value under 1 day or
+  100 rows is ignored rather than obeyed.
+- **The sweep deletes in batches of 500 - 20 batches for the age cap, 200 for the row cap.** A
+  site whose cron has not fired for a month would otherwise delete a month of rows in one
+  statement: one transaction, with a `longtext` per row in the undo log, inside an ordinary page
+  load. The row cap gets ten times the rounds because it is a PRIMARY KEY range delete, the cheap
+  shape, and because it is the pass the size ceiling below depends on. A healthy site runs exactly
+  one statement per pass - the loop stops the moment a batch comes back short.
+- **Every field of a trace is capped in bytes against its own column, and the stack is capped at
+  8 KiB as well as at 200 frames** - so what the table can cost a backup is a MAXIMUM and not an
+  average. One row is at most 12,960 bytes (`method` 64, `tool` 191, `class` 191, `at` 255,
+  `message` and `data` 2,000 each, `stack` 8,192), which puts **2,000 rows under 26 MB of column
+  data**. A cap on the NUMBER of rows is not a cap on their SIZE unless the row is bounded too:
+  with the stack bounded only in frames, the runaway recursion a frame cap exists for wrote
+  40-400 KB rows, and 2,000 of those is not 4.6 MB.
+- **And column data is not what a disk carries, so both figures are stated - MEASURED**, by
+  planting 500 rows at exactly those caps on MySQL 8.4 with InnoDB `innodb_file_per_table` and
+  `ROW_FORMAT=Dynamic`: **about
+  48 MB of tablespace** (23,888 bytes a row - an 8 KiB stack does not fit in half a 16 KB page, so
+  it goes off-page into a page of its own) and **about 27 MB in a `mysqldump`** (13,502 bytes a
+  row; escaping costs 4.2%). The tablespace figure is a HIGH-WATER MARK: deleting rows frees them
+  for reuse but does not return the space to the filesystem - measured, the file stayed at 12 MB
+  after the rows went and only `OPTIMIZE TABLE` shrank it. **Both conditions above are load-bearing:**
+  on a host that keeps InnoDB in the shared `ibdata1` tablespace, `OPTIMIZE TABLE` frees pages for
+  reuse inside that one file and returns nothing to the filesystem at all, and under the older
+  `COMPACT` row format the first 768 bytes of each stack stay in the row with only the remainder
+  off-page, which moves the per-row figure. In practice all of it is far smaller -
+  the measured mean entry is 2,283 bytes, so seven days at a development site's 69 failures a day
+  is 486 rows, about 1.1 MB.
+- **And the ceiling has a stated CONDITION, which the first version of it did not:** the sweep
+  removes at most 100,000 rows an hour, so the cap holds up to about **27 traced failures a second
+  sustained**. Above that more arrive than leave and the table grows until the rate drops. An AI
+  client retry-looping against a throwing tool at ~350 ms a call is about 2.8 a second, so the
+  headroom is roughly tenfold.
+- **An upgrade that could NOT remove the old log raises an error notice on every admin screen**,
+  naming what is left. On nginx that file is still being served, which is the whole reason the
+  log moved, so an upgrade that did not manage it must not look like one that did. Deleting the
+  path by hand and reactivating the plugin clears it.
+- **A symlinked `wp-content/wpmcp` is reported and not followed.** `glob()` and `unlink()` follow
+  a link, so the upgrade would delete files somewhere the plugin has never written - a volume
+  mount, a shared directory, a backup target - and removing the link would leave every exposed
+  byte where it is while reporting success.
+- **A new auth event, `trace_file_removed`,** fires once on the upgrade request with what it
+  deleted and what it could not - the latter being the sites where the file is still readable.
+- **`sql-select` refuses the new table by name**, exactly as it already refuses the token and
+  file-version tables, anywhere in the statement, comments and string literals included. A trace
+  row holds the class, the message, the absolute file:line, the `WP_Error` data (which is where
+  wpdb puts a failing query) and the whole stack - precisely what the error boundary hands a
+  caller eight hex digits INSTEAD of. While the traces were a file no token could read them at
+  all; this denial is what replaces the filesystem as the wall.
+- **New on the settings screen: Look up a trace id.** Paste the eight hex digits a client was
+  given and see that one entry, `manage_options` only. It exists because the change would
+  otherwise have made diagnosis harder for exactly the person the id is for: while the traces
+  were a file, an operator opened the file. It is deliberately not a log browser - no list, no
+  search, no pagination - because what it prints is the detail the API is refused.
+- **A stored stack is bounded at 200 frames**, the middle dropped with a line saying how many.
+  That is the one value the file's 2 MiB cap used to bound and a column does not: a runaway
+  recursion could otherwise make one row a megabyte, 2,000 times over, in every backup.
+- **Deleting the plugin now drops three tables**, not two.
+- **Gone with the file, for anybody who was relying on them:** the `wpmcp_trace_log_max_bytes`
+  filter, the `wpmcp_trace_log_name`, `wpmcp_trace_log_readable` and `wpmcp_trace_log_unwritable`
+  options, and the `wpmcp_trace_checked` transient. The upgrade deletes the three options and the
+  transient for you.
+
 ## 1.1.1
 
 **Released 2026-09-24.** The platform-swap release: less code of ours doing what WordPress

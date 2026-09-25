@@ -288,18 +288,26 @@ final class WireSerializationTest extends TestCase
             'wpmcp_comment_tools',
             'wpmcp_code_tools',
             'wpmcp_sql_tools',
-            'wpmcp_menu_tools',
             'wpmcp_inventory_tools',
+            // MODULES SINCE 1.1.2, and named here for the reason the rest are: this catalog is
+            // what every contract test in the unit tier reads, so a tool missing from it is a
+            // tool nothing checks. The menu tools moved to modules/menus.php and
+            // list-content-types arrived in modules/discovery.php. Both are loaded by
+            // wpmcp_bootstrap() through wpmcp_module_load(), so function_exists() finds them
+            // exactly as it did when they were in tools.php - which is itself the assertion
+            // that the move kept them reachable from a bare `require wp-mcp.php`.
+            'wpmcp_menu_tools',
+            'wpmcp_discovery_tools',
         ] as $fn) {
-            self::assertTrue(function_exists($fn), "{$fn}() is gone from tools.php.");
+            self::assertTrue(function_exists($fn), "{$fn}() is gone.");
 
             $tools = array_merge($tools, $fn());
         }
 
         self::assertCount(
-            38,
+            39,
             $tools,
-            'The catalog is not 38 tools any more. That is the product (see the build'
+            'The catalog is not 39 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
             . ' detail - update this number deliberately. Got: ' . implode(', ', array_keys($tools))
         );

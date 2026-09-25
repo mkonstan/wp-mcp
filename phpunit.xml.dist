@@ -66,6 +66,10 @@
             <file>endpoint.php</file>
             <file>tools.php</file>
             <file>admin.php</file>
+            <!-- The seam, and the feature files it loads (1.1.2). A module is shipped PHP on the
+                 request path, so restrictNotices and restrictWarnings have to reach it. -->
+            <file>modules.php</file>
+            <directory suffix=".php">modules</directory>
             <!-- The src/ tree the four flat files are being split into, sprint by sprint. -->
             <directory suffix=".php">src</directory>
         </include>

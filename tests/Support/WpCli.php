@@ -141,11 +141,20 @@ final class WpCli
      * run() would turn the non-zero exit into an exception and fold both streams into
      * its message, and the test needs to assert on each of the three separately.
      *
+     * $asUser is the same argument evaluate() takes, and it is what makes a CAPABILITY
+     * refusal testable: an admin screen's `wp_die()` is a non-zero exit with a sentence on
+     * stderr, and the test has to be able to read the exit code AND check that nothing the
+     * screen guards appeared on stdout (sprint TRACE-TABLE, the trace lookup).
+     *
      * @return array{0:int,1:string,2:string} [exit code, stdout, stderr]
      */
-    public static function evaluateWithStatus(string $php): array
+    public static function evaluateWithStatus(string $php, int $asUser = 0): array
     {
-        [$code, $out, $err] = self::attempt(['eval', $php]);
+        $args = ['eval', $php];
+
+        if ($asUser > 0) { $args[] = '--user=' . $asUser; }
+
+        [$code, $out, $err] = self::attempt($args);
 
         return [$code, self::clean($out), trim($err)];
     }

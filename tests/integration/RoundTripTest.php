@@ -260,7 +260,13 @@ final class RoundTripTest extends FixtureIntegrationTestCase
             // create-term with the name as read: the existing term, by id, and no second one.
             $again = $this->mcp(self::$token)->callTool('create-term', ['taxonomy' => $taxonomy, 'name' => $listed[0]['name']]);
             self::assertTrue($again->isError, "create-term made a second {$taxonomy} term from a name it had just read: " . $again->text);
-            self::assertStringContainsString('term ' . $termId, $again->text, 'The refusal does not name the existing term.');
+            // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): `term 10` is a substring of
+            // `term 100`, so the refusal could name a different term and still pass.
+            self::assertMatchesRegularExpression(
+                '/\bterm ' . $termId . '\b/',
+                $again->text,
+                'The refusal does not name the existing term.'
+            );
             self::assertSame([$termId], self::termIdsNamed($taxonomy, $stored), 'A duplicate term exists.');
 
             // update-post's terms, by the name as read.

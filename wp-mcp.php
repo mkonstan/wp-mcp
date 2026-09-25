@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
- * Version: 1.1.1
+ * Version: 1.1.2
  * Requires at least: 6.9
  * Requires PHP: 8.1
  * Author: Max Konstantinovski
@@ -50,7 +50,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '1.1.1');
+define('WPMCP_VER', '1.1.2');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 
 /**
@@ -288,6 +288,23 @@ function wpmcp_build_label() {
  * keeps a bounded history per path and is removed with the plugin.
  */
 define('WPMCP_VERSIONS_TABLE', 'wpmcp_file_versions');
+
+/**
+ * Where a traced failure goes: the error boundary's private side, since 1.1.2.
+ *
+ * A TABLE AND NOT A FILE, FOR THE SAME REASON AS THE ONE ABOVE and one more. The trace log
+ * was `wp-content/wpmcp/trace-<32 hex>.log` behind an `.htaccess`, which is an APACHE file:
+ * nginx has no per-directory config and never reads it, and `GET` on that path returned 200
+ * with 14 KB of stack traces on the development host - MEASURED. A table cannot be served
+ * over HTTP at all, so the whole class of exposure disappears rather than being mitigated,
+ * and two sprints of file machinery went with it. See trace.php's header and analysis/53 D25.
+ *
+ * IT IS SWEPT, unlike the file, which nothing ever cleaned up on a customer host: seven days
+ * and 2,000 rows, on the hourly hook that already sweeps dead tokens. Retention is days
+ * rather than for ever because a trace now rides in every database backup and staging clone,
+ * which is the one thing a file did not do - see wpmcp_trace_sweep().
+ */
+define('WPMCP_TRACES_TABLE', 'wpmcp_traces');
 /**
  * The two caps, because a token carries two timers.
  *
@@ -395,12 +412,35 @@ function wpmcp_max_window() {
 //       the REJECTED session feature would have bought: "Claude Desktop 1.4, last seen 3
 //       minutes ago, 412 calls" answers "which client is this token, and is it still
 //       there?" without the plugin holding any session state at all.
-define('WPMCP_DB_VER', 6);
+//   7 = the trace log stops being a file. Adds a THIRD table, WPMCP_TRACES_TABLE, which is
+//       where the error boundary now writes instead of wp-content/wpmcp/trace-<32 hex>.log -
+//       a file that could not be made private on nginx, because `.htaccess` is Apache's.
+//       The upgrade DELETES the log, its directory, its guard files, its three options and
+//       its transient: leaving them would carry the exposure this revision exists to remove
+//       (wpmcp_migrate_remove_trace_file). Old entries are NOT migrated into the table - they
+//       would ride in every database backup from then on, which is a cost we chose to bear
+//       for new entries only. An operator with a live support case takes a copy first, and
+//       the changelog says so.
+define('WPMCP_DB_VER', 7);
 define('WPMCP_DB_VER_OPTION', 'wpmcp_db_ver');
 
 // Revision 6's two optional columns, when the ALTER did not work: the names, for the admin
 // notice. Absent when they are both there. See wpmcp_note_client_columns().
 define('WPMCP_CLIENT_COLUMNS_OPTION', 'wpmcp_client_columns_missing');
+
+/**
+ * Revision 7's trace FILE, when it could not be removed: what is left, for the admin notice.
+ * Absent when the upgrade took everything. See wpmcp_migrate_remove_trace_file().
+ *
+ * THE ONE NOTICE THIS SPRINT ADDS, HAVING DELETED THREE, and the difference is what the
+ * operator can do about it. The three that went described a file the plugin was still writing
+ * to; this one describes a file the plugin has FINISHED with and could not delete - which on
+ * nginx is the exposure this whole revision exists to remove, still sitting under the document
+ * root. Round 1 of this sprint sent that fact only to the PHP error log, on the same commit
+ * that removed the notice machinery, so on exactly the host the change is for the file survived
+ * and nobody was told.
+ */
+define('WPMCP_TRACE_FILE_OPTION', 'wpmcp_trace_file_left');
 
 /* ============================================================
  * Activation / upgrade: create the tokens table, migrate data
@@ -413,11 +453,10 @@ function wpmcp_activate() {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
     }
 
-    // The trace log's directory, and the one question worth asking about it: can the web
-    // read it? See trace.php - .htaccess is Apache's, and most hosts are not Apache.
-    wpmcp_trace_ensure_dir();
-    delete_transient(WPMCP_TRACE_CHECK_TRANSIENT);
-    wpmcp_trace_selfcheck();
+    // NOTHING HERE FOR THE TRACE LOG SINCE 1.1.2, and its absence is the point: it is a
+    // table now, created by wpmcp_install() above like the other two, so there is no
+    // directory to make, no guard files to write and no "can the web read it?" to ask.
+    // A table cannot be served over HTTP. See trace.php's header.
 }
 
 /**
@@ -514,6 +553,43 @@ function wpmcp_install() {
   KEY path_saved_at (path(191),saved_at)
 ) $charset;";
 
+    // Revision 7's table: one traced failure per row. The fields are the file era's, and
+    // trace.php's wpmcp_trace_record() says why they are columns rather than one payload.
+    //
+    // `trace_id` IS THE INDEX THAT MATTERS and it is the whole promise of this table. The
+    // boundary hands a caller eight hex digits and tells it to quote them, so "the row with
+    // this id" is the only read the plugin ever performs on it - the settings screen's lookup
+    // and nothing else. It is a KEY and not a UNIQUE KEY on purpose: a duplicate would make
+    // the INSERT fail and lose the entry at the exact moment its id went out on the wire.
+    //
+    // `logged_at` IS INDEXED because the sweep reads it every hour (wpmcp_trace_sweep), and
+    // an hourly full scan of this table is the one cost the file era did not have.
+    //
+    // EVERY COLUMN'S WIDTH IS ALSO A CAP IN trace.php, and that is what makes the row's size a
+    // CEILING rather than an average (round 2). `method`, `tool`, `class` and `at` are cut to
+    // exactly the widths below, `message` and `data` to 2,000 bytes and `stack` to 8 KiB, so one
+    // row is at most 12,960 bytes of column data - which is the number the changelog, the README
+    // and ARCHITECTURE.md all quote, and tests/unit/TraceRowBoundTest.php checks the caps against
+    // these widths so the two cannot drift. See WPMCP_TRACE_STACK_BYTES and
+    // WPMCP_TRACE_METHOD_BYTES.
+    $traces = "CREATE TABLE " . $wpdb->prefix . WPMCP_TRACES_TABLE . " (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  trace_id char(8) NOT NULL DEFAULT '',
+  logged_at datetime NOT NULL,
+  method varchar(64) NOT NULL DEFAULT '',
+  tool varchar(191) NOT NULL DEFAULT '',
+  user_id bigint(20) unsigned NOT NULL DEFAULT 0,
+  token_id bigint(20) unsigned NOT NULL DEFAULT 0,
+  class varchar(191) NOT NULL DEFAULT '',
+  message text NOT NULL,
+  at varchar(255) NOT NULL DEFAULT '',
+  data longtext NOT NULL,
+  stack longtext NOT NULL,
+  PRIMARY KEY  (id),
+  KEY trace_id (trace_id),
+  KEY logged_at (logged_at)
+) $charset;";
+
     // GUARDED, the same way the opcache call in tools.php is guarded: on a request where
     // something has already loaded wp-admin/includes/file.php's sibling, the require is a no-op,
     // and asking whether the function is there first is cheaper than asking the filesystem. It is
@@ -526,6 +602,7 @@ function wpmcp_install() {
 
     dbDelta($sql);
     dbDelta($versions);
+    dbDelta($traces);
 
     // Record the revision once the schema and the data are both actually there - see the
     // comment on the drop below for the one step that is deliberately not a precondition.
@@ -583,6 +660,19 @@ function wpmcp_install() {
     // Only now, with somewhere to put them, are the stale sibling backups collected. It
     // does not gate the stamp - see wpmcp_migrate_sweep_stale_backups() for why.
     wpmcp_migrate_sweep_stale_backups();
+
+    // REVISION 7'S TABLE DOES NOT GATE THE STAMP, and the rule that decides it is the one
+    // stated for revision 6's columns and for the address-column drop below: gate only when
+    // the plugin is INCORRECT without the step. Without the traces table the boundary still
+    // works - wpmcp_trace_record()'s INSERT fails, the whole entry goes to error_log(), and
+    // the id the caller holds still resolves to something an operator can find. That fallback
+    // exists precisely for this. Gating would instead put a host whose CREATE TABLE fails into
+    // a dbDelta-per-request loop for ever, which is the hazard written out twice below.
+    //
+    // THE LOG FILE GOES WHETHER OR NOT THE TABLE ARRIVED, and it goes before the stamp so an
+    // upgrade cannot record revision 7 while the exposed file is still on disk. It is also not
+    // a precondition: a directory that will not delete must not brick the plugin.
+    wpmcp_migrate_remove_trace_file();
 
     // THE DROP IS THE ONE STEP THAT DOES NOT GATE THE STAMP, and the difference is
     // whether the plugin is CORRECT without it. The three columns and the two backfills
@@ -966,6 +1056,186 @@ function wpmcp_sweep_path_sample(array $paths) {
 }
 
 /**
+ * Revision 7: delete the trace LOG - the file, its guard files, its directory, its three
+ * options and its transient. Returns what it removed.
+ *
+ * DELETING RATHER THAN MIGRATING, AND MAX APPROVED EXACTLY THAT. The file is the exposure
+ * this revision exists to remove: on nginx it was served to anybody who knew the URL, because
+ * the `.htaccess` beside it is an Apache file nginx never reads. Leaving it would make the
+ * change cosmetic - the table would be private and the public copy would still be sitting in
+ * `wp-content`. So it goes, and the directory with it.
+ *
+ * AND THE OLD ENTRIES ARE NOT CARRIED INTO THE TABLE. They could be, in a few lines. They are
+ * not, because a trace in the table rides in every database backup, export and staging clone
+ * from then on - that is the cost this release chose to bear for NEW entries, with seven-day
+ * retention to bound it, and importing a year of a file nobody swept would hand an operator
+ * the whole cost at once with no consent. An operator with a live support case takes a copy of
+ * the file before updating; CHANGELOG.md says so under 1.1.2.
+ *
+ * NAMES SPELLED OUT, exactly as uninstall.php spells them, and for a related reason: the
+ * constants that held them are GONE from trace.php as of this revision, so there is nothing
+ * left to read them from. tests/unit/UninstallTest.php notices the option names here and
+ * requires uninstall.php to name them too, which is what keeps the two files in step for the
+ * site that never ran this upgrade at all - a plugin deactivated before the update and then
+ * deleted never loads, so `plugins_loaded` never fires and this function never runs.
+ *
+ * IT GATES NOTHING. A directory the web server owns and PHP may not unlink is a real hosting
+ * shape; refusing to stamp the revision over it would put the site in a dbDelta-per-request
+ * loop for ever, which is the hazard the two steps below this one already state. What it does
+ * instead is say so, with the paths it could not remove, through wpmcp_auth_event() - and
+ * those are the sites where a stranger can still read the file, so the line matters.
+ *
+ * @return array{removed:list<string>,failed:list<string>}
+ */
+function wpmcp_migrate_remove_trace_file() {
+    $tally = array('removed' => array(), 'failed' => array());
+
+    $dir = WP_CONTENT_DIR . '/wpmcp';
+
+    // A SYMLINK IS NOT DESCENDED INTO, IT IS REPORTED (round 2). `wp-content/wpmcp` being a
+    // link is the shape where acting is worse than not acting: `glob()` and `unlink()` follow
+    // it, so the plugin would delete files somewhere it has never written - a volume mount, a
+    // shared directory, somebody's backup target - and `rmdir()` would remove the LINK while
+    // leaving every exposed byte where it is. The same rule the code tools' jail applies to a
+    // caller's path: a migration walking a tree unattended is not the place to relax it.
+    //
+    // The OPTIONS still go: nothing reads them, they describe a file this version does not
+    // write, and leaving them would be a second thing to clean up later. What the operator is
+    // told is that the FILE is still there and why the plugin would not touch it.
+    $linked = is_link($dir);
+
+    if ($linked) {
+        $tally['failed'][] = 'wp-content/wpmcp/ (a symlink - not followed)';
+    } else {
+        // Named rather than globbed, with one glob for the random log name, because this plugin
+        // does not own the whole of wp-content and a blind unlink would take somebody else's
+        // file.
+        $known = array($dir . '/trace.log', $dir . '/index.php', $dir . '/.htaccess');
+
+        foreach (glob($dir . '/trace-*.log') ?: array() as $log) { $known[] = $log; }
+
+        foreach ($known as $file) {
+            if (!is_file($file)) { continue; }
+
+            // A linked FILE inside a real directory is the same decision at one level down:
+            // unlink() would take the link and leave the bytes, and the operator would be told
+            // the log was removed when it was not.
+            if (is_link($file)) {
+                $tally['failed'][] = basename($file) . ' (a symlink - not followed)';
+                continue;
+            }
+
+            // BEFORE the unlink, for the reason code-delete gives: opcache_invalidate()
+            // resolves the path on disk first, so after the unlink it answers false and the
+            // entry for the deleted path survives. index.php is the one file here PHP ever
+            // compiled.
+            if (substr($file, -4) === '.php') { wpmcp_opcache_invalidate($file); }
+
+            if (@unlink($file)) {
+                $tally['removed'][] = basename($file);
+            } else {
+                $tally['failed'][] = basename($file);
+            }
+        }
+
+        // Fails, silently and correctly, when anything else is still in there - a file another
+        // plugin put beside ours, which is not ours to remove and not a failure to report.
+        if (is_dir($dir) && @rmdir($dir)) { $tally['removed'][] = 'wp-content/wpmcp/'; }
+    }
+
+    foreach (array(
+        'wpmcp_trace_log_name',
+        'wpmcp_trace_log_readable',
+        'wpmcp_trace_log_unwritable',
+    ) as $option) {
+        if (delete_option($option)) { $tally['removed'][] = $option; }
+    }
+
+    delete_transient('wpmcp_trace_checked');
+
+    if ($tally['removed'] !== array() || $tally['failed'] !== array()) {
+        wpmcp_auth_event('trace_file_removed', array(
+            'removed' => $tally['removed'],
+            'failed'  => $tally['failed'],
+        ));
+    }
+
+    wpmcp_note_trace_file_left($tally['failed'], $dir);
+
+    return $tally;
+}
+
+/**
+ * Record what the upgrade could not remove, so the operator is TOLD rather than logged at.
+ *
+ * SAID ON THREE SURFACES, which is the wpmcp_note_client_columns() shape: the PHP error log for
+ * whoever reads logs, an option for the admin notice, and the notice itself on every admin
+ * screen. It is an ERROR rather than a warning, because unlike the client columns this is not a
+ * cosmetic gap - the file holds stack traces, absolute paths and, when a database call failed,
+ * SQL, and on nginx it is served to anybody who knows the URL. That is the whole reason the
+ * revision exists, so an upgrade that did not manage it must not look like one that did.
+ *
+ * THE OPTION IS CLEARED WHEN THE FILE GOES, so an operator who removes it by hand and
+ * reactivates the plugin stops being warned without anybody deleting a row. `wpmcp_install()`
+ * runs this on every attempt, and the deactivate/reactivate cycle calls the installer directly
+ * rather than through the revision stamp - the one action that retries.
+ */
+function wpmcp_note_trace_file_left(array $failed, $dir) {
+    if ($failed === array()) {
+        if (get_option(WPMCP_TRACE_FILE_OPTION, '') !== '') {
+            delete_option(WPMCP_TRACE_FILE_OPTION);
+        }
+
+        return true;
+    }
+
+    $left = implode(', ', $failed);
+
+    update_option(WPMCP_TRACE_FILE_OPTION, $left);
+    error_log(
+        'wp-mcp: the upgrade to the trace TABLE could not remove the old trace log from '
+        . $dir . ' - left behind: ' . $left . '. That file holds stack traces, absolute paths'
+        . ' and sometimes SQL, and on nginx it is served over HTTP to anybody who knows its'
+        . ' name (.htaccess is an Apache file). The plugin no longer writes to it. Delete it by'
+        . ' hand, then deactivate and reactivate the plugin to clear the warning.'
+    );
+
+    return false;
+}
+
+/** What the upgrade left in wp-content/wpmcp/, or '' when it took everything. */
+function wpmcp_trace_file_left() {
+    return (string) get_option(WPMCP_TRACE_FILE_OPTION, '');
+}
+
+/**
+ * SITE-WIDE, not on the plugin's own settings page, for the reason the deleted trace notices
+ * were: an operator who never opens Settings > WP MCP is exactly the operator whose log is
+ * still public. Not dismissible - dismissing would not delete the file.
+ */
+add_action('admin_notices', 'wpmcp_trace_file_notice');
+function wpmcp_trace_file_notice() {
+    if (!current_user_can('manage_options')) { return; }
+
+    $left = wpmcp_trace_file_left();
+
+    if ($left === '') { return; }
+
+    echo '<div class="notice notice-error"><p><strong>WP MCP: the old trace log is still on'
+        . ' disk.</strong></p><p>This version records failures in a database table, and the'
+        . ' upgrade could not remove what the previous version wrote to'
+        . ' <code>' . esc_html(WP_CONTENT_DIR . '/wpmcp') . '</code> &mdash; left behind:'
+        . ' <code>' . esc_html($left) . '</code>. That file holds stack traces, absolute file'
+        . ' paths and, when a database call failed, SQL. <strong>On nginx it is served over'
+        . ' HTTP to anybody who knows its name</strong>, because the <code>.htaccess</code>'
+        . ' beside it is an Apache file nginx never reads &mdash; which is why the log moved'
+        . ' into the database.</p><p>Nothing writes to it any more, so it is safe to delete:'
+        . ' remove that directory, then deactivate and reactivate this plugin to clear this'
+        . ' notice. A symlink is reported rather than followed, so if the path is a link the'
+        . ' plugin has deliberately left it alone.</p></div>';
+}
+
+/**
  * Append every file under $dir whose name ends in $suffix to $out. Depth-capped, and it
  * steps over every symlink it meets - see wpmcp_migrate_sweep_stale_backups().
  *
@@ -1096,6 +1366,14 @@ function wpmcp_table() {
 function wpmcp_versions_table() {
     global $wpdb;
     return $wpdb->prefix . WPMCP_VERSIONS_TABLE;
+}
+
+/* ============================================================
+ * Trace store - the error boundary's private side, in the one place WordPress never serves
+ * ========================================================== */
+function wpmcp_traces_table() {
+    global $wpdb;
+    return $wpdb->prefix . WPMCP_TRACES_TABLE;
 }
 
 /**
@@ -1942,27 +2220,34 @@ function wpmcp_active_count() {
 }
 
 /**
- * The hourly flush: DEAD rows only.
+ * The hourly flush: DEAD token rows, and traces past retention.
  *
  * A dormant row is NOT deleted, and that is the one thing this function has to get
  * right. Its window has closed but its lifetime has not, so it is exactly the row an
  * admin is about to press Renew on; deleting it would turn every renewable token into a
  * re-mint the next time the cron happened to run first. Past the hard lifetime there is
  * nothing left to renew, so the row is only then rubbish.
+ *
+ * THE TRACES RIDE ON THE SAME HOOK SINCE 1.1.2, which is the whole of the clean-up the file
+ * era needed a rewrite-inside-every-write to approximate. Two DELETEs, once an hour, for a
+ * table nothing else touches - and a traced failure no longer pays anything for the bound.
+ * See wpmcp_trace_sweep() for the two caps and the arithmetic behind them.
  */
 add_action('wpmcp_flush_expired', 'wpmcp_flush_expired_cb');
 function wpmcp_flush_expired_cb() {
     global $wpdb;
     $wpdb->query('DELETE FROM ' . wpmcp_table() . ' WHERE expires_at <= UTC_TIMESTAMP()');
+    wpmcp_trace_sweep();
 }
 
 /**
  * The class loader for `src/`. Namespace `WpMcp\` -> `src/`, one class per file.
  *
  * HAND-ROLLED, BECAUSE THERE IS NO COMPOSER AT RUNTIME. This plugin ships as plain PHP
- * with no vendor directory (composer.json is dev-only), so the four flat files are
- * gaining a `src/` tree one sprint at a time and this is what finds it. Nine lines is
- * the whole cost.
+ * with no vendor directory (composer.json is dev-only), so the flat files are gaining a
+ * `src/` tree one sprint at a time and this is what finds it. Nine lines is the whole cost.
+ * It does NOT find `modules/`: those are plain function files loaded by name from
+ * wpmcp_module_manifest(), not classes, so nothing autoloads them.
  *
  * IT RETURNS SILENTLY WHEN THE FILE IS NOT THERE, which is not laziness - it is the
  * contract spl_autoload_register imposes. Several autoloaders are registered in any
@@ -1990,6 +2275,12 @@ function wpmcp_bootstrap() {
     // trace.php first: the activation hook above and endpoint.php both call into it.
     require_once plugin_dir_path(__FILE__) . 'trace.php';
     require_once plugin_dir_path(__FILE__) . 'tools.php';
+    // modules.php declares the seam - wpmcp_register_module() and the gate that checks what
+    // comes through it - so it loads BEFORE the module files, which call that function at
+    // their own file scope. tools.php loads before both because a module may call the core
+    // helpers in it; nothing in the other direction, which is the rule ARCHITECTURE states.
+    require_once plugin_dir_path(__FILE__) . 'modules.php';
+    wpmcp_module_load();
     require_once plugin_dir_path(__FILE__) . 'admin.php';
     require_once plugin_dir_path(__FILE__) . 'endpoint.php';
 }

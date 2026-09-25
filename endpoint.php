@@ -480,7 +480,10 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
 /**
  * The tool registry, assembled and then CHECKED.
  *
- * `wpmcp_tools` is a public filter, so a third-party plugin can add a tool. Everything
+ * TWO WAYS IN BESIDES THE HARDCODED LIST BELOW, and they meet the SAME checks. `wpmcp_tools`
+ * is a public filter, so a third-party plugin can add a tool; and since 1.1.2 a MODULE - one
+ * of this plugin's own feature files, loaded by its own bootstrap - registers through the seam
+ * in modules.php. Everything
  * downstream of here asks one question about every entry - `empty($t['write'])` - to
  * decide whether a read-scope token may call it. An entry with no `write` key answers
  * that question "no, this is a read tool", which means a filter that forgets the key,
@@ -534,14 +537,22 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         mean to extend a tool, but it cannot do it by overwriting the
  *                         entry whose `write` flag is the gate.
  *
- * The built-in tools all carry `'write' => true|false` explicitly - 25 of them, one
- * per entry - so the checks apply uniformly rather than trusting "ours" over "theirs".
- * If a future built-in forgets the key it disappears from the listing and the log says
- * so, which is the loud failure.
+ * The built-in tools all carry `'write' => true|false` explicitly, one per entry, so the
+ * checks apply uniformly rather than trusting "ours" over "theirs". If a future built-in
+ * forgets the key it disappears from the listing and the log says so, which is the loud
+ * failure.
+ *
+ * AND THAT IS WHY THE MODULE SEAM IS NOT A NEW INVENTION, only a new CALLER: the reason chain
+ * below moved into wpmcp_registry_reject_reason() so that modules.php can apply it to a module
+ * file's entries on the way OUT of registration, in this order, reporting these reasons, plus
+ * one a filter entry cannot hit - a module may not re-declare a name the core already uses,
+ * which array_merge would otherwise let it do silently. A module that returns a write tool
+ * without declaring `write` publishes nothing: the entry is dropped and a module_reject event
+ * names the module, the tool and the reason.
  */
 function wpmcp_tools() {
     $tools = array();
-    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_revision_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools', 'wpmcp_menu_tools', 'wpmcp_inventory_tools') as $fn) {
+    foreach (array('wpmcp_core_tools', 'wpmcp_content_tools', 'wpmcp_revision_tools', 'wpmcp_taxonomy_tools', 'wpmcp_media_tools', 'wpmcp_comment_tools', 'wpmcp_inventory_tools') as $fn) {
         if (function_exists($fn)) { $tools = array_merge($tools, $fn()); }
     }
     // Code tools are exposed only when the switch in Settings > WP MCP is on AND the site
@@ -588,6 +599,18 @@ function wpmcp_tools() {
         $tools = array_merge($tools, wpmcp_meta_tools());
     }
 
+    // THE MODULE SEAM, and the whole point of it is that this line comes BEFORE $builtin.
+    // A module's tools are checked on the way out of registration - see wpmcp_module_tools()
+    // in modules.php, which runs every entry through wpmcp_registry_reject_reason() below,
+    // the same function a filter entry meets, and refuses a name the core already has. What
+    // survives is a built-in like any other: the filter cannot re-declare it, and it faces
+    // the loop below a second time, which is idempotent.
+    //
+    // $tools is passed as the RESERVED set rather than consulted afterwards, because
+    // array_merge with string keys lets the later entry win: a module returning
+    // `delete-post` would otherwise replace the closure whose `write` flag is the scope gate.
+    $tools = array_merge($tools, wpmcp_module_tools($tools));
+
     // What the plugin itself registered, to compare the filter's output against.
     $builtin = $tools;
 
@@ -609,27 +632,7 @@ function wpmcp_tools() {
             continue;
         }
 
-        if (!is_array($tool)) {
-            $reason = 'not_an_array';
-        } elseif (!array_key_exists('write', $tool)) {
-            $reason = 'no_write_key';
-        } elseif (!is_bool($tool['write'])) {
-            $reason = 'write_not_boolean';
-        } elseif (!isset($tool['run']) || !is_callable($tool['run'])) {
-            $reason = 'run_not_callable';
-        } elseif (!isset($tool['description']) || !is_string($tool['description'])) {
-            $reason = 'description_not_string';
-        } elseif (!isset($tool['inputSchema']) || !is_array($tool['inputSchema'])) {
-            $reason = 'schema_not_array';
-        } elseif (!wpmcp_annotations_complete($tool)) {
-            $reason = 'annotations_incomplete';
-        } elseif (!wpmcp_descriptions_within_limit($tool)) {
-            // APPENDED, not inserted. Each reason above is the one an entry written
-            // against an earlier version of this plugin would already have hit, so a new
-            // check goes on the end and no existing rejection changes the reason it
-            // reports.
-            $reason = 'description_too_long';
-        }
+        $reason = wpmcp_registry_reject_reason($tool);
 
         if ($reason !== '') {
             wpmcp_auth_event('registry_reject', array(
@@ -643,6 +646,60 @@ function wpmcp_tools() {
     }
 
     return $kept;
+}
+
+/**
+ * WHY A TOOL ENTRY IS REFUSED, or '' when it is not - the whole check list above, as one
+ * function, because it is applied on TWO paths now and two copies of a gate drift.
+ *
+ * The other caller is wpmcp_module_tools() in modules.php: a module registering through the
+ * seam is checked here, by this function, in this order, reporting these reasons. That is the
+ * seam's only security property and it is the reason it is worth having - our own built-ins
+ * are hardcoded into wpmcp_tools() above and meet these checks by walking through the same
+ * loop, but a MODULE is a separate file whose author is trusted with nothing: `write` is not
+ * read from the module's word for it, and an entry that does not declare an explicit boolean
+ * is dropped exactly as a filter entry is.
+ *
+ * THE ORDER IS PART OF THE CONTRACT. Each reason is the one an entry written against an
+ * earlier version of this plugin would already have hit, so a NEW check goes on the END and
+ * no existing rejection changes the reason it reports. The reasons themselves are documented
+ * one by one in wpmcp_tools()'s docblock; this function is only where they are evaluated.
+ *
+ * `name_reserved` is NOT here, and cannot be: it is a question about the entry's NAME against
+ * a set of names, and the two callers hold different sets - the filter path compares against
+ * the built-ins by array identity, the module path against the names already taken. Each asks
+ * it for itself, before calling this.
+ *
+ * @param mixed $tool the entry, which may be anything at all
+ * @return string a reason code, or '' when the entry is registrable
+ */
+function wpmcp_registry_reject_reason($tool) {
+    if (!is_array($tool)) {
+        return 'not_an_array';
+    }
+    if (!array_key_exists('write', $tool)) {
+        return 'no_write_key';
+    }
+    if (!is_bool($tool['write'])) {
+        return 'write_not_boolean';
+    }
+    if (!isset($tool['run']) || !is_callable($tool['run'])) {
+        return 'run_not_callable';
+    }
+    if (!isset($tool['description']) || !is_string($tool['description'])) {
+        return 'description_not_string';
+    }
+    if (!isset($tool['inputSchema']) || !is_array($tool['inputSchema'])) {
+        return 'schema_not_array';
+    }
+    if (!wpmcp_annotations_complete($tool)) {
+        return 'annotations_incomplete';
+    }
+    if (!wpmcp_descriptions_within_limit($tool)) {
+        return 'description_too_long';
+    }
+
+    return '';
 }
 
 /**
@@ -833,8 +890,9 @@ function wpmcp_objectify_object_map($map) {
 /**
  * How many tools one `tools/list` page carries.
  *
- * LARGER THAN THE SURFACE, deliberately: 20 built-ins plus anything a filter adds, so
- * there is no second page today and `nextCursor` is absent. The parameter still has to
+ * LARGER THAN THE SURFACE, deliberately: the built-ins and the modules together are 39 at
+ * 1.1.2 (tests/unit/WireSerializationTest.php holds that number), plus anything a filter adds,
+ * so there is no second page today and `nextCursor` is absent. The parameter still has to
  * be accepted and validated, because a client is entitled to send one back and a server
  * that ignores `cursor` silently re-serves page one forever.
  */
@@ -923,19 +981,36 @@ function wpmcp_server_info() {
 /**
  * What this server tells a client it is, once, at the handshake.
  *
- * THREE FACTS, AND THEY ARE THE THREE THAT CHANGE WHAT AN AGENT DOES. Not a feature
- * list: an agent that knows its reach is one WordPress user's stops treating a refusal as
- * a bug to retry, and an agent that knows write tools need a different token stops
- * looking for the write tool it cannot see. Everything else it can learn from tools/list.
+ * FOUR FACTS, AND THEY ARE THE FOUR THAT CHANGE WHAT AN AGENT DOES. Not a feature list:
+ * an agent that knows its reach is one WordPress user's stops treating a refusal as a bug to
+ * retry, and an agent that knows write tools need a different token stops looking for the
+ * write tool it cannot see. Everything else it can learn from tools/list.
  *
- * The last clause is the one corollary of the third fact a caller gets wrong (sprint 14d):
- * a read-scope token is not a privacy boundary. It reads everything its user can, which for
- * an administrator includes every user's email. The mint form says the same to the operator.
+ * The last clause of the third fact is the corollary a caller gets wrong (sprint 14d): a
+ * read-scope token is not a privacy boundary. It reads everything its user can, which for an
+ * administrator includes every user's email. The mint form says the same to the operator.
+ *
+ * THE FOURTH FACT IS WHERE THE CONTENT IS, AND IT IS HERE BECAUSE THERE IS NOWHERE ELSE TO
+ * PUT IT (1.1.2). A client working blind against a real site called list-posts, got ONE item,
+ * and had no way to learn that the content sat in five custom post types - list-posts defaults
+ * to `post` and list-terms to `category`. list-content-types answers that, but the tool whose
+ * default causes the mislead cannot point at it: list-posts' description is at 997 of the
+ * 1,000 characters a client keeps, and every sentence in it is held by
+ * tests/unit/DescriptionContractTest.php as a claim that must not drift. This string has no
+ * cap and no length rule over it, and every client reads it before it looks at a single tool
+ * name - so it is the right place, and the only cheap one.
+ *
+ * NOT A FEATURE LIST EVEN SO. It names ONE tool, because that one is the answer to "why does
+ * this site look empty"; a second would start the list this docblock exists to refuse.
  */
 function wpmcp_server_instructions() {
     return 'This is a WordPress site exposed as MCP tools: posts, pages, taxonomies,'
         . ' media and comments, plus (when the operator enables it) files in the active'
         . " theme.\n"
+        . 'Call list-content-types first on a site you have not seen: list-posts defaults'
+        . ' to post_type "post" and list-terms to "category", so a site whose content'
+        . ' lives in custom post types looks nearly empty until you have read the real'
+        . " ones and their taxonomies.\n"
         . 'Every tool runs as the WordPress user this token was minted for, so that'
         . " user's own capabilities are the ceiling on what you can see or change. A"
         . " refusal is usually that ceiling, not a malformed call.\n"

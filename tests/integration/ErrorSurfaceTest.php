@@ -127,7 +127,7 @@ final class ErrorSurfaceTest extends FixtureIntegrationTestCase
         // status is a label here, not a number.
         foreach (['400' => 'Bad Request', '403' => 'Forbidden'] as $status => $reason) {
             $status = (string) $status;
-            $before = strlen(TraceLog::contents());
+            $before = TraceLog::count();
             $result = $this->mcp(self::$token)->callTool(self::tool($status));
 
             self::assertTrue(
@@ -154,7 +154,7 @@ final class ErrorSurfaceTest extends FixtureIntegrationTestCase
 
             self::assertSame(
                 $before,
-                strlen(TraceLog::contents()),
+                TraceLog::count(),
                 'A relayed, caller-actionable refusal wrote a trace. The log is for bugs, and a'
                 . ' CDN refusing a URL is not one - it is the answer the caller now gets.'
             );

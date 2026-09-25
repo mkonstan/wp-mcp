@@ -202,16 +202,20 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
         self::assertNotSame(
             '',
             $entry,
-            'No line in wp-content/wpmcp/trace.log carries trace=' . $traceId . '. The'
-            . ' client was handed a trace id that leads nowhere, which is worse than the'
-            . ' 500 this replaced: nobody learns anything. Log: ' . TraceLog::contents()
+            'No row in the traces table carries trace=' . $traceId . '. The client was'
+            . ' handed a trace id that leads nowhere, which is worse than the 500 this'
+            . ' replaced: nobody learns anything. The site holds '
+            . TraceLog::count() . ' traces.'
         );
 
         self::assertStringContainsString('class=TypeError', $entry, $entry);
         self::assertStringContainsString('message=' . self::THROWN_MESSAGE, $entry, $entry);
         self::assertStringContainsString('method=tools/call', $entry, $entry);
         self::assertStringContainsString('tool=' . self::toolName(), $entry, $entry);
-        self::assertStringContainsString('user=' . self::$userId, $entry, $entry);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM). `user=1` is a substring of
+        // `user=10`, so a plain substring check on a key=value rendering can pass for the
+        // wrong user. See ToolResult::mentions() for the class this belongs to.
+        self::assertMatchesRegularExpression('/\buser=' . self::$userId . '\b/', $entry, $entry);
 
         // file:line. The path may contain spaces - "C:\Users\x\Local Sites\..." on the
         // machine this was developed against - so it is matched up to the `.php:<line>`
@@ -230,11 +234,10 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
             'The trace entry has no indented stack trace. Entry: ' . $entry
         );
 
-        // And the log still does not carry the credential.
-        self::assertStringNotContainsString(
-            self::$token,
-            TraceLog::contents(),
-            'The raw token is in the trace log. Tokens are identified by their row id.'
+        // And the store still does not carry the credential.
+        self::assertFalse(
+            TraceLog::contains(self::$token),
+            'The raw token is in the traces table. Tokens are identified by their row id.'
         );
         self::assertStringContainsString(
             'token=',
@@ -264,7 +267,7 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
      */
     public function testARelayableCoreErrorReachesTheCallerAndIsNotLogged(): void
     {
-        $before = strlen(TraceLog::contents());
+        $before = TraceLog::count();
 
         $result = $this->mcp(self::$token)->callTool(self::relayToolName());
 
@@ -279,8 +282,8 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
 
         self::assertSame(
             $before,
-            strlen(TraceLog::contents()),
-            'A relayed, caller-caused error wrote a trace. The log is for bugs; five codes'
+            TraceLog::count(),
+            'A relayed, caller-caused error wrote a trace. The store is for bugs; four codes'
             . ' were allow-listed precisely so a mistyped argument does not fill it with'
             . ' stacks.'
         );
@@ -341,176 +344,14 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * B1. The old, guessable URL is gone: `GET /wp-content/wpmcp/trace.log` is not served.
-     *
-     * MEASURED BEFORE THE FIX: that exact URL returned 200 with 14 KB of absolute Windows
-     * paths including the OS username, the plugin's development checkout path, mu-plugin
-     * file names, tool names, user ids, token row ids and every stack frame's arguments -
-     * to anybody, with no token, on nginx, Caddy and LiteSpeed alike, because `.htaccess`
-     * is an Apache file those servers neither read nor serve. The plugin's self-check
-     * noticed and the plugin carried on writing, which made it an observation rather than a
-     * guard. The memory rule this sprint implements says the log must be VERIFIED
-     * UNREACHABLE, so the name is now unguessable and the legacy file is deleted on sight.
-     *
-     * @group sprint-3
+     * THE THREE FILE-ERA GUARDS ARE GONE FROM THIS CLASS AS OF 1.1.2, and their absence is
+     * the sprint. They asserted that `wp-content/wpmcp/trace.log` was not served, that the
+     * random log name appeared in no response a caller can obtain, and that the `.htaccess`
+     * beside the log was one Apache 2.4 can parse. There is no log file, no directory and no
+     * `.htaccess` any more - a trace is a row, and no web server serves a row. What replaced
+     * them is tests/integration/TraceTableTest.php: the id still resolves, `sql-select` is
+     * refused the table, and the upgrade deletes the file an existing site still has.
      */
-    public function testTheOldGuessableLogUrlIsNotServed(): void
-    {
-        // Provoke a write, so a 404 below cannot be "the directory does not exist yet".
-        self::assertNotSame('', TraceLog::contents(), 'The log is empty, so nothing has'
-            . ' been written and this test would pass on an absent directory.');
-
-        $response = $this->client()->get('wp-content/wpmcp/' . TraceLog::LEGACY_NAME);
-
-        self::assertNotSame(
-            200,
-            $response->getStatusCode(),
-            'wp-content/wpmcp/' . TraceLog::LEGACY_NAME . ' is still served. Either the'
-            . ' log is still written under its old fixed name, or a file left by the'
-            . ' previous version was not removed - and a stranger reads the stack traces.'
-        );
-    }
-
-    /**
-     * The real name is not derivable from anything a client sees.
-     *
-     * The guard is the secrecy of one string, so the test is that the string does not
-     * appear in any response a caller can obtain: the generic error, a tools/list, a
-     * tools/call, the directory itself. The 32 hex digits are searched for on their own as
-     * well as the whole file name, because half a name is a name.
-     *
-     * @group sprint-3
-     */
-    public function testTheRealLogNameIsNotDerivableFromAnythingAClientSees(): void
-    {
-        $name = TraceLog::fileName();
-
-        self::assertMatchesRegularExpression(
-            '/^trace-[0-9a-f]{32}\.log$/',
-            $name,
-            'The log file name is not the unguessable shape, so the URL is derivable.'
-        );
-
-        $secret = substr($name, strlen('trace-'), 32);
-
-        $surfaces = [
-            'the generic error' => (string) $this->mcp(self::$token)->post('tools/call', [
-                'name'      => self::toolName(),
-                'arguments' => [],
-            ])->getBody(),
-            'tools/list'        => (string) $this->mcp(self::$token)->post('tools/list')->getBody(),
-            'initialize'        => (string) $this->mcp(self::$token)->post('initialize')->getBody(),
-            'the directory'     => (string) $this->client()->get('wp-content/wpmcp/')->getBody(),
-        ];
-
-        foreach ($surfaces as $what => $body) {
-            self::assertStringNotContainsString($name, $body, $what . ' names the log file.');
-            self::assertStringNotContainsString(
-                $secret,
-                $body,
-                $what . ' contains the log name\'s random half, so the URL is derivable.'
-            );
-        }
-    }
-
-    /**
-     * Belt and braces, all three of which are now secondary to the random name: the
-     * self-check still runs against the REAL file name, the file is 0600, and the
-     * `.htaccess` is written the way Apache 2.4 can actually parse.
-     *
-     * THE SELF-CHECK IS NOT REDUNDANT. It catches the one thing the secret name does not:
-     * a directory listing, which hands the name to everybody. A 200 on the real URL
-     * therefore still has to raise the site-wide warning.
-     *
-     * AND `unverified` IS A PASS ONLY BECAUSE IT IS LOUD. CI found the third case: inside a
-     * @wordpress/env container the site's own URL is a Docker port mapping that does not
-     * resolve from within, wp_remote_get fails, and the plugin cannot answer its own
-     * question - which managed hosts with loopback closed reproduce exactly. The test
-     * therefore accepts that state only when the plugin has recorded it AS that state and
-     * carries a reason for the admin notice to print. It is not a skip, and where the fetch
-     * does work - Local, both sites - the strict agreement assertion still runs.
-     *
-     * S9: `Deny from all` on its own is an unknown directive on an Apache 2.4 without
-     * mod_access_compat, and an unknown directive in an .htaccess turns the directory into
-     * a 500 - "not readable", but by breaking the server. Each spelling sits behind the
-     * IfModule that makes it legal.
-     *
-     * @group sprint-3
-     */
-    public function testTheRemainingGuardsAreInPlace(): void
-    {
-        $state = TraceLog::selfCheck();
-
-        self::assertContains(
-            $state,
-            [TraceLog::READABLE, TraceLog::NOT_READABLE, TraceLog::UNVERIFIED],
-            'The self-check stored "' . $state . '", which is not one of its three states.'
-            . ' A fourth answer - or none - is how "could not tell" goes silent again.'
-        );
-        self::assertSame(
-            $state,
-            TraceLog::selfCheckState(),
-            'The state the self-check returned is not the state it stored, so the admin'
-            . ' notices are reading something else.'
-        );
-
-        if ($state === TraceLog::UNVERIFIED) {
-            self::assertNotSame(
-                '',
-                TraceLog::selfCheckReason(),
-                'The self-check could not answer and recorded no reason, so the admin notice'
-                . ' can only say "something went wrong". The operator has to be told what to'
-                . ' check by hand: wp_remote_get to ' . TraceLog::url() . ' failed.'
-            );
-
-            return;
-        }
-
-        $status = $this->client()->get('wp-content/wpmcp/' . TraceLog::fileName())->getStatusCode();
-
-        self::assertSame(
-            $status === 200 ? TraceLog::READABLE : TraceLog::NOT_READABLE,
-            $state,
-            'The self-check and reality disagree: the real log URL answered ' . $status
-            . ' and the plugin recorded "' . $state . '". Either a readable log is silent,'
-            . ' or the admin screens cry wolf.'
-        );
-        self::assertSame(
-            $status === 200,
-            TraceLog::exposedOptionIsSet(),
-            'wpmcp_trace_log_is_exposed() disagrees with the stored state.'
-        );
-
-        // 0600, WHERE THE FILESYSTEM CAN SAY SO. MEASURED on the development site: it is
-        // Windows, fileperms() answers 0666 whatever the file is, and chmod() returns true
-        // while changing nothing - NTFS ACLs are not POSIX mode bits. So the assertion is
-        // "0600, or a host that cannot express it", which has real teeth in CI (wp-env is
-        // Linux) and states the local fact instead of skipping and going quietly green.
-        $mode = TraceLog::mode();
-        $os   = TraceLog::osFamily();
-
-        self::assertTrue(
-            $mode === '0600' || $os === 'Windows',
-            'The trace log is ' . $mode . ' on a ' . $os . ' host, not 0600. On a shared'
-            . ' host whose parent path is traversable, another account reads it.'
-        );
-
-        $htaccess = TraceLog::htaccess();
-
-        self::assertStringContainsString('<IfModule mod_authz_core.c>', $htaccess, $htaccess);
-        self::assertStringContainsString('Require all denied', $htaccess, $htaccess);
-        self::assertStringContainsString('<IfModule !mod_authz_core.c>', $htaccess, $htaccess);
-
-        // Every directive sits inside a block, so the file's first non-blank line is an
-        // IfModule and no bare directive can be met by an Apache that does not know it.
-        self::assertSame(
-            '<IfModule mod_authz_core.c>',
-            trim((string) strtok($htaccess, "\n")),
-            'The .htaccess opens with a bare directive rather than an IfModule. On Apache'
-            . ' 2.4 without mod_access_compat an unknown directive turns the whole directory'
-            . ' into a 500 - "not readable", but by breaking the server. Content: ' . $htaccess
-        );
-    }
 
     /**
      * A tool registered through the filter whose `run` throws a TypeError on the way in.

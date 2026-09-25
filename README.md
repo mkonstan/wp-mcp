@@ -64,9 +64,9 @@ before you put this on a production host.
 
 Or clone the repository into `wp-content/plugins/wp-mcp/`.
 
-Activation creates the token table and the trace log directory. Deleting the plugin
-removes both, along with the plugin's options and its cron hook. Deactivating leaves
-everything in place.
+Activation creates three tables: the tokens, the theme-file versions the code tools can
+undo, and the private trace store. Deleting the plugin drops all three, along with the
+plugin's options and its cron hook. Deactivating leaves everything in place.
 
 ### Which build is this site running?
 
@@ -236,7 +236,7 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Thirty-eight tools. Each declares the four MCP annotation hints, so a client can tell a
+Thirty-nine tools. Each declares the four MCP annotation hints, so a client can tell a
 listing from a deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
@@ -255,6 +255,7 @@ listing from a deletion before it asks you to approve anything.
 | `list-users` | read | yes | no | yes | no |
 | `get-user` | read | yes | no | yes | no |
 | `get-option` | read | yes | no | yes | no |
+| `list-content-types` | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -376,13 +377,39 @@ Two things make that true:
 a name, or the `{id, name, slug}` object itself. An empty list clears that taxonomy - except
 that WordPress gives a post left with no category its default category.
 
+### What kinds of content are here
+
+`list-content-types` answers that, and it is the tool to call first on a site you have not seen.
+`list-posts` defaults to `post_type: "post"` and `list-terms` defaults to `category`, so a site
+whose content lives in custom post types looks nearly empty until you know their names - which is
+exactly what happened to a client working blind against a real site: one item back, five custom
+types it had no way to see.
+
+It takes no arguments and returns `post_types` and `taxonomies`.
+
+Each post type: `name` (the value `list-posts` and `get-post` take for `post_type`), `label`,
+`singular_label`, `description`, `hierarchical`, `public`, `show_in_rest`, `rest_base` (null when
+it is not in REST), `taxonomies` (the taxonomy names attached to it) and `counts` - a status to a
+number of posts, carrying only the statuses your capabilities let you see listed, so a token
+bound to an Author is told how many are published and nothing about anybody's drafts. The counts
+do not add in your own unpublished posts, which `list-posts` finds through a second query.
+
+Each taxonomy: the same first eight fields, plus `post_types` (the types it covers) and `terms`
+(how many terms it holds, including the empty ones - which is the number that tells you whether
+somebody set a taxonomy up and never filled it).
+
+**Only what WordPress itself treats as viewable is listed**, and never `attachment` - use
+`list-media` for media. A post type or taxonomy some plugin registered for its own bookkeeping is
+absent on purpose: an unfiltered list is a plugin inventory by another route, and `list-plugins`
+is admin-scope for a reason. `list-terms` still accepts a private taxonomy's name if you know it.
+
 ### Finding content
 
 `list-posts` is the search surface. Every argument is optional:
 
 | Argument | Takes | Default |
 |---|---|---|
-| `post_type` | one post type this tool serves | `post` |
+| `post_type` | one post type this tool serves - `list-content-types` names them | `post` |
 | `status` | one post status, a plugin's own included | every status the caller may see |
 | `search` | text matched against title, excerpt and content; a leading `-` on a word **excludes** it | - |
 | `category`, `tag` | a slug or a term id | - |
@@ -812,49 +839,99 @@ For a development site with no certificate, and nowhere else,
 
 An unexpected failure returns one generic JSON-RPC error, `-32603` with an eight-character
 trace id - `Internal error (trace 1f53b972)`, with the same id in `error.data.trace_id` - and
-nothing else. The class, message, file, line and stack go to a private log, so the trace id is
+nothing else. The class, message, file, line and stack go to a private store, so the trace id is
 something you can quote to the operator and a client cannot read. The id is in the message
 because a client that renders only `error.message` would otherwise show you a dead end.
 
-The stack in that log carries each argument's SHAPE and never its value: an array's keys, a
-string's length, an object's class. PHP's own formatter prints the first fifteen characters of
-every string argument, which is enough to be somebody's data.
+The stack carries each argument's SHAPE and never its value: an array's keys, a string's
+length, an object's class. PHP's own formatter prints the first fifteen characters of every
+string argument, which is enough to be somebody's data.
 
-**The log is capped at 2 MiB, and it trims its OLDEST entries.** Before 1.1.1 it grew for ever;
-two development sites reached 1.7 MB and 1.5 MB in eleven days and nothing rotated or aged any
-of it out. When a write takes the file over the cap, the plugin keeps the newest three quarters
-of it and discards the rest, cutting between entries rather than through one, and writes a line
-at the top of the file saying so - so a file that is suddenly shorter is not a mystery:
+The stack is bounded twice: at **200 frames**, which bounds the work of building it, and at
+**8 KiB**, which bounds the row that ends up in your backups. Both drop the MIDDLE of the call
+chain - the frames worth reading are the innermost, where it broke, and the outermost, which say
+how the request got there - and each writes a line into the stack saying how many it took, so a
+shortened stack is never mistaken for a complete one.
 
+**Since 1.1.2 it is a database table, `wp_wpmcp_traces`, and not a file.** Until then it was
+`wp-content/wpmcp/trace-<32 hex>.log` behind an `.htaccess` - and `.htaccess` is an Apache
+file. nginx has no per-directory configuration and never reads it, so on the development host
+`GET /wp-content/wpmcp/trace.log` returned `200` with 14 KB of absolute paths, tool names, user
+ids and stack frames, to anybody, with no token. Randomising the file name hid the URL; it did
+not remove it. **No web server can serve a table**, so the whole problem is gone rather than
+mitigated - and with it the guard files, the daily self-check that fetched our own log, both
+admin notices, the 2 MiB cap and the rewrite that held the file under it.
+
+`sql-select` refuses this table by name, exactly as it refuses the token table, because a trace
+row is precisely the detail the error boundary keeps from a caller.
+
+**Traces are kept 7 days and at most 2,000 of them**, swept hourly on the same event that
+clears dead tokens - oldest first, because a trace id is quoted shortly after it is issued.
+Retention is days rather than for ever for one reason a file did not have: a
+row rides in every database backup, export and staging clone you take.
+
+**How much that costs, as a maximum rather than an average.** Every field of a trace is capped
+in bytes against the column that holds it - `method` 64, `tool` 191, `class` 191, `at` 255,
+`message` and the `WP_Error` data 2,000 each, and the **stack 8 KiB** - so one row is at most
+12,960 bytes and **2,000 rows is under 26 MB of column data**.
+
+Column data is not what a disk carries, so here are both, MEASURED by planting 500 rows at
+exactly those caps on MySQL 8.4 with InnoDB `ROW_FORMAT=Dynamic`:
+
+| At the 2,000-row cap | |
+|---|---|
+| column data | under 26 MB |
+| **InnoDB tablespace** | **about 48 MB** - 23,888 bytes a row, because an 8 KiB stack does not fit in half a 16 KB page and goes off-page into a page of its own. Assumes `innodb_file_per_table`, on since MySQL 5.6, and `ROW_FORMAT=Dynamic` |
+| **`mysqldump`** | **about 27 MB** - 13,502 bytes a row; escaping backslashes and newlines costs 4.2%, not the 10-15% you might assume |
+
+**Two conditions on those numbers, and both matter.** The sweep removes at most **100,000 rows an
+hour** (200 batches of 500), so the cap holds up to about **27 traced failures a second
+sustained**; above that more arrive than leave and the table grows until the rate drops. And the
+tablespace figure is a **high-water mark**: deleting rows frees them for reuse, which is what
+bounds the table, but it does not hand the space back to the filesystem - measured, the file
+stayed at 12 MB after the 500 rows were deleted and only `OPTIMIZE TABLE wp_wpmcp_traces`
+returned it to 112 KB. A site that has had one bug storm keeps the file size until it rebuilds
+the table - **and on a host that keeps InnoDB in the shared `ibdata1` tablespace rather than a
+file per table, `OPTIMIZE TABLE` frees those pages for reuse inside that one file and returns
+nothing at all to the filesystem, while under the older `COMPACT` row format the first 768 bytes
+of each stack stay in the row and only the rest goes off-page, which moves the per-row number
+above.**
+
+In practice all of this is far smaller: the measured mean entry is 2,283 bytes, small enough to
+live inside its own page, and a development site under continuous suite load wrote 69 failures a
+day - 486 rows, about **1.1 MB**, in seven days. Both retention numbers are filterable, and a
+useless value is ignored rather than obeyed:
+
+```php
+add_filter('wpmcp_trace_keep_days', fn() => 14);   // under 1 day is ignored
+add_filter('wpmcp_trace_keep_rows', fn() => 5000); // under 100 rows is ignored
 ```
-2026-09-24T01:17:39+00:00 truncated=1 cap=2097152 removed=549120 kept=1572864
-    wp-mcp trimmed this log, and this is not a corrupted file. The OLDEST entries were
-    discarded so the file stays under its cap; ...
-```
 
-The newest entries are the ones that survive, deliberately: a trace id is quoted to you shortly
-after it is issued, so a cap that discarded the newest would throw away exactly the id somebody
-is asking about. A host that wants a different ceiling can raise it -
-`add_filter('wpmcp_trace_log_max_bytes', fn() => 8 * MB_IN_BYTES);` - and a value below 64 KiB is
-ignored rather than obeyed, leaving the 2 MiB default in place.
+**To look one up: Settings > WP MCP > Look up a trace id.** Paste the eight hex digits a client
+was given and you get that one entry, `manage_options` only. It is deliberately not a log
+browser - no list, no search, no pagination - because what it prints is the same detail the
+boundary withholds from the API.
 
-If the trim cannot finish - a full disk is the case that does it - the plugin does not pretend it
-did: the whole entry goes to the PHP error log and the same admin notice as an unwritable directory
-appears, so the trace id you were given still resolves to something.
+If a trace cannot be stored at all, the whole entry goes to the PHP error log prefixed
+`wp-mcp trace (could not be stored)`, so the trace id you were given still resolves to
+something.
 
-The log lives at `wp-content/wpmcp/trace-<32 hex>.log`. The random name is generated once
-per site and kept in an option, so the URL cannot be derived from anything a client sees.
-Once a day the plugin fetches that URL itself, and if the web server answers `200` it
-raises an error notice on every admin screen for anyone holding `manage_options`. The same
-place warns you when the directory is not writable and traces are going to the PHP error
-log instead.
+The hourly sweep deletes in batches of 500 - at most 20 batches for the age cap and 200 for the
+row cap, which is a PRIMARY KEY range delete and the cheap one - so a site whose cron has not
+fired for a month clears over the next few hourly runs instead of in one enormous transaction
+inside somebody's page load. A healthy site runs exactly one statement per pass, because the loop
+stops the moment a batch comes back short.
 
-The directory ships with an `index.php` and an `.htaccess`, which covers Apache. nginx
-reads neither, so deny the directory in your server configuration:
+**Upgrading from 1.1.1 or earlier deletes the log file, `wp-content/wpmcp/` and the three
+options that went with it.** That is the only way the exposure actually goes away. The old
+entries are NOT copied into the table - they would then ride in every backup - so if you have a
+live support case against an old trace id, take a copy of the file before you update.
 
-```nginx
-location ^~ /wp-content/wpmcp/ { deny all; }
-```
+**If the upgrade cannot remove it, you get an error notice on every admin screen** naming what
+is left, because on nginx that file is still being served. It is also what you see when
+`wp-content/wpmcp` is a **symlink**: the upgrade reports a link and refuses to follow it, rather
+than unlinking files somewhere the plugin has never written. Delete the path by hand, then
+deactivate and reactivate the plugin to clear the notice.
 
 ## Code editing (opt-in)
 
@@ -1071,7 +1148,7 @@ for whoever can reach it.
 `{prefix}wpmcp_tokens` and `{prefix}wpmcp_file_versions` - the token hashes and the stored
 theme-file bytes. This is the one rule the server cannot enforce, because the database user
 owns those tables and there is no privilege the plugin can drop on its own connection. So
-it is a name check, and it is deliberately blunt: **naming either table anywhere in the
+it is a name check, and it is deliberately blunt: **naming any of the three anywhere in the
 statement refuses it**, including inside a comment or a string literal. `SELECT
 'wpmcp_tokens' AS label` is harmless and is refused too. Over-refusing costs you an alias;
 the alternative is a comment-and-string stripper that has to be exactly as correct as
@@ -1080,18 +1157,26 @@ MySQL's lexer, which is the parser this design exists to avoid.
 Every call that runs is logged as a `sql_select` auth event with the caller, the row count
 and the first 200 characters of the statement. A statement the server refused comes back as
 an error carrying the MySQL error number and a trace id; the server's own message and the
-whole statement go to the private trace log and nowhere else.
+whole statement go to the private trace store and nowhere else - which is also why
+`wp_wpmcp_traces` is one of the three tables this tool refuses to read.
 
 ## Hooks
 
-Seven. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
-tools' version store in 1.1, and `wpmcp_tool_call` with 1.1.1.
+Nine. Five are stable surface from 1.0; `wpmcp_file_versions_keep` arrived with the code
+tools' version store in 1.1, `wpmcp_tool_call` with 1.1.1, and the two trace-retention
+filters with the trace table in 1.1.2.
 
 `wpmcp_tools` (filter) adds your own tools to the catalog. It runs on every request, after
 the built-ins are assembled and before scope filtering. An entry must declare a boolean
 `write`, a string `description`, an array `inputSchema`, all four boolean `annotations`,
 and a callable `run`. An entry missing any of them is refused at registration rather than
 given a default, and it cannot re-declare a built-in's name.
+
+Since 1.1.2 the plugin's own feature files register through the same checks. The menu tools
+live in `modules/menus.php` and `list-content-types` in `modules/discovery.php`, each one line
+of `wpmcp_register_module()` and nothing trusted: the entries a module returns meet the very
+list above, on the way out of registration, and a rejected one is named in the log with its
+reason. See **The module seam** in ARCHITECTURE.md. It changes nothing for this filter.
 
 Two things about the description. A `description`, or any
 `inputSchema.properties.*.description`, over 1,000 characters is refused: clients cap
@@ -1136,7 +1221,7 @@ type and a context array, and every context carries `ip`.
 There is no success event for the endpoint itself. A request that is accepted fires
 nothing at all, so an audit listener that waits for an "ok" waits forever. One TOOL is
 the exception - `sql-select` logs every statement it runs, because "somebody read the
-database" is the event an operator wants. The twelve types:
+database" is the event an operator wants. The thirteen types:
 
 | `$type` | Fired when | Context beyond `ip` |
 |---|---|---|
@@ -1152,10 +1237,11 @@ database" is the event an operator wants. The twelve types:
 | `registry_reject` | a filter-added tool was refused at registration | `tool`, `reason` |
 | `stale_backup_sweep` | a schema upgrade swept the active theme and found backup files an older version had left there | `found`, `moved`, `skipped_extension`, `skipped_unreadable`, `skipped_too_big`, `skipped_undeletable`, `moved_paths`, `skipped_paths` |
 | `sql_select` | `sql-select` ran a statement | `token_id`, `user_id`, `row_count`, `truncated`, `elapsed_ms`, `sql` |
+| `trace_file_removed` | the upgrade to 1.1.2 deleted 1.1.1's trace log, its directory and its options | `removed`, `failed` |
 
 `sql` is the **first 200 characters** of the statement and never more. The whole of it
-can carry a value out of the database into a log that is not the private trace log; the
-full statement goes to the trace log on the one path where it is worth having, which is
+can carry a value out of the database into a log that is not the private trace store; the
+full statement goes to the trace store on the one path where it is worth having, which is
 a statement the server refused.
 
 `stale_backup_sweep` fires on the request that performs a schema upgrade, and only when
@@ -1211,6 +1297,17 @@ unrecoverable and is far more likely to be a mistake than a decision.
 
 ```php
 add_filter('wpmcp_file_versions_keep', fn() => 50);
+```
+
+`wpmcp_trace_keep_days` and `wpmcp_trace_keep_rows` (filters) set how long the private trace
+store keeps a trace and how many it holds. The defaults are 7 days and 2,000 rows, swept hourly,
+oldest first. Retention is short because a trace row rides in every database backup you take -
+see [The trace log](#the-trace-log) for the arithmetic. A value under 1 day, or under 100 rows,
+is ignored rather than obeyed: it would throw away the id a caller is holding right now.
+
+```php
+add_filter('wpmcp_trace_keep_days', fn() => 14);
+add_filter('wpmcp_trace_keep_rows', fn() => 5000);
 ```
 
 ## Testing

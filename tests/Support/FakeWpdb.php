@@ -170,11 +170,31 @@ final class FakeWpdb
         return 1;
     }
 
+    /**
+     * What query() answers, in order; the LAST entry repeats once the list runs out.
+     *
+     * ADDED FOR THE TRACE SWEEP'S BATCHING (sprint TRACE-TABLE round 2), which is the first
+     * caller in this plugin that reads query()'s return value and decides whether to run it
+     * again. A fake that always answered 0 could not express "this DELETE removed a full batch,
+     * so there is more to do" - and the loop's two interesting cases are exactly that and its
+     * round cap. The last-entry-repeats rule is what lets a test say "always a full batch"
+     * without writing twenty entries.
+     *
+     * @var list<int|false>
+     */
+    public array $queryReturns = [];
+
     public function query($sql)
     {
         $this->queries[] = $sql;
 
-        return 0;
+        if ($this->queryReturns === []) {
+            return 0;
+        }
+
+        return count($this->queryReturns) === 1
+            ? $this->queryReturns[0]
+            : array_shift($this->queryReturns);
     }
 
     /**

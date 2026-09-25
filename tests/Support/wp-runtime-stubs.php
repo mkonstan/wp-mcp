@@ -56,6 +56,16 @@ if (!isset($GLOBALS['wpmcp_test_wp'])) {
 if (!defined('ARRAY_N')) { define('ARRAY_N', 'ARRAY_N'); }
 if (!defined('ARRAY_A')) { define('ARRAY_A', 'ARRAY_A'); }
 
+// ADDED FOR SPRINT TRACE-TABLE. wpmcp_install() now calls wpmcp_migrate_remove_trace_file(),
+// which is where 1.1.1's trace log is deleted, and that names WP_CONTENT_DIR - so the two
+// PlatformApiTest cases that drive the installer raised "Undefined constant" instead of
+// asserting. It points at a path that DOES NOT EXIST on purpose: the migration then finds no
+// directory and no file, takes only the three option deletes, and touches nothing on the
+// machine running the suite. Core defines the real one in wp-includes/default-constants.php.
+if (!defined('WP_CONTENT_DIR')) {
+    define('WP_CONTENT_DIR', sys_get_temp_dir() . '/wpmcp-unit-no-such-content-dir');
+}
+
 if (!class_exists('WP_Error')) {
     /**
      * The subset of WP_Error the plugin uses: a code, a message, and the $data array
@@ -196,6 +206,34 @@ if (!function_exists('delete_option')) {
     {
         $GLOBALS['wpmcp_test_wp']['option_deletes'][] = $option;
         unset($GLOBALS['wpmcp_test_wp']['options'][$option]);
+
+        return true;
+    }
+}
+
+if (!function_exists('esc_html')) {
+    /**
+     * ADDED FOR SPRINT TRACE-TABLE ROUND 2. wpmcp_trace_file_notice() is the first admin notice
+     * the unit tier renders, and the claim under test is that the path it prints is ESCAPED - so
+     * the stub has to escape, not merely pass through. Core's own implementation is
+     * `_wp_specialchars($text, ENT_QUOTES)` after the translation filter; this is that, without
+     * the filter, which is the part no unit test here has an opinion about.
+     */
+    function esc_html($text)
+    {
+        return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('delete_transient')) {
+    /**
+     * ADDED FOR SPRINT TRACE-TABLE, for the same reason WP_CONTENT_DIR above was: revision 7's
+     * migration deletes 1.1.1's `wpmcp_trace_checked` transient, and the installer is driven
+     * from the unit tier. Recorded rather than ignored, so "it was deleted" stays assertable.
+     */
+    function delete_transient($transient)
+    {
+        $GLOBALS['wpmcp_test_wp']['transient_deletes'][] = $transient;
 
         return true;
     }

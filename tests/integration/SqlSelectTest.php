@@ -317,8 +317,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     public function testTheServerRefusesEveryWriteDisguisedAsASelect(): void
     {
         $target = self::$orderedIds[0];
-        // THE SIZE, NOT THE BYTES - see TraceLog::size(). The claim is that the log grew.
-        $before = TraceLog::size();
+        // THE COUNT, NOT THE TEXT - see TraceLog::count(). The claim is that a trace was written.
+        $before = TraceLog::count();
 
         $cases = [
             'a locking read'      => ["SELECT ID FROM \$posts WHERE ID = {$target} FOR UPDATE", 1792],
@@ -373,27 +373,25 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
             }
         }
 
-        // THE CLAIM IS "THE LOG GREW", AND IT IS ASSERTED ON THE LENGTH (round 3).
+        // THE CLAIM IS "A TRACE WAS WRITTEN", AND IT IS ASSERTED ON THE COUNT (round 3, and
+        // still true now that the traces are rows).
         //
-        // `assertNotSame($before, TraceLog::contents())` was the same claim and it could not be
+        // `assertNotSame($before, <the whole log>)` was the same claim and it could not be
         // REPORTED: PHPUnit builds a constraint description containing the expected value, and
-        // this site's trace log is over a megabyte, so `LogicalNot::negate()` runs `preg_replace`
-        // over a megabyte-long subject, gets null back when PCRE gives up, and dies with
-        // "Return value must be of type string, null returned". The queen's full-suite run hit
-        // exactly that on both sites - an ERROR at this line, with the real outcome invisible
-        // underneath it - while the class passed alone, because alone the log is smaller.
-        //
-        // The log is APPEND-ONLY and never rotated, so its size is a property of how much has
-        // run on the site, which is why this fired only in a full run and only after this sprint
-        // added entries and 33 tests. Comparing lengths is the identical claim - four refusals
-        // each write an entry, so the file cannot be the same size - and it can be printed.
-        $after = TraceLog::size();
+        // the trace store on a site that has run the suite for weeks is over a megabyte, so
+        // `LogicalNot::negate()` runs `preg_replace` over a megabyte-long subject, gets null
+        // back when PCRE gives up, and dies with "Return value must be of type string, null
+        // returned". The queen's full-suite run hit exactly that on both sites - an ERROR at
+        // this line, with the real outcome invisible underneath it - while the class passed
+        // alone, because alone the store is smaller. An integer cannot do that, which is why
+        // TraceLog::count() is the only shape this assertion is allowed to take.
+        $after = TraceLog::count();
 
         self::assertGreaterThan(
             $before,
             $after,
-            'Four refused statements wrote nothing to the private log, so the trace ids the'
-            . " client was given point at nothing. Log was {$before} bytes and is now {$after}."
+            'Four refused statements wrote no trace, so the trace ids the client was given'
+            . " point at nothing. The site held {$before} traces and now holds {$after}."
         );
 
         // AND THE ROW IS STILL THERE. A refusal that had already written would be a
@@ -412,7 +410,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
      * ---------------------------------------------------------------- */
 
     /**
-     * A statement naming either of the plugin's own tables is refused WITHOUT RUNNING -
+     * A statement naming ANY of the plugin's three own tables is refused WITHOUT RUNNING -
      * no event, no trace, no trace id - and the refusal is a tool error, not a 401.
      *
      * AND THE MENTION NEED NOT BE A TABLE REFERENCE. The second case names the versions
@@ -420,22 +418,37 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
      * over-refusal and it is the documented, deliberate direction: the alternative is a
      * comment-and-string stripper that has to be exactly as correct as MySQL's lexer.
      *
+     * THE TRACES TABLE IS THE THIRD, SINCE 1.1.2, AND IT IS THE ONE THAT MATTERS MOST HERE.
+     * The other two protect a credential and a file; this one protects the error BOUNDARY. A
+     * trace row holds the class, the message, the absolute file:line, the WP_Error data -
+     * which is where wpdb puts a failing query - and the whole stack: precisely what the
+     * boundary hands a caller eight hex digits INSTEAD of. While the traces were a file, no
+     * token could read them at all and the filesystem was the wall. Now this denial is the
+     * wall, so an admin-scope token that has just caused a failure must not be able to select
+     * the stack trace for it. Both spellings are covered because both are denied: the
+     * PREFIXED name a caller would actually write, and the bare constant.
+     *
      * @group sprint-9
      */
     public function testTheStatementCannotEvenMentionThePluginsOwnTables(): void
     {
         $tokens   = $this->tokensTable();
         $versions = $this->versionsTable();
+        $traces   = $this->tracesTable();
 
         $cases = [
             'the token table'                => "SELECT * FROM {$tokens}",
             'the versions table in a comment' => "SELECT 1 AS n -- {$versions}",
             'the token table in a string'    => "SELECT '{$tokens}' AS label",
+            'the traces table'               => "SELECT * FROM {$traces}",
+            'the traces table by its bare name' => 'SELECT * FROM wpmcp_traces',
+            'the traces table in a comment'  => "SELECT 1 AS n /* {$traces} */",
+            'one trace looked up by its id'  => "SELECT stack FROM {$traces} WHERE trace_id = 'deadbeef'",
         ];
 
         foreach ($cases as $what => $statement) {
             TestRecorder::reset();
-            $before = TraceLog::contents();
+            $before = TraceLog::count();
 
             $result = $this->sql($statement);
 
@@ -458,8 +471,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
             );
             self::assertSame(
                 $before,
-                TraceLog::contents(),
-                "{$what} wrote to the private log, so something went to the server."
+                TraceLog::count(),
+                "{$what} wrote a trace, so something went to the server."
             );
         }
     }
@@ -494,7 +507,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
 
         foreach ($cases as $what => $statement) {
             TestRecorder::reset();
-            $before = TraceLog::contents();
+            $before = TraceLog::count();
 
             $result = $this->sql($statement);
 
@@ -517,8 +530,8 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
             );
             self::assertSame(
                 $before,
-                TraceLog::contents(),
-                "{$what} wrote to the private log, so something went to the server."
+                TraceLog::count(),
+                "{$what} wrote a trace, so something went to the server."
             );
         }
     }
@@ -891,6 +904,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
     private function postsTable(): string { return $this->tableName('posts'); }
     private function tokensTable(): string { return $this->tableName('wpmcp_tokens'); }
     private function versionsTable(): string { return $this->tableName('wpmcp_file_versions'); }
+    private function tracesTable(): string { return $this->tableName('wpmcp_traces'); }
 
     /** The site's own prefix in front of a table name, read from the site. */
     private function tableName(string $bare): string
