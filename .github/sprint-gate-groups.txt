@@ -44,6 +44,13 @@
 #             only way to prove that a built zip carries its commit without installing one.
 #             actions/checkout leaves a usable .git behind and the runner has git on PATH;
 #             the test FAILS rather than skips if it does not.
+#   sprint-acf-read is the first group whose subject is ANOTHER PLUGIN'S API SURFACE, and it is
+#             therefore the first that must pass with that plugin ABSENT: every test in it runs on a
+#             site with no ACF at all, and the tests that need real ACF data carry `acf-data` and sit
+#             in NO gate group on purpose. A red sprint-acf-read on a green everything-else is most
+#             likely tests/unit/ModuleApiFaceTest.php, which tokenises each module and fails when a
+#             module calls a foreign symbol it did not declare - that is the gate working, not a
+#             flake, and the fix is to declare the symbol rather than to widen the test.
 sprint-0
 sprint-1
 sprint-2
@@ -63,3 +70,4 @@ sprint-14b
 sprint-14c
 sprint-14d
 sprint-seam
+sprint-acf-read
