@@ -93,18 +93,24 @@
  * each sub-field's stored meta directly and formatted that. For a LEAF sub-field the stored meta IS
  * the value and the answer was right. For a CONTAINER the stored meta is a MARKER:
  *
- *   - a `group` and a seamless `clone` store NOTHING at their own key, so the read was `''` and
- *     `Clone::format_value('')` / `Group::format_value('')` returned `false` at their `empty()`
- *     guard. jaygroup's one Flexible Content field has a seamless clone (`prefix_name = 1`) as the
- *     SOLE sub-field of all 35 layouts, and no `content_N_fields` row exists on any of its 294
- *     posts - so every disabled row on the site this was built for would have reported
- *     `values: {…: false}`, which reads to a caller as "the row was empty";
+ *   - a `group`, and a `clone` whose `display` is `group`, store NOTHING at their own key, so the
+ *     read was `''` and `Group::format_value('')` / `Clone::format_value('')` returned `false` at
+ *     their `empty()` guard - which reads to a caller as "the row was empty";
  *   - a `repeater` stores its row COUNT, which fails `is_array` and returns `false`;
  *   - a nested `flexible_content` stores its layout-NAME array, and
  *     `Flexible_Content::format_value()` then indexes a string. MEASURED at runtime: `TypeError:
  *     Cannot access offset of type string on string` at
  *     `pro/fields/class-acf-field-flexible-content.php:696`, which the error boundary turns into
  *     `-32603` - so ONE disabled row with a nested block cost the whole object read.
+ *
+ * AND A SEAMLESS CLONE IS NOT ONE OF THOSE SHAPES, which is worth stating because both the review
+ * and this file's own first draft said it was. MEASURED on jaygroup's real field in round 3: ACF
+ * FLATTENS a seamless `prefix_name` clone into the resolved layout definition, so 36 layouts carry
+ * ZERO `clone` entries and 189 flattened `fields_*` children, and those children are LEAVES whose
+ * stored meta IS their value. jaygroup's own 35 seamless-clone layouts were therefore never affected
+ * by the defect above. Both clone shapes are now in the fixture - the seamless one because it is the
+ * read a migration of the real data performs, and the `display: group` one because it is the clone
+ * shape that actually broke.
  *
  * THERE IS AN ACCESSOR AND ACF USES IT ITSELF. `analysis/72` §2b says "there is no supported
  * accessor" for these values and that claim, carried into the sprint brief and then into this

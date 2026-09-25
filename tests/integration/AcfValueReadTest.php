@@ -228,6 +228,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             . '         "target" => %d,'
             . '         "meta" => array("caption" => "Caption inside a group"),'
             . '         "inner" => array(array("acf_fc_layout" => "block", "body" => "Body inside a nested block")),'
+            // The seamless clone's children are submitted FLAT and prefixed, because that is what
+            // ACF flattened them to; the boxed clone's are submitted NESTED under the clone's own
+            // name with UNPREFIXED child keys. Measured, not guessed.
+            . '         "fields_title" => "Title through a seamless clone",'
+            . '         "fields_target" => %d,'
+            . '         "boxed" => array("title" => "Title through a boxed clone", "target" => %d),'
             . '         "acf_fc_layout_disabled" => 1,'
             . '         "acf_fc_layout_custom_label" => %s),'
             . '   array("acf_fc_layout" => "hero", "heading" => "Row two")'
@@ -246,6 +252,8 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             self::$adminId,
             self::$host,
             self::phpString($prefix . 'blocks'),
+            self::$draft,
+            self::$draft,
             self::$draft,
             self::phpString('Editor renamed me'),
             self::$host
@@ -273,6 +281,22 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
 
         return 'add_action("acf/init", function () {'
             . ' if (!function_exists("acf_add_local_field_group")) { return; }'
+            // THE CLONE SOURCE, and its location NEVER MATCHES anything on purpose - a clone
+            // resolves by group KEY, so the source's own fields must not also land on the object in
+            // their own right.
+            . ' acf_add_local_field_group(array('
+            . '  "key" => "group_' . $run . '_clonesrc",'
+            . '  "title" => "wp-mcp test ' . $run . ' clone source",'
+            . '  "fields" => array('
+            . '    array("key" => "field_' . $run . '_ct", "name" => "title",'
+            . '          "label" => "Cloned title", "type" => "text"),'
+            . '    array("key" => "field_' . $run . '_cr", "name" => "target",'
+            . '          "label" => "Cloned target", "type" => "post_object",'
+            . '          "post_type" => array("post"), "return_format" => "object")'
+            . '  ),'
+            . '  "location" => array(array(array("param" => "post_type", "operator" => "==",'
+            . '                                 "value" => "wpmcp-no-such-post-type")))'
+            . ' ));'
             . ' acf_add_local_field_group(array('
             . '  "key" => "group_' . $run . '_wpmcpacf",'
             . '  "title" => "wp-mcp test ' . $run . '",'
@@ -321,7 +345,23 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             . '                      array("key" => "field_' . $run . '_gnb", "name" => "body",'
             . '                            "label" => "Body", "type" => "text")'
             . '                    ))'
-            . '                ))'
+            . '                )),'
+            // THE TWO CLONE SHAPES, AND THEY ARE NOT THE SAME SHAPE (round 3, review 74 S6).
+            // MEASURED: a SEAMLESS clone with prefix_name is FLATTENED by ACF into the resolved
+            // layout definition - `fields_title` and `fields_target` arrive as ordinary leaf
+            // sub-fields and no `clone` entry exists at all - which is jaygroup's shape, 0 clone
+            // entries and 189 flattened children across its 36 layouts. A clone with
+            // `display: group` stays a CONTAINER: the definition holds `boxed:clone`, the meta row
+            // at its own key is '', and a bare meta read gives `false`. Same source group, same
+            // storage keys, two different things to get right.
+            . '          array("key" => "field_' . $run . '_gsc", "name" => "fields",'
+            . '                "label" => "Seamless clone", "type" => "clone",'
+            . '                "clone" => array("group_' . $run . '_clonesrc"),'
+            . '                "display" => "seamless", "prefix_name" => 1, "prefix_label" => 0),'
+            . '          array("key" => "field_' . $run . '_gbc", "name" => "boxed",'
+            . '                "label" => "Boxed clone", "type" => "clone",'
+            . '                "clone" => array("group_' . $run . '_clonesrc"),'
+            . '                "display" => "group", "prefix_name" => 1, "prefix_label" => 0)'
             . '      ))'
             . '    ))'
             . '  ),'
@@ -469,6 +509,12 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
                 $prefix . 'blocks_1_target',
                 $prefix . 'blocks_1_meta',
                 $prefix . 'blocks_1_inner',
+                // THE SEAMLESS CLONE IS FLATTENED BY ACF - these two are leaf sub-fields of the
+                // layout, not children of a `clone` entry, and no clone entry exists at all.
+                $prefix . 'blocks_1_fields_title',
+                $prefix . 'blocks_1_fields_target',
+                // AND THE BOXED CLONE IS NOT. One entry, holding its children.
+                $prefix . 'blocks_1_boxed',
             ],
             array_keys($values),
             "The dropped row's values are keyed by something other than its sub-fields, or a"
@@ -521,6 +567,51 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             'Body inside a nested block',
             (string) json_encode($values[$prefix . 'blocks_1_inner']),
             "The nested block's own sub-value is missing."
+        );
+
+        // THE TWO CLONE SHAPES (round 3, review 74 S6). jaygroup's ONLY Flexible Content field has
+        // a seamless prefix_name clone as the sole sub-field of 35 of its 36 layouts, so this is
+        // the read a migration of the real data will actually perform - and until round 3 it was
+        // held by no test at all.
+        //
+        // MEASURED, AND IT CORRECTS THE ROUND-1 BLOCKER'S ACCOUNT OF JAYGROUP: a SEAMLESS clone is
+        // FLATTENED by ACF into the resolved layout definition, so its children arrive as ordinary
+        // LEAF sub-fields and the bare-meta read of round 1 would have answered them correctly.
+        // Verified against jaygroup's own field, not only this fixture: 36 layouts, ZERO `clone`
+        // entries in the resolved definition, 189 flattened `fields_*` children. The container
+        // failure the blocker was really about needs a clone with `display: group`, which is the
+        // second one here.
+        self::assertSame(
+            'Title through a seamless clone',
+            $values[$prefix . 'blocks_1_fields_title'],
+            "A seamless clone's flattened child did not come back. Its stored key is"
+            . ' {parent}_{index}_{clone}_{child}, which is jaygroup\'s content_0_fields_title shape.'
+        );
+        self::assertSame(
+            self::$draft,
+            (int) ($values[$prefix . 'blocks_1_fields_target']['id'] ?? 0),
+            "A reference inside a seamless clone did not survive, or did not go through the"
+            . ' narrowing that gives it an `id`.'
+        );
+
+        // AND THE BOXED CLONE IS THE CONTAINER SHAPE, which is where the round-1 read really broke:
+        // the meta row at the clone's own key is the empty string, so formatting it returns `false`
+        // at Clone::format_value()'s empty() guard. acf_get_value() expands it instead.
+        self::assertIsArray(
+            $values[$prefix . 'blocks_1_boxed'],
+            'A clone with display: group came back as something other than its own fields. `false`'
+            . " here means the value was read from the meta table, where that clone's own key holds"
+            . ' the empty string.'
+        );
+        self::assertSame(
+            'Title through a boxed clone',
+            $values[$prefix . 'blocks_1_boxed']['title'] ?? null,
+            "The boxed clone's child is keyed by something other than its unprefixed name."
+        );
+        self::assertSame(
+            self::$draft,
+            (int) ($values[$prefix . 'blocks_1_boxed']['target']['id'] ?? 0),
+            'A reference inside a boxed clone did not survive.'
         );
 
         // A ROW THAT IS *NOT* DISABLED CARRIES NO `values`, because its values are already in the
