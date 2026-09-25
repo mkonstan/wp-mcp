@@ -287,17 +287,36 @@ final class ContentTypeDiscoveryTest extends FixtureIntegrationTestCase
             'The fixture taxonomy registered public => false is listed at the top level.'
         );
 
-        // AND NOT INSIDE ANY TYPE EITHER. Asserted over every type rather than over the
-        // fixture's, because the field is built per type and one gate has to cover them all.
+        // AND NOT INSIDE ANY TYPE EITHER, because the field is built per type and one gate has
+        // to cover them all.
+        //
+        // COLLECTED AND ASSERTED ONCE, NOT ASSERTED PER PAIR, and that is about the INSTRUMENT
+        // rather than about this test. An assertion inside the loop makes this class's assertion
+        // count a function of how many (type, taxonomy) pairs the site has - 42 on a plugin-heavy
+        // site and 41 on a bare one - and `--group sprint-seam`'s total is the counted invariant
+        // the sprint loop reads to notice a gate that has quietly shrunk. A count that differs by
+        // one for a legitimate reason is exactly the sentence that hides the next illegitimate
+        // one. One assertion over a collected list is site-independent, and it reports BETTER: it
+        // names every offender instead of dying on the first.
+        $inTypes = [];
+
         foreach ($data['post_types'] as $type) {
             foreach ((array) $type['taxonomies'] as $name) {
-                self::assertNotSame(
-                    self::hiddenTaxonomy(),
-                    $name,
-                    'post_types[' . $type['name'] . '].taxonomies names a non-viewable taxonomy.'
-                );
+                if ($name === self::hiddenTaxonomy()) {
+                    $inTypes[] = 'post_types[' . $type['name'] . '].taxonomies';
+                }
             }
         }
+
+        self::assertSame(
+            [],
+            $inTypes,
+            'A post type\'s own `taxonomies` field names the non-viewable fixture taxonomy at: '
+            . implode(', ', $inTypes)
+            . '. The description says a non-viewable taxonomy is withheld, and list-terms accepts'
+            . ' any name it is given, so the caller enumerates it next. This is the field the'
+            . ' top-level taxonomies[] gate cannot see.'
+        );
 
         // And the positive control, or "nothing is listed" would pass this.
         self::assertContains('post', $types);

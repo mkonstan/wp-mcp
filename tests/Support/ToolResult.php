@@ -93,6 +93,32 @@ final class ToolResult
      * `true` and `null` are NOT, and are skipped - without that, `mentions(1)` would match
      * every `"has_more": true`, which is the same accident in a new costume.
      *
+     * ------------------------------------------------------------------------------------
+     * EXACTLY WHAT IT CHECKS, AND EXACTLY WHAT IT DOES NOT. Read this before trusting it
+     * against a payload that carries strings; the first version of this docblock spoke of "a
+     * future message" as though an embedded id were covered, and it is not.
+     *
+     *   IT FINDS    a SCALAR LEAF of the decoded result whose value, as a string, EQUALS the
+     *               identifier - at any depth, in an object or a list, int, float or numeric
+     *               string. Float `10.0` matches `10`, which is the loud direction and fine.
+     *   IT DOES NOT a string leaf that merely CONTAINS the identifier. `"?p=10"` is not a
+     *   FIND        mention of `10`, and `"Post 10 was deleted"` is not either.
+     *
+     * THAT EXEMPTION IS THE WHOLE DESIGN, not an oversight: containment is the defect this
+     * function exists to remove, and a containment check would re-admit the `"limit":100`
+     * failure it was written for. It is CORRECT FOR THE ONLY CONSUMER TODAY -
+     * PostFilterReadsTest::assertFindsNothing(), which runs this only after asserting
+     * `items === []`, and an empty list-posts envelope has no string leaves at all. A future
+     * consumer whose answer DOES carry strings - a link, a message, a rendered title - needs
+     * its own assertion about that field, and must not read this one as covering it.
+     *
+     * THREE MEASURED EDGES, so nobody has to rediscover them:
+     *   - `mentions('')` matches any empty-string leaf. Every caller guards on a positive id,
+     *     which is why assertFindsNothing() takes an int and tests `> 0`.
+     *   - `mentions(0)` and `mentions('0')` hit an envelope's own `count`, and a `parent` of 0.
+     *     Same guard, same reason.
+     *   - the paths come back in document order, and ALL of them, not just the first.
+     *
      * @param int|string $value the identifier that must (or must not) be in the answer
      * @return list<string> the paths, in document order
      */

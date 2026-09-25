@@ -126,25 +126,21 @@ final class DebrisVerdictTest extends TestCase
         $report = Fixtures::traceReport(3, 1, $listed, 7);
 
         self::assertStringContainsString('were NOT caused by a test', $report);
-        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): `id 41` is a substring of
-        // `id 410`. The fixture is synthetic and holds neither, so this is the cheap half of
-        // a class rule rather than a bug fix - see ToolResult::mentions().
+        // SAME CLASS, DIFFERENT NEEDLE, and the reasoning is the paragraph below: `id 41` is a
+        // substring of `id 410`. The fixture is synthetic and holds neither, so this one is the
+        // cheap half of a class rule rather than a bug fix.
         self::assertMatchesRegularExpression(
             '/\bid 41\b/',
             $report,
             'The unexpected row is not named, so it cannot be looked up.'
         );
         self::assertStringContainsString('list-posts', $report);
-        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
-        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
-        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
-        // tests, so one could pass on another's number. See ToolResult::mentions().
-        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
-        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
-        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
-        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
-        // count is the cheapest boundary there is, and it asserts one more true thing: that
-        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        // BOUNDED ON THE LEFT, for the reason spelled out once in
+        // testAnUnexpectedTraceIsReportedByNameAndDoesNotFailTheCheck().
+        //
+        // THIS PARAGRAPH IS THE ONE HOME for that reasoning. The other two assertions of the
+        // same shape point here instead of repeating it, because prose kept in triplicate
+        // drifts and two of the three copies are wrong within a sprint.
         self::assertStringContainsString('NOTICE: 3 trace row(s) were caused by this suite on purpose', $report);
         self::assertStringContainsString(
             'KNOWN FALSE POSITIVE',
@@ -187,16 +183,8 @@ final class DebrisVerdictTest extends TestCase
 
         $report = Fixtures::traceReport(0, 57, $listed, 7);
 
-        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
-        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
-        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
-        // tests, so one could pass on another's number. See ToolResult::mentions().
-        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
-        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
-        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
-        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
-        // count is the cheapest boundary there is, and it asserts one more true thing: that
-        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        // BOUNDED ON THE LEFT, for the reason spelled out once in
+        // testAnUnexpectedTraceIsReportedByNameAndDoesNotFailTheCheck().
         self::assertStringContainsString('NOTICE: 57 trace row(s) on this site were NOT caused by a test', $report);
         self::assertStringContainsString(
             'Showing the newest ' . Fixtures::TRACE_ROWS_LISTED . ' of 57',
@@ -238,16 +226,8 @@ final class DebrisVerdictTest extends TestCase
         $report = Fixtures::traceReport(13, 0, [], 7);
 
         self::assertStringNotContainsString('NOT caused by a test', $report);
-        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): a COUNT at the start of a
-        // sentence is the same defect as an id - '3 trace row(s) ...' is a substring of
-        // '13 trace row(s) ...', and this class asserts 3, 13 and 57 in three different
-        // tests, so one could pass on another's number. See ToolResult::mentions().
-        // BOUNDED ON THE LEFT, NOT A BARE SUBSTRING (round 2 of sprint SEAM): a COUNT at the
-        // start of a sentence has the same defect as an id - `3 trace row(s) ...` is a
-        // substring of `13 trace row(s) ...`, and this class asserts 3, 13 and 57 in three
-        // different tests, so one could pass on another's number. `NOTICE: ` in front of the
-        // count is the cheapest boundary there is, and it asserts one more true thing: that
-        // the line is a NOTICE. See ToolResult::mentions() for the class.
+        // BOUNDED ON THE LEFT, for the reason spelled out once in
+        // testAnUnexpectedTraceIsReportedByNameAndDoesNotFailTheCheck().
         self::assertStringContainsString('NOTICE: 13 trace row(s) were caused by this suite on purpose', $report);
 
         [$code, $out] = Fixtures::debrisVerdict('', $report, '');
