@@ -29,6 +29,25 @@
  * `wpmcp_*(` detector cannot see at all, so a module could have reached into the transport layer
  * unchecked; `classRefsIn()` now refuses any `WpMcp\` reference from a module.
  *
+ * WHAT THIS GATE CANNOT SEE, AND IT IS SAID HERE BECAUSE A MECHANISM THAT DOES NOT STATE ITS
+ * LIMIT INVITES THE EXACT TRUST THIS SPRINT SET OUT TO REMOVE. It resolves names, so it resolves
+ * only names that are WRITTEN. An INDIRECT call is outside it:
+ *
+ *     $fn = 'wpmcp_trace';  $fn($id);          // a variable function
+ *     call_user_func('wpmcp_trace', $id);      // a string callable
+ *     add_action('x', 'wpmcp_trace');          // a callback handed to WordPress
+ *     ['WpMcp_Thing', 'make']()                // a callable array
+ *
+ * Every one of those reaches a core symbol and none of them is a token this file can attribute.
+ * No module uses one today - the only string callable in `modules/` is the discovery module's own
+ * provider name, handed to wpmcp_register_module(), which is the seam's own front door.
+ *
+ * SO WHAT A REVIEWER MUST DO BY HAND, and it is one grep per module file: read every string
+ * literal that looks like a symbol name. Concretely, in a module diff, look at every
+ * `call_user_func`, `call_user_func_array`, `add_action`, `add_filter`, `array_map`, `usort`, a
+ * `$variable(` call, and any `[...]` callable array, and ask what the string resolves to. The gate
+ * covers the other 99% so that this 1% is a short, bounded reading rather than the whole file.
+ *
  * AND IT RUNS IN THE UNIT TIER, on files alone: no WordPress, no site, no subprocess. The
  * boundary is a property of the source.
  *
@@ -185,8 +204,8 @@ final class ModuleBoundaryTest extends TestCase
         $fromCore   = [];
 
         foreach (self::moduleFiles() as $module) {
-            foreach (self::classRefsIn((string) file_get_contents($module)) as $name) {
-                $home = $declared[$name] ?? null;
+            foreach (self::classRefsIn((string) file_get_contents($module)) as $key => $name) {
+                $home = $declared[$key] ?? null;
 
                 if ($home === null || strpos($home, 'modules/') !== 0) {
                     $fromModule[] = basename($module) . ' references ' . $name
@@ -210,9 +229,9 @@ final class ModuleBoundaryTest extends TestCase
                 continue;
             }
 
-            foreach (self::classRefsIn((string) file_get_contents($path)) as $name) {
-                if (strpos($declared[$name] ?? '', 'modules/') === 0) {
-                    $fromCore[] = $core . ' references ' . $name . ', declared in ' . $declared[$name];
+            foreach (self::classRefsIn((string) file_get_contents($path)) as $key => $name) {
+                if (strpos($declared[$key] ?? '', 'modules/') === 0) {
+                    $fromCore[] = $core . ' references ' . $name . ', declared in ' . $declared[$key];
                 }
             }
         }
@@ -288,15 +307,15 @@ final class ModuleBoundaryTest extends TestCase
 
         $found = self::callsIn($source);
 
+        self::assertContains('wpmcp_cannot', $found, 'A real call was missed.');
+        self::assertContains('wpmcp_raw_title', $found, 'A real call was missed.');
+
         // A CALL IS CASE-INSENSITIVE IN PHP, so the detector lower-cases both sides. Without
         // this, `WPMCP_Cannot()` would resolve to null and - before round 3 - be skipped.
         self::assertContains('wpmcp_uppercase_call', $found, 'A differently-cased call was missed.');
 
         // AND `WpMcp\` IN PROSE IS NOT A REFERENCE, the same rule the call detector follows.
         self::assertSame([], self::classRefsIn($source), 'A docblock mention was read as a reference.');
-
-        self::assertContains('wpmcp_cannot', $found, 'A real call was missed.');
-        self::assertContains('wpmcp_raw_title', $found, 'A real call was missed.');
 
         foreach (['wpmcp_trace', 'wpmcp_render_admin', 'wpmcp_auth_event', 'wpmcp_in_a_string', 'wpmcp_in_a_comment'] as $notACall) {
             self::assertNotContains(
@@ -310,6 +329,88 @@ final class ModuleBoundaryTest extends TestCase
 
         // A definition is not a call, so a module's own function does not report itself.
         self::assertNotContains('wpmcp_example_thing', $found);
+    }
+
+    /**
+     * A LEADING BACKSLASH HID A CALL AND A CLASS FROM BOTH DETECTORS UNTIL ROUND 4.
+     *
+     * MEASURED on PHP 8.2.29: `\wpmcp_cannot` and `\WpMcp_Menu_Collector` each arrive as ONE
+     * `T_NAME_FULLY_QUALIFIED` token, so a detector reading `T_STRING` sees neither, and one
+     * matching a literal `WpMcp\` prefix does not see the second either - its name ltrims to
+     * `WpMcp_Menu_Collector`, which carries no namespace separator at all. A module could have
+     * reached any core symbol by typing one extra character. No module does, and the whole point
+     * of this file is that nobody has to check that by hand.
+     *
+     * HELD BY A FIXTURE RATHER THAN ASSERTED IN PROSE, which is the same standard the `T_NEW`
+     * case is held to: the test states the shape is covered by covering it.
+     *
+     * @group sprint-seam
+     */
+    public function testAFullyQualifiedNameIsSeenByBothDetectors(): void
+    {
+        // A fully-qualified CALL. One token, and callsIn() must still report it.
+        self::assertSame(
+            ['wpmcp_cannot'],
+            self::callsIn('<?php \wpmcp_cannot("x");'),
+            'A fully-qualified function call is invisible, so a module could reach the core by'
+            . ' writing a leading backslash.'
+        );
+
+        // A fully-qualified FLAT class. One token, no namespace separator, and classRefsIn() must
+        // still report it - this is the shape the `WpMcp\` prefix test could never have matched.
+        self::assertSame(
+            ['wpmcp_menu_collector'],
+            array_keys(self::classRefsIn('<?php $w = new \WpMcp_Menu_Collector();')),
+            'A fully-qualified flat class reference is invisible.'
+        );
+
+        // A fully-qualified NAMESPACED class, both as a constructor and as a static call.
+        self::assertSame(
+            ['wpmcp\protocolversion', 'wpmcp\schemavalidator'],
+            array_keys(self::classRefsIn(
+                '<?php $v = new \WpMcp\SchemaValidator(); \WpMcp\ProtocolVersion::latest();'
+            )),
+            'A fully-qualified namespaced class reference is invisible.'
+        );
+
+        // AND THE TWO DETECTORS DO NOT OVERLAP on either shape: a call is not a class, and a
+        // constructor is not a call, however the name is qualified.
+        self::assertSame([], array_keys(self::classRefsIn('<?php \wpmcp_cannot("x");')));
+        self::assertSame([], self::callsIn('<?php $w = new \WpMcp_Menu_Collector();'));
+    }
+
+    /**
+     * CLASS NAMES ARE CASE-INSENSITIVE IN PHP AND THE SCAN WAS NOT, until round 4.
+     *
+     * `new wpmcp\schemavalidator()` resolves to exactly the class `new WpMcp\SchemaValidator()`
+     * does, and `new WPMCP_MENU_COLLECTOR()` to exactly the class the menus module declares. Both
+     * slipped a case-sensitive scan. No shipped class exercises it, which is precisely why it
+     * would be written one day by somebody who did not know.
+     *
+     * Both sides are now lower-cased - the reference and the declaration map - as the function
+     * detector already did.
+     *
+     * @group sprint-seam
+     */
+    public function testAClassReferenceIsFoundWhateverItsCase(): void
+    {
+        self::assertSame(
+            ['wpmcp\schemavalidator'],
+            array_keys(self::classRefsIn('<?php $v = new wpmcp\schemavalidator();')),
+            'A lower-cased namespaced class reference slipped the scan.'
+        );
+        self::assertSame(
+            ['wpmcp_menu_collector'],
+            array_keys(self::classRefsIn('<?php $w = new WPMCP_MENU_COLLECTOR();')),
+            'An upper-cased flat class reference slipped the scan.'
+        );
+
+        // And the declaration map answers to the same lower-cased key, or the reference above
+        // would be reported as "declared nowhere" instead of as a boundary violation.
+        $classes = self::classDefinitions();
+
+        self::assertSame('modules/menus.php', $classes['wpmcp_menu_collector'] ?? null);
+        self::assertSame('src/SchemaValidator.php', $classes['wpmcp\schemavalidator'] ?? null);
     }
 
     /**
@@ -343,12 +444,16 @@ final class ModuleBoundaryTest extends TestCase
         );
 
         self::assertSame(
-            ['WpMcp\ProtocolVersion', 'WpMcp\SchemaValidator', 'WpMcp_Menu_Collector'],
-            $refs,
+            ['wpmcp\protocolversion', 'wpmcp\schemavalidator', 'wpmcp_menu_collector'],
+            array_keys($refs),
             'A real class reference was missed, so the assertion that no module has one is a'
             . ' no-op. Both shapes must be seen - the namespaced src/ one and the flat WpMcp_ one'
             . " - and WordPress's own classes and our functions must not be swept up."
         );
+
+        // The name AS WRITTEN is kept beside the key, so a failure can quote what the author
+        // actually typed rather than a normalised form they will not recognise.
+        self::assertSame('WpMcp_Menu_Collector', $refs['wpmcp_menu_collector'] ?? null);
 
         // AND A CONSTRUCTOR IS NOT A FUNCTION CALL, which is the false positive the round-3
         // lower-casing produced: `WpMcp_Menu_Collector` lower-cases into the `wpmcp_` prefix.
@@ -357,12 +462,6 @@ final class ModuleBoundaryTest extends TestCase
             self::callsIn('<?php $w = new WpMcp_Menu_Collector(); wpmcp_cannot("x");'),
             'callsIn() reported a constructor, a method, or nothing at all.'
         );
-
-        // And the class map finds both shapes where they actually live.
-        $classes = self::classDefinitions();
-
-        self::assertSame('modules/menus.php', $classes['WpMcp_Menu_Collector'] ?? null);
-        self::assertSame('src/SchemaValidator.php', $classes['WpMcp\SchemaValidator'] ?? null);
     }
 
     /**
@@ -399,27 +498,29 @@ final class ModuleBoundaryTest extends TestCase
         $tokens = token_get_all($source);
         $found  = [];
 
-        foreach ($tokens as $i => $token) {
-            if (!is_array($token) || $token[0] !== T_STRING
-                || strpos(strtolower($token[1]), 'wpmcp_') !== 0) {
+        foreach (self::pluginNames($tokens) as [$i, $name]) {
+            // A NAMESPACED NAME IS NEVER A GLOBAL FUNCTION HERE. This plugin declares no function
+            // inside a namespace, so `WpMcp\Something` can only be a class - classRefsIn()'s
+            // business, and skipping it here is what keeps the two detectors from double-counting.
+            if (strpos($name, '\\') !== false) {
                 continue;
             }
 
-            // WALK BACK OVER WHITESPACE, AND REFUSE FOUR SHAPES THAT ARE NOT A FUNCTION CALL.
+            // WALK BACK OVER WHITESPACE, AND REFUSE THE SHAPES THAT ARE NOT A FUNCTION CALL.
             // `function foo(` is a declaration. `new Foo(` is a CONSTRUCTOR - which the round-3
             // lower-casing made visible, because `WpMcp_Menu_Collector` lower-cases into the
             // `wpmcp_` prefix and the menus module instantiates one, so this detector reported a
-            // call that does not exist. A class is classRefsIn()'s business. `Foo::bar(` and
-            // `$foo->bar(` are methods, reached through a class, so the same detector owns them.
+            // call that does not exist. `Foo::bar(` and `$foo->bar(` are methods, reached through
+            // a class, so the same detector owns them; `instanceof`, `extends`, `implements` and
+            // `use` are class positions for the same reason.
             for ($b = $i - 1; $b >= 0; $b--) {
                 if (is_array($tokens[$b]) && $tokens[$b][0] === T_WHITESPACE) {
                     continue;
                 }
-                if (is_array($tokens[$b]) && in_array(
-                    $tokens[$b][0],
-                    [T_FUNCTION, T_NEW, T_DOUBLE_COLON, T_OBJECT_OPERATOR],
-                    true
-                )) {
+                if (is_array($tokens[$b]) && in_array($tokens[$b][0], self::CLASS_POSITION, true)) {
+                    continue 2;
+                }
+                if (is_array($tokens[$b]) && $tokens[$b][0] === T_FUNCTION) {
                     continue 2;
                 }
                 break;
@@ -431,16 +532,72 @@ final class ModuleBoundaryTest extends TestCase
                     continue;
                 }
                 if ($tokens[$f] === '(') {
-                    // Lower-cased because PHP resolves a function name case-insensitively, so
-                    // `WPMCP_Cannot()` and `wpmcp_cannot()` are one call. definitions() does the
-                    // same, and without both a differently-cased call resolves to null.
-                    $found[strtolower($token[1])] = true;
+                    $found[strtolower($name)] = true;
                 }
                 break;
             }
         }
 
         return array_keys($found);
+    }
+
+    /**
+     * The token shapes that put a name in CLASS position rather than call position.
+     *
+     * `T_USE` covers both `use WpMcp\Foo;` at the top of a file and a trait use inside a class;
+     * neither is a function call, so either way this list is the right side to err on.
+     */
+    private const CLASS_POSITION = [T_NEW, T_DOUBLE_COLON, T_OBJECT_OPERATOR, T_INSTANCEOF, T_EXTENDS, T_IMPLEMENTS, T_USE];
+
+    /**
+     * Every token naming something of THIS PLUGIN, as `[token index, name without a leading
+     * backslash]` - the one scanner both detectors read, so a token shape either is covered for
+     * both of them or is covered for neither.
+     *
+     * THREE TOKEN SHAPES, AND THE THIRD WAS A HOLE IN BOTH DETECTORS UNTIL ROUND 4. Measured on
+     * PHP 8.2.29 with token_get_all():
+     *
+     *   wpmcp_cannot            T_STRING
+     *   WpMcp\SchemaValidator   T_NAME_QUALIFIED
+     *   \wpmcp_cannot           T_NAME_FULLY_QUALIFIED   <- one token, no T_STRING anywhere
+     *   \WpMcp_Menu_Collector   T_NAME_FULLY_QUALIFIED   <- same, and not `WpMcp\`-prefixed
+     *
+     * A leading backslash is legal, resolves identically, and arrives as a SINGLE token. The
+     * first version of callsIn() read only T_STRING and the first classRefsIn() matched only a
+     * `WpMcp\` prefix, so `\wpmcp_cannot()` and `new \WpMcp_Menu_Collector()` were invisible to
+     * both - a module could have reached a core symbol by typing one extra character. No module
+     * does; the point of this file is that nobody has to check.
+     *
+     * CASE-INSENSITIVE, because PHP resolves BOTH function and class names that way.
+     * `new wpmcp\schemavalidator()` is the same class as `new WpMcp\SchemaValidator()`, and a
+     * case-sensitive scan would have let it past. The name is returned AS WRITTEN so a failure
+     * message can quote it; every comparison downstream lower-cases.
+     *
+     * @param list<array{0:int,1:string}|string> $tokens
+     * @return list<array{0:int,1:string}>
+     */
+    private static function pluginNames(array $tokens): array
+    {
+        $found = [];
+
+        foreach ($tokens as $i => $token) {
+            if (!is_array($token)) {
+                continue;
+            }
+
+            if (!in_array($token[0], [T_STRING, T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED], true)) {
+                continue;
+            }
+
+            $name  = ltrim($token[1], '\\');
+            $lower = strtolower($name);
+
+            if (strpos($lower, 'wpmcp_') === 0 || strpos($lower, 'wpmcp\\') === 0) {
+                $found[] = [$i, $name];
+            }
+        }
+
+        return $found;
     }
 
     /**
@@ -511,57 +668,71 @@ final class ModuleBoundaryTest extends TestCase
     }
 
     /**
-     * Every class of THIS PLUGIN referenced in $source, sorted and unique - from the tokeniser,
-     * so a name in a docblock or a string is not a reference.
+     * Every class of THIS PLUGIN referenced in $source: `lower-cased name => name as written`,
+     * from the tokeniser, so a name in a docblock or a string is not a reference.
      *
-     * BOTH SHAPES, because the plugin has two: the namespaced `src/` one, which PHP 8 emits as a
-     * single `T_NAME_QUALIFIED` / `T_NAME_FULLY_QUALIFIED` token, and the flat `WpMcp_Something`,
-     * which is a plain `T_STRING`. Missing the second is how a detector like this lets a module
-     * instantiate a core class: the only flat class the plugin has happens to live in a module,
-     * and "happens to" is what this file exists to replace.
+     * POSITION DECIDES, NOT THE NAME'S SHAPE, and that is round 4's correction. The plugin's flat
+     * class convention is `WpMcp_Something` and its functions are `wpmcp_something`, which are the
+     * SAME STRING once case is ignored - and case has to be ignored, because PHP ignores it. So a
+     * shape test cannot tell a class from a function and this reads the CONTEXT instead: a name
+     * preceded by `new`, `instanceof`, `extends`, `implements` or `use`, or followed by `::`, is a
+     * class; a name followed by `(` is a call and belongs to callsIn(). A NAMESPACED name is
+     * always a class here, because this plugin declares no function inside a namespace.
      *
      * `Walker`, `WP_Error`, `stdClass` and the rest are WordPress's or PHP's, and out of scope.
      *
-     * @return list<string>
+     * @param string $source
+     * @return array<string, string>
      */
     private static function classRefsIn(string $source): array
     {
-        $found = [];
+        $tokens = token_get_all($source);
+        $found  = [];
 
-        foreach (token_get_all($source) as $token) {
-            if (!is_array($token)) {
-                continue;
-            }
+        foreach (self::pluginNames($tokens) as [$i, $name]) {
+            $isClass = strpos($name, '\\') !== false;
 
-            if (in_array($token[0], [T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED], true)) {
-                $name = ltrim($token[1], '\\');
-
-                if (strpos($name, 'WpMcp\\') === 0) {
-                    $found[$name] = true;
+            if (!$isClass) {
+                for ($b = $i - 1; $b >= 0; $b--) {
+                    if (is_array($tokens[$b]) && $tokens[$b][0] === T_WHITESPACE) {
+                        continue;
+                    }
+                    $isClass = is_array($tokens[$b])
+                        && in_array($tokens[$b][0], self::CLASS_POSITION, true)
+                        && $tokens[$b][0] !== T_DOUBLE_COLON
+                        && $tokens[$b][0] !== T_OBJECT_OPERATOR;
+                    break;
                 }
-
-                continue;
             }
 
-            // The flat convention. Underscore-suffixed, so `WpMcp` alone and every `wpmcp_*`
-            // FUNCTION name stay out of it.
-            if ($token[0] === T_STRING && preg_match('/^WpMcp_[A-Za-z0-9_]+$/', $token[1]) === 1) {
-                $found[$token[1]] = true;
+            if (!$isClass) {
+                for ($f = $i + 1; $f < count($tokens); $f++) {
+                    if (is_array($tokens[$f]) && $tokens[$f][0] === T_WHITESPACE) {
+                        continue;
+                    }
+                    $isClass = is_array($tokens[$f]) && $tokens[$f][0] === T_DOUBLE_COLON;
+                    break;
+                }
+            }
+
+            if ($isClass) {
+                $found[strtolower($name)] = $name;
             }
         }
 
-        $names = array_keys($found);
-        sort($names);
+        ksort($found);
 
-        return $names;
+        return $found;
     }
 
     /**
-     * class name => the plugin-relative file it is declared in, for both shapes.
+     * LOWER-CASED class name => the plugin-relative file it is declared in, for both shapes.
      *
      * A namespaced class is keyed by its FULL name, because that is how a module would write it.
      * `src/` is one class per file by the autoloader's own rule, which is what makes deriving the
-     * name from the path correct rather than a guess.
+     * name from the path correct rather than a guess. Keys are lower-cased for the reason
+     * classRefsIn() lower-cases: PHP resolves a class name case-insensitively, so a map keyed on
+     * the declaration's own casing would miss `new wpmcp\schemavalidator()`.
      *
      * @return array<string, string>
      */
@@ -576,7 +747,7 @@ final class ModuleBoundaryTest extends TestCase
         $map = [];
 
         foreach ((array) glob(\WPMCP_PLUGIN_DIR . '/src/*.php') as $class) {
-            $map['WpMcp\\' . basename((string) $class, '.php')] = 'src/' . basename((string) $class);
+            $map[strtolower('WpMcp\\' . basename((string) $class, '.php'))] = 'src/' . basename((string) $class);
         }
 
         $flat = array_merge(
@@ -589,7 +760,7 @@ final class ModuleBoundaryTest extends TestCase
             $relative = self::relative($path);
 
             if (preg_match_all(
-                '/^\s*(?:final |abstract )?class (WpMcp_[A-Za-z0-9_]+)/m',
+                '/^\s*(?:final |abstract )?class (WpMcp_[A-Za-z0-9_]+)/mi',
                 (string) file_get_contents($path),
                 $m
             ) === 0) {
@@ -597,7 +768,7 @@ final class ModuleBoundaryTest extends TestCase
             }
 
             foreach ($m[1] as $class) {
-                $map[$class] = $relative;
+                $map[strtolower($class)] = $relative;
             }
         }
 

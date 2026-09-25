@@ -106,9 +106,21 @@ does not reach into the request path, the settings screen, the log or the transp
 `tests/unit/ModuleBoundaryTest.php`: it tokenises every module file, resolves each `wpmcp_*` call
 to the file that declares it, and fails when one resolves anywhere but `tools.php`, `modules.php`
 or a module - so a core file nobody thought to forbid is forbidden by default. It reports an
-unresolved call rather than skipping it, refuses any `WpMcp\` class reference from a module, and
-holds the five helpers above to being exactly the five, because an unenforced sentence in the
-seam's own contract is the ACF `permission_callback` mistake in our own words. Nothing in the core calls
+unresolved call rather than skipping it, refuses any reference to one of this plugin's own classes
+from a module (both the namespaced `src/` shape and the flat `WpMcp_*` one, case-insensitively and
+with or without a leading backslash), and holds the five helpers above to being exactly the five,
+because an unenforced sentence in the seam's own contract is the ACF `permission_callback` mistake
+in our own words.
+
+**And what that gate cannot see, because a mechanism that does not state its limit invites the
+trust this is here to remove: an INDIRECT call.** It resolves names that are written, so a variable
+function, a string handed to `call_user_func`, `add_action` or `add_filter`, or a callable array
+reaches a core symbol without being a token the test can attribute. No module uses one today - the
+only string callable under `modules/` is a module's own provider name, handed to
+`wpmcp_register_module()`, which is the front door. **So one thing stays a hand check in review of
+any module diff:** read every string literal that looks like a symbol name, and every `$variable(`
+call, and ask what it resolves to. The gate exists so that this is a short bounded reading rather
+than the whole file. Nothing in the core calls
 into a module either, asserted the same way there and again by `tests/unit/BareCoreTest.php`,
 which copies the core into a temporary directory WITHOUT `modules/`, loads it in a fresh PHP
 process, and asserts the registry comes back as exactly the 24 core tools. A core file that
