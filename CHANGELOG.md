@@ -2,6 +2,11 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.2.0
+
+**Unreleased.** Open for the next cycle: ACF field VALUES, read first and then written, in
+their own module behind the seam 1.1.2 established.
+
 ## 1.1.2
 
 **Released 2026-09-25.** The private trace log stops being a file, and the tool surface starts
