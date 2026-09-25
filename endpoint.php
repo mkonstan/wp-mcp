@@ -981,19 +981,36 @@ function wpmcp_server_info() {
 /**
  * What this server tells a client it is, once, at the handshake.
  *
- * THREE FACTS, AND THEY ARE THE THREE THAT CHANGE WHAT AN AGENT DOES. Not a feature
- * list: an agent that knows its reach is one WordPress user's stops treating a refusal as
- * a bug to retry, and an agent that knows write tools need a different token stops
- * looking for the write tool it cannot see. Everything else it can learn from tools/list.
+ * FOUR FACTS, AND THEY ARE THE FOUR THAT CHANGE WHAT AN AGENT DOES. Not a feature list:
+ * an agent that knows its reach is one WordPress user's stops treating a refusal as a bug to
+ * retry, and an agent that knows write tools need a different token stops looking for the
+ * write tool it cannot see. Everything else it can learn from tools/list.
  *
- * The last clause is the one corollary of the third fact a caller gets wrong (sprint 14d):
- * a read-scope token is not a privacy boundary. It reads everything its user can, which for
- * an administrator includes every user's email. The mint form says the same to the operator.
+ * The last clause of the third fact is the corollary a caller gets wrong (sprint 14d): a
+ * read-scope token is not a privacy boundary. It reads everything its user can, which for an
+ * administrator includes every user's email. The mint form says the same to the operator.
+ *
+ * THE FOURTH FACT IS WHERE THE CONTENT IS, AND IT IS HERE BECAUSE THERE IS NOWHERE ELSE TO
+ * PUT IT (1.1.2). A client working blind against a real site called list-posts, got ONE item,
+ * and had no way to learn that the content sat in five custom post types - list-posts defaults
+ * to `post` and list-terms to `category`. list-content-types answers that, but the tool whose
+ * default causes the mislead cannot point at it: list-posts' description is at 997 of the
+ * 1,000 characters a client keeps, and every sentence in it is held by
+ * tests/unit/DescriptionContractTest.php as a claim that must not drift. This string has no
+ * cap and no length rule over it, and every client reads it before it looks at a single tool
+ * name - so it is the right place, and the only cheap one.
+ *
+ * NOT A FEATURE LIST EVEN SO. It names ONE tool, because that one is the answer to "why does
+ * this site look empty"; a second would start the list this docblock exists to refuse.
  */
 function wpmcp_server_instructions() {
     return 'This is a WordPress site exposed as MCP tools: posts, pages, taxonomies,'
         . ' media and comments, plus (when the operator enables it) files in the active'
         . " theme.\n"
+        . 'Call list-content-types first on a site you have not seen: list-posts defaults'
+        . ' to post_type "post" and list-terms to "category", so a site whose content'
+        . ' lives in custom post types looks nearly empty until you have read the real'
+        . " ones and their taxonomies.\n"
         . 'Every tool runs as the WordPress user this token was minted for, so that'
         . " user's own capabilities are the ceiling on what you can see or change. A"
         . " refusal is usually that ceiling, not a malformed call.\n"

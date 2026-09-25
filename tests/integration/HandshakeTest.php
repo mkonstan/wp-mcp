@@ -211,9 +211,15 @@ final class HandshakeTest extends FixtureIntegrationTestCase
     /**
      * `instructions` is present and says the three things that change what an agent does.
      *
-     * Not a prose assertion - three substrings, each a fact: the subject is WordPress,
-     * reach is one user's capabilities, writes need a different token. A rewrite that keeps
-     * those is fine; one that drops one of them is the regression.
+     * Not a prose assertion - four substrings, each a fact: the subject is WordPress, reach
+     * is one user's capabilities, writes need a different token, and where a site's real post
+     * types are named. A rewrite that keeps those is fine; one that drops one of them is the
+     * regression.
+     *
+     * THE FOURTH ARRIVED IN 1.1.2 and is asserted HERE because nowhere else can hold it: the
+     * tool whose default causes the mislead, list-posts, is at 997 of the 1,000 characters a
+     * client keeps, so it cannot carry the pointer. This string can, and this assertion is what
+     * stops it being dropped in a rewrite.
      *
      * @group sprint-4
      */
@@ -226,7 +232,7 @@ final class HandshakeTest extends FixtureIntegrationTestCase
         self::assertIsString($instructions, 'initialize carried no instructions: ' . $raw);
         self::assertNotSame('', trim($instructions), 'instructions is empty.');
 
-        foreach (['WordPress', 'capabilities', 'admin-scope'] as $fact) {
+        foreach (['WordPress', 'capabilities', 'admin-scope', 'list-content-types'] as $fact) {
             self::assertStringContainsString(
                 $fact,
                 $instructions,
