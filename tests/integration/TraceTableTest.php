@@ -179,7 +179,10 @@ final class TraceTableTest extends FixtureIntegrationTestCase
         self::assertStringContainsString('message=' . self::THROWN_MESSAGE, $entry, $entry);
         self::assertStringContainsString('method=tools/call', $entry, $entry);
         self::assertStringContainsString('tool=' . self::toolName(), $entry, $entry);
-        self::assertStringContainsString('user=' . self::$userId, $entry, $entry);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM). `user=1` is a substring of
+        // `user=10`, so a plain substring check on a key=value rendering can pass for the
+        // wrong user. See ToolResult::mentions() for the class this belongs to.
+        self::assertMatchesRegularExpression('/\buser=' . self::$userId . '\b/', $entry, $entry);
 
         // file:line, matched up to `.php:<line>` rather than as a run of non-whitespace,
         // because the path can contain spaces ("C:\Users\x\Local Sites\...").

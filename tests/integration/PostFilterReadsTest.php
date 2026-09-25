@@ -508,8 +508,26 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
     /**
      * A filter that must find NOTHING: no error, no items, count 0, and no trace of the
      * thing it was pointed at anywhere in the response.
+     *
+     * $mustNotAppear IS AN ID AND IS CHECKED AGAINST THE PARSED ANSWER, NOT ITS BYTES, and
+     * that is a correctness fix rather than a tidy-up. It used to be a string compared with
+     * assertStringNotContainsString() against `$result->text` - the whole serialized
+     * envelope - which contains numbers this test did not put there. CI run 36071072879
+     * went red on
+     *
+     *     Failed asserting that '{"count":0,"page":1,"limit":100,"has_more":false,"items":[]}'
+     *     does not contain "10".
+     *
+     * `items` is empty and `count` is 0, so the three assertions above this one all passed
+     * and the security property held; what failed was this line, because the private post's
+     * id was 10 in that container and the envelope says `"limit":100`. ToolResult::mentions()
+     * walks the decoded structure and compares scalar leaves for IDENTITY, so 10 is not
+     * found inside 100 - and it names the path, so a real hit says where it is.
+     *
+     * THE THREE ASSERTIONS ABOVE ARE UNCHANGED. This one is the belt-and-braces: nothing
+     * else in the envelope - a `total`, a future field, a message - carries that id either.
      */
-    private function assertFindsNothing(string $token, array $args, string $mustNotAppear = ''): void
+    private function assertFindsNothing(string $token, array $args, int $mustNotAppear = 0): void
     {
         $result = $this->mcp($token)->callTool('list-posts', $args);
 
@@ -528,8 +546,14 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         self::assertSame(0, $result->data()['count']);
         self::assertFalse($result->data()['has_more'], 'An empty page claimed there was more.');
 
-        if ($mustNotAppear !== '') {
-            self::assertStringNotContainsString($mustNotAppear, $result->text);
+        if ($mustNotAppear > 0) {
+            self::assertSame(
+                [],
+                $result->mentions($mustNotAppear),
+                'The answer is empty and still carries id ' . $mustNotAppear . ' somewhere in'
+                . ' it, at the path(s) above. Args: ' . json_encode($args)
+                . ' Response: ' . $result->text
+            );
         }
     }
 
@@ -581,7 +605,7 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         $this->assertFindsNothing(
             self::$authorToken,
             ['search' => self::secret(), 'limit' => 100],
-            (string) self::$hiddenPrivate
+            self::$hiddenPrivate
         );
         $this->assertFindsNothing(self::$subToken, ['search' => self::secret(), 'limit' => 100]);
 
@@ -757,7 +781,7 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         $this->assertFindsNothing(
             self::$adminToken,
             ['term' => self::hiddenTaxonomy() . ':' . self::hiddenTermName(), 'limit' => 100],
-            (string) self::$alpha
+            self::$alpha
         );
         $this->assertFindsNothing(
             self::$authorToken,
@@ -789,7 +813,7 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         $this->assertFindsNothing(
             self::$authorToken,
             ['term' => 'post_tag:' . Fixtures::name('tag-b'), 'limit' => 100],
-            (string) self::$hiddenPrivate
+            self::$hiddenPrivate
         );
 
         $admin = $this->listing(self::$adminToken, [
@@ -1267,7 +1291,7 @@ final class PostFilterReadsTest extends FixtureIntegrationTestCase
         $this->assertFindsNothing(
             self::$subToken,
             ['after' => '2030-01-01', 'limit' => 100],
-            (string) self::$charlie
+            self::$charlie
         );
 
         // (b) A window with content in it that the sticky post is OUTSIDE of. ee-echo is

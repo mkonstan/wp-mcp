@@ -126,7 +126,14 @@ final class DebrisVerdictTest extends TestCase
         $report = Fixtures::traceReport(3, 1, $listed, 7);
 
         self::assertStringContainsString('were NOT caused by a test', $report);
-        self::assertStringContainsString('id 41', $report, 'The unexpected row is not named, so it cannot be looked up.');
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM): `id 41` is a substring of
+        // `id 410`. The fixture is synthetic and holds neither, so this is the cheap half of
+        // a class rule rather than a bug fix - see ToolResult::mentions().
+        self::assertMatchesRegularExpression(
+            '/\bid 41\b/',
+            $report,
+            'The unexpected row is not named, so it cannot be looked up.'
+        );
         self::assertStringContainsString('list-posts', $report);
         self::assertStringContainsString('3 trace row(s) were caused by this suite on purpose', $report);
         self::assertStringContainsString(

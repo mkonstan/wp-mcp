@@ -212,7 +212,10 @@ final class ErrorBoundaryTest extends FixtureIntegrationTestCase
         self::assertStringContainsString('message=' . self::THROWN_MESSAGE, $entry, $entry);
         self::assertStringContainsString('method=tools/call', $entry, $entry);
         self::assertStringContainsString('tool=' . self::toolName(), $entry, $entry);
-        self::assertStringContainsString('user=' . self::$userId, $entry, $entry);
+        // BOUNDED, NOT A SUBSTRING (round 2 of sprint SEAM). `user=1` is a substring of
+        // `user=10`, so a plain substring check on a key=value rendering can pass for the
+        // wrong user. See ToolResult::mentions() for the class this belongs to.
+        self::assertMatchesRegularExpression('/\buser=' . self::$userId . '\b/', $entry, $entry);
 
         // file:line. The path may contain spaces - "C:\Users\x\Local Sites\..." on the
         // machine this was developed against - so it is matched up to the `.php:<line>`
