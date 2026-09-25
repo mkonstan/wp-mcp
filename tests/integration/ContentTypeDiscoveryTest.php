@@ -190,6 +190,14 @@ final class ContentTypeDiscoveryTest extends FixtureIntegrationTestCase
         self::assertTrue($type['show_in_rest']);
         self::assertSame(self::publicType() . '-items', $type['rest_base'], 'rest_base is not the registered one.');
         self::assertContains(self::taxonomy(), $type['taxonomies'], 'The type does not name its own taxonomy.');
+        self::assertNotContains(
+            self::hiddenTaxonomy(),
+            $type['taxonomies'],
+            'The post type\'s own `taxonomies` field names a taxonomy that is not viewable, which'
+            . ' the description says is withheld - and list-terms accepts any name it is given, so'
+            . ' the caller enumerates it next. This is the field the top-level taxonomies[] gate'
+            . ' cannot see.'
+        );
 
         $tax = $taxes[self::taxonomy()];
 
@@ -273,6 +281,23 @@ final class ContentTypeDiscoveryTest extends FixtureIntegrationTestCase
 
         self::assertNotContains('nav_menu', $taxes, 'nav_menu is not viewable and must not be listed.');
         self::assertNotContains('wp_theme', $taxes);
+        self::assertNotContains(
+            self::hiddenTaxonomy(),
+            $taxes,
+            'The fixture taxonomy registered public => false is listed at the top level.'
+        );
+
+        // AND NOT INSIDE ANY TYPE EITHER. Asserted over every type rather than over the
+        // fixture's, because the field is built per type and one gate has to cover them all.
+        foreach ($data['post_types'] as $type) {
+            foreach ((array) $type['taxonomies'] as $name) {
+                self::assertNotSame(
+                    self::hiddenTaxonomy(),
+                    $name,
+                    'post_types[' . $type['name'] . '].taxonomies names a non-viewable taxonomy.'
+                );
+            }
+        }
 
         // And the positive control, or "nothing is listed" would pass this.
         self::assertContains('post', $types);
@@ -316,6 +341,15 @@ final class ContentTypeDiscoveryTest extends FixtureIntegrationTestCase
         return Fixtures::name('ctax');
     }
 
+    /**
+     * A `public => false` taxonomy attached to the PUBLIC type - the case that catches an
+     * unfiltered per-type `taxonomies` field, which the top-level gate cannot see.
+     */
+    private static function hiddenTaxonomy(): string
+    {
+        return Fixtures::name('chtax');
+    }
+
     private static function publicTypeLabel(): string
     {
         return 'WPMCP Fixture Types';
@@ -331,6 +365,7 @@ final class ContentTypeDiscoveryTest extends FixtureIntegrationTestCase
         $hidden = self::hiddenType();
         $tax    = self::taxonomy();
         $label  = self::publicTypeLabel();
+        $htax   = self::hiddenTaxonomy();
 
         return <<<PHP
 add_action('init', static function () {
@@ -351,6 +386,17 @@ add_action('init', static function () {
         'public'             => false,
         'publicly_queryable' => false,
         'show_in_rest'       => false,
+    ));
+
+    // PUBLIC => FALSE, ON THE PUBLIC TYPE. is_taxonomy_viewable() refuses it, so it must not
+    // appear in the top-level list NOR inside that type's own `taxonomies` field - and only the
+    // second of those two was true of the first version of the tool.
+    register_taxonomy('{$htax}', array('{$public}'), array(
+        'label'              => 'WPMCP Fixture Hidden Taxonomy',
+        'public'             => false,
+        'publicly_queryable' => false,
+        'show_in_rest'       => false,
+        'hierarchical'       => false,
     ));
 
     register_taxonomy('{$tax}', array('{$public}'), array(

@@ -27,7 +27,10 @@
  * WHAT IS LEFT OUT, DELIBERATELY. Only post types WordPress itself treats as VIEWABLE are
  * listed, which is exactly the set wpmcp_post_type_ok() lets list-posts and get-post accept,
  * so every name here is a name those tools take. Only taxonomies is_taxonomy_viewable()
- * accepts are listed. A plugin's internal, non-public types and taxonomies - ACF's field
+ * accepts are listed - IN BOTH PLACES A TAXONOMY NAME APPEARS, which the first version got
+ * right at the top level and wrong inside each post type's `taxonomies` field; one unfiltered
+ * get_object_taxonomies() call undid the whole paragraph, because a name withheld from one
+ * list and published in the other is not withheld. A plugin's internal, non-public types and taxonomies - ACF's field
  * groups, a cache plugin's log type - are therefore absent, and that is a disclosure
  * decision rather than a tidiness one: `list-plugins` is an admin-scope tool on purpose, and
  * an unfiltered type list is a plugin inventory by another route. `attachment` is absent
@@ -70,9 +73,40 @@ function wpmcp_discovery_post_type($name, $pto) {
         'public'          => (bool) $pto->public,
         'show_in_rest'    => $inRest,
         'rest_base'       => $inRest ? (string) (!empty($pto->rest_base) ? $pto->rest_base : $name) : null,
-        'taxonomies'      => array_values(array_map('strval', (array) get_object_taxonomies($name))),
+        // FILTERED BY THE SAME GATE THE TOP-LEVEL `taxonomies` LIST USES, and the first version
+        // was not - found by review. get_object_taxonomies() answers with EVERY taxonomy
+        // attached to the type, `public => false` ones included, so on a WooCommerce site a
+        // read-scope token was handed `product_visibility`, `product_type` and
+        // `product_shipping_class` here while the tool's own description promised it withheld
+        // exactly those. One field, and it undid the paragraph above it.
+        'taxonomies'      => wpmcp_discovery_viewable_taxonomies($name),
         'counts'          => $counts,
     );
+}
+
+/**
+ * The taxonomies attached to $postType that this tool may name - `is_taxonomy_viewable()`, the
+ * same gate the top-level `taxonomies` list applies, asked once per type.
+ *
+ * AND WHAT THIS DOES NOT FIX, said out loud so nobody reads the gate as complete: `list-terms`
+ * accepts any taxonomy that `taxonomy_exists()`, viewable or not, so a caller who ALREADY KNOWS
+ * a private taxonomy's name can still list its terms. That is behaviour this tool did not
+ * introduce and does not change; what it must not do is hand over the name. Leaving `list-terms`
+ * as it is was a decision rather than an oversight - a viewability gate there would also refuse a
+ * `show_in_rest => true, public => false` taxonomy that a site deliberately exposes through
+ * core's own REST API, and that needs measuring on a real plugin-heavy site before it is
+ * narrowed. See analysis/68, round 2.
+ *
+ * @return list<string>
+ */
+function wpmcp_discovery_viewable_taxonomies($postType) {
+    $names = array();
+
+    foreach ((array) get_object_taxonomies($postType) as $name) {
+        if (is_taxonomy_viewable($name)) { $names[] = (string) $name; }
+    }
+
+    return $names;
 }
 
 /**
@@ -118,7 +152,7 @@ function wpmcp_discovery_tools() {
             . ' default is "post" - so a site whose content lives in custom types looks empty'
             . ' until you read this. Returns post_types and taxonomies. Each post type: name,'
             . ' label, singular_label, description, hierarchical, public, show_in_rest,'
-            . ' rest_base (null when it is not in REST), taxonomies (its taxonomy names)'
+            . ' rest_base (null when it is not in REST), taxonomies (its VIEWABLE taxonomies)'
             . ' and counts (status => how many posts, carrying only the'
             . ' statuses your capabilities let you see listed, so an Author sees publish'
             . ' alone; your own unpublished posts are not added in). Each taxonomy: the same'
