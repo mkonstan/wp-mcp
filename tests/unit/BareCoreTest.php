@@ -217,6 +217,14 @@ final class BareCoreTest extends TestCase
                 PHP_BINARY,
                 '-d', 'display_startup_errors=0',
                 '-d', 'error_reporting=' . (string) (E_ALL),
+                // AND SAY WHERE THE DIAGNOSTICS GO, or the `Deprecated` assertion below is at
+                // the mercy of whatever php.ini the child inherits. On this project's
+                // workstation that is Local's per-site ini through PHPRC, whose
+                // `display_errors` is not ours to rely on; php-cli's own default is On and a CI
+                // runner's is too, so the check would pass for the wrong reason on one machine
+                // and be real on another. `stderr` also keeps a diagnostic out of the fenced
+                // JSON on stdout. Found by review.
+                '-d', 'display_errors=stderr',
                 $script,
             ],
             $descriptors,
@@ -246,7 +254,7 @@ final class BareCoreTest extends TestCase
         // error_reporting=0 for every other command here, so the unit tier's own
         // --display-deprecations run is the only other check - and it cannot see one raised while
         // a file is being LOADED by a process it did not start. This one can, because it sets
-        // error_reporting itself.
+        // error_reporting AND display_errors itself rather than inheriting either.
         self::assertStringNotContainsString(
             'Deprecated',
             $combined,
