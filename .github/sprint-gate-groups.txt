@@ -74,6 +74,26 @@
 #             testCoresOwnAllowedKeywordListIsWhatTheUnitTierTranscribed(), which compares the live
 #             `rest_get_allowed_schema_keywords()` against the list the unit tier holds by hand. If
 #             that one is red, WordPress added or dropped a keyword and the dialect has to follow.
+#   sprint-deletions is the first group whose subject is a pair of BEHAVIOUR-PRESERVING swaps, so
+#             red-before-green was impossible by construction and every assertion in it was proved
+#             falsifiable by mutating the new code instead. Its 4 tests cover four things: that
+#             list-comments' search still covers comment_content and comment_author and still does
+#             NOT cover comment_author_email now that the clause is core's own
+#             `WP_Comment_Query::get_search_sql()`, that a LIKE wildcard is still escaped, that a
+#             clause which VANISHED is refused rather than answered with every comment, and that
+#             `wp_get_admin_notice()` interpolates its message RAW. So a red sprint-deletions is
+#             most likely one of three things, in this order: core changed get_search_sql()'s
+#             signature or visibility - which the guard in tools.php now refuses loudly, with a
+#             trace id, rather than silently searching nothing; core changed how
+#             wp_admin_notice() interpolates or escapes its message, in which case the test says
+#             to delete our esc_html(); or the escape-once pattern in CoreFixTest was loosened
+#             again, which round 2 of that sprint had to fix once already.
+#             FOUR TESTS IS THE WHOLE GROUP AND THAT IS ON PURPOSE. The sprint's deliverable was
+#             mostly REFUSALS with checked reasons - four of five rows ended "leave it" - and a
+#             refusal is not testable, so a low count here is expected and is NOT evidence the
+#             group stopped running. It must stay above zero: bin/ci-group-counts.php reds any
+#             listed group that no test carries, which is what would catch the group being
+#             renamed away rather than merely being small.
 sprint-0
 sprint-1
 sprint-2
@@ -96,3 +116,4 @@ sprint-seam
 sprint-acf-read
 sprint-core-fix
 sprint-validator
+sprint-deletions
