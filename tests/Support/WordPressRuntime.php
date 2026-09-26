@@ -44,6 +44,9 @@ final class WordPressRuntime
             // single site with no super admins - WordPress's own answer on an ordinary install.
             'multisite'       => false,
             'super_admins'    => [],
+            // What core's own `map_meta_cap` FILTER answers for a capability, when a test sets one.
+            // Empty means "nobody filtered it", which is every ordinary site.
+            'map_meta_cap'    => [],
         ];
 
         // plugin_basename()'s symlink map. A global rather than a key of the array above, because
@@ -105,6 +108,23 @@ final class WordPressRuntime
     {
         $GLOBALS['wpmcp_test_wp']['multisite']    = $on;
         $GLOBALS['wpmcp_test_wp']['super_admins'] = array_map('intval', $superAdmins);
+    }
+
+    /**
+     * Make `map_meta_cap($cap, ...)` answer $caps, the way a plugin on core's own `map_meta_cap`
+     * filter would.
+     *
+     * THE ONLY WAY TO TELL A DELEGATION FROM A COPY in this tier: the runtime stub carries core's
+     * own `edit_themes` branches, so a gate that asks core and a gate that restates core's branches
+     * answer identically on every ordinary state. Forcing the answer to something the branches
+     * would not produce is what makes the difference observable - and it is not a synthetic case,
+     * because a hardening plugin denying a capability on that filter is exactly what it models.
+     *
+     * @param list<string> $caps e.g. ['do_not_allow']
+     */
+    public static function setMetaCap(string $capability, array $caps): void
+    {
+        $GLOBALS['wpmcp_test_wp']['map_meta_cap'][$capability] = $caps;
     }
 
     /** Make get_userdata($id) return a user. */

@@ -242,18 +242,33 @@ function wpmcp_acf_api_face() {
                 'methods'   => array(
                     array(
                         'probe' => 'wpmcp_acf_flexible_content',
-                        // get_layout_title JOINS THEM IN SPRINT CORE-FIX, and it belongs in the
-                        // OPTIONAL half rather than the required one for the reason the file
-                        // header gives: a required METHOD would be probed at `plugins_loaded`,
-                        // where `acf_get_field_type('flexible_content')` is still NULL, and the
-                        // module would never register on a site that has everything.
-                        //
-                        // AND IT BELONGS IN THIS capability rather than a new one, because the
-                        // only caller is a layout row: Flexible Content is a PRO field type, so
-                        // where these two accessors are missing there are no rows to label.
-                        // Below Pro 6.5 the label is the layout's own stored label, which is
-                        // exactly what it was before this sprint.
-                        'names' => array('get_disabled_layouts', 'get_renamed_layouts', 'get_layout_title'),
+                        'names' => array('get_disabled_layouts', 'get_renamed_layouts'),
+                    ),
+                ),
+            ),
+            // THE FILTERED LAYOUT TITLE, AND IT IS ITS OWN CAPABILITY BECAUSE ITS FLOOR IS ITS OWN
+            // (sprint CORE-FIX round 2, review 81 S3). Round 1 declared `get_layout_title` inside
+            // `layout_metadata` and argued that where the disable/rename accessors are missing
+            // there are no rows to label. FALSE: Flexible Content rows exist in every ACF Pro,
+            // and 6.5 brought the disable and rename FEATURE, not the field type. The filter
+            // family is "Added in version 5.3.6" and `get_layout_title()` is older than 6.5, so
+            // folding the two together left the label wrong on Pro 5.11-6.4 by construction.
+            //
+            // D30's rule is that a face gates on the SYMBOL, so the symbol gets its own entry and
+            // its own reported name. A Pro 6.0 site now answers `layout_title: true,
+            // layout_metadata: false`: the label runs the filter family, and there are genuinely
+            // no disabled or renamed rows to report. The two facts are independent and the tool
+            // says both.
+            //
+            // STILL OPTIONAL, NEVER REQUIRED, for the reason the file header gives: a required
+            // METHOD is probed at `plugins_loaded`, where `acf_get_field_type()` is NULL, and the
+            // module would never register on a site that has everything.
+            'layout_title' => array(
+                'functions' => array('acf_get_field_type'),
+                'methods'   => array(
+                    array(
+                        'probe' => 'wpmcp_acf_flexible_content',
+                        'names' => array('get_layout_title'),
                     ),
                 ),
             ),
@@ -278,6 +293,19 @@ function wpmcp_acf_layout_metadata_available() {
     $capabilities = wpmcp_module_face_capabilities('acf');
 
     return !empty($capabilities['layout_metadata']);
+}
+
+/**
+ * True when this site provides `get_layout_title()` - a SEPARATE question from the one above,
+ * because the two have different floors (review 81, S3).
+ *
+ * `get_layout_title()` and the `acf/fields/flexible_content/layout_title` filter family it runs
+ * predate the 6.5 disable/rename feature, so a Pro 6.0 site answers true here and false there.
+ */
+function wpmcp_acf_layout_title_available() {
+    $capabilities = wpmcp_module_face_capabilities('acf');
+
+    return !empty($capabilities['layout_title']);
 }
 
 /**
@@ -469,16 +497,52 @@ function wpmcp_acf_field_entry($field, $object) {
  * said the rule had been "read off ACF's own renderer rather than guessed". It read the logic
  * instead of calling it.
  *
- * THE VALUE IS PASSED BECAUSE THE FILTER GETS A LOOP. `get_title()` opens an `acf_add_loop()`
- * around the field, the index and the row's value before it filters, so a filter that reads
- * `get_sub_field()` to build a title from the row's own content - which is the documented use -
- * sees the row. A dropped row has no formatted value to pass and gets `array()`, which is the
- * same thing `get_layout_title()` is called with from ACF's own AJAX handler for a new row.
+ * THE ROW MUST BE THE RAW, KEY-KEYED ONE, AND ROUND 1 PASSED THE FORMATTED, NAME-KEYED ONE -
+ * WHICH INVERTED THE WHOLE POINT (review 81, B1; MEASURED, twice, against ACF Pro 6.8.10).
+ *
+ * `get_title()` opens an `acf_add_loop()` around the row so that the filter can read the row's own
+ * content, and ACF's documentation gives exactly one example of the filter, which does that:
+ * `if ($text = get_sub_field('text')) { $title .= '<b>' . esc_html($text) . '</b>'; }`.
+ * `get_sub_field_object()` resolves the value with `get_row_sub_value($sub_field['KEY'])`
+ * (`includes/api/api-template.php:932-951`, `:773-790`), so the row has to be keyed by sub-field
+ * KEY - which is what `Flexible_Content::load_value()` builds
+ * (`pro/fields/class-acf-field-flexible-content.php:544-598`: `$rows[$i][$sub_field['key']]`) and
+ * what BOTH of ACF's own callers pass: the wp-admin renderer iterates `$this->field['value']`
+ * (`src/Pro/Fields/FlexibleContent/Render.php:159-172`) and the AJAX title handler passes
+ * `$_POST['value']` (`:1320-1356`).
+ *
+ * Round 1 passed `acf_format_value_for_rest()`'s output, which is keyed by sub-field NAME. So every
+ * `get_sub_field()` inside the filter returned NULL, and on a site using the filter the documented
+ * way the label came back EMPTY - worse than the stored label it replaced, on the exact sites the
+ * fix was written for. MEASURED: `'Hero :: NULL'` name-keyed against `'Hero :: ROW ZERO'` key-keyed.
+ *
+ * THE RAW ROW COSTS NO EXTRA ACF CALL. `get_field_object($name, $id, false, true)` leaves the
+ * `load_value()` output in `$field['value']` - MEASURED identical to `acf_get_value($id, $field)` -
+ * so a surviving row is `$field['value'][$index]` and nothing new is read.
+ *
+ * AND A DROPPED ROW IS NOT `array()`, WHICH WAS THE OTHER HALF OF THE SAME MISTAKE. `load_value()`
+ * skips a disabled row, so `$field['value']` has a gap there. An empty row does not make the filter
+ * see nothing: `get_sub_field_object()` falls back to `acf_get_value($row['post_id'], $sub_field)`
+ * and the loop's `post_id` is 0, so `acf_get_valid_post_id(0)` GUESSES from `get_the_ID()` and the
+ * queried object - which in a REST request is not this caller's object. MEASURED: `'Hero :: NULL'`
+ * for a dropped row passed `array()`. So the row is REBUILT the way `load_value()` would have built
+ * it, by wpmcp_acf_dropped_row(), and the filter then sees the dropped row's OWN values -
+ * `'Hero :: ROW ONE'`, which is what wp-admin shows for a disabled row.
+ *
+ * WHAT THIS HANDS THE SITE'S OWN FILTER, AND IT IS A DELIBERATE EXCEPTION TO THE ONE-READ-PRIMITIVE
+ * RULE. The row is UNFORMATTED and NOT permission-reduced, because that is the row ACF's renderer
+ * passes and a reduced one would answer differently from wp-admin - which is the defect, again. So a
+ * site-author filter that composes a title out of a sub-value can put a value on the wire that did
+ * not come through `wpmcp_acf_format()`. Bounded, and recorded as a ledger row: the filter is the
+ * site owner's own code, it already has `get_field()`, and whatever it returns is the string
+ * wp-admin renders in the layout handle for any editor. It is not a route a CALLER can reach - a
+ * token holder cannot add a filter - and the module has no write surface, so nothing read here is
+ * written back. A site that does not want a sub-value in a layout title does not put one there.
  *
  * @param array      $field  the Flexible Content field array
  * @param array|null $layout the layout definition, or null when the stored name has none
  * @param int        $index  the row's ORIGINAL index
- * @param mixed      $value  the row's formatted value, or array() when there is none
+ * @param mixed      $value  the RAW, key-keyed row - never the formatted one
  * @return string
  */
 function wpmcp_acf_layout_label($field, $layout, $index, $value) {
@@ -486,10 +550,19 @@ function wpmcp_acf_layout_label($field, $layout, $index, $value) {
 
     // A layout name in the stored value with no matching definition - a layout the editor
     // DELETED from the field group - has no label anywhere to ask for.
-    if (!is_array($layout) || !wpmcp_acf_layout_metadata_available()) { return $own; }
+    //
+    // AND THE GATE IS THIS METHOD'S OWN CAPABILITY, NOT THE LAYOUT-METADATA ONE (review 81, S3).
+    // Round 1 gated it on `layout_metadata`, whose floor is ACF Pro 6.5, and justified that with
+    // "Flexible Content is a PRO field type, so where these two accessors are missing there are no
+    // rows to label". FALSE: Flexible Content rows exist in every Pro version - what arrived in 6.5
+    // is the DISABLE AND RENAME feature. The filter family is "Added in version 5.3.6" (ACF's own
+    // docs), so on Pro 5.11-6.4 the defect this fix exists to close was still open, by construction,
+    // under a docblock saying there was nothing to close. D30's answer is to gate on the SYMBOL, so
+    // `get_layout_title` has its own optional capability and this asks for that one.
+    if (!is_array($layout) || !wpmcp_acf_layout_title_available()) { return $own; }
 
-    // Same object, same guard and same absence of a second check as the two accessors above:
-    // the face is what proves `get_layout_title` is there, and it is declared beside them.
+    // Same object and the same absence of a second check as the two accessors above: the face is
+    // what proves `get_layout_title` is there.
     $title = wpmcp_acf_flexible_content()->get_layout_title(
         $field,
         $layout,
@@ -501,10 +574,15 @@ function wpmcp_acf_layout_label($field, $layout, $index, $value) {
     // returns `wp_kses( apply_filters( ..., esc_html( $label ) ), 'acf' )`, because its only caller
     // in ACF echoes it into a wp-admin span. Our `label` goes onto a JSON wire, where `&amp;` is
     // not an ampersand - shipping ACF's output verbatim would put entity garbage in front of the
-    // caller, which is the same defect as double-escaping an admin notice. `wp_specialchars_decode(
-    // $title, ENT_QUOTES )` is the exact inverse of `_wp_specialchars( $text, ENT_QUOTES )` that
-    // `esc_html()` applied, so on a site with no filter the answer is byte-identical to the
-    // layout's own stored label.
+    // caller, which is the same defect as double-escaping an admin notice.
+    //
+    // IT IS A RENDERING, NOT AN INVERSE, AND ROUND 1 CLAIMED "BYTE-IDENTICAL TO THE STORED LABEL"
+    // (review 81, S4 - MEASURED). `esc_html()` calls `_wp_specialchars($text, ENT_QUOTES)` with
+    // `$double_encode = false` (`wp-includes/formatting.php:945`), so an entity ALREADY in the
+    // stored label is not re-encoded on the way out and this decode then decodes it: a label stored
+    // as `Tom &amp;amp; Jerry` comes back as `Tom &amp; Jerry`. What the wire carries is the TEXT AN
+    // EDITOR SEES RENDERED, which is the D29 answer and is the point - but it is not the stored
+    // bytes, so a client comparing this against a field-group JSON export can find a difference.
     //
     // WHAT IS NOT UNDONE, and it is the seam to watch: a filter that deliberately returns MARKUP
     // gets its markup through `wp_kses`'s `acf` allow-list and onto the wire as markup. That is
@@ -589,14 +667,37 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         }
 
         $isDisabled = in_array($index, $disabled, true);
-        $row        = array(
+
+        // A DROPPED ROW IS LOADED ONCE AND USED TWICE, because both uses want the same
+        // `acf_get_value()` per sub-field and doing it twice would double the reads on the one
+        // path that is already the most expensive: `values` wants it FORMATTED and name-keyed for
+        // the wire, and the layout-title filter wants it RAW and key-keyed, the way
+        // `load_value()` would have built the row ACF skipped. See wpmcp_acf_dropped_row().
+        $dropped = $isDisabled
+            ? wpmcp_acf_dropped_row($field, $object, $index, $layouts, $layoutName)
+            : null;
+
+        // THE ROW THE LAYOUT-TITLE FILTER GETS, AND IT IS THE RAW ONE (review 81, B1). A surviving
+        // row is `$field['value'][$index]` - `get_field_object()`'s `load_value()` output, keyed by
+        // sub-field KEY, which is what ACF's own callers pass and what `get_sub_field()` can read.
+        // Round 1 passed `$formatted[$index]`, keyed by NAME, and every `get_sub_field()` in the
+        // filter answered NULL.
+        $loopRow = array();
+
+        if ($dropped !== null) {
+            $loopRow = $dropped['raw'];
+        } elseif (isset($field['value'][$index]) && is_array($field['value'][$index])) {
+            $loopRow = $field['value'][$index];
+        }
+
+        $row = array(
             'index'    => $index,
             'layout'   => $layoutName,
             // THE LABEL THE EDITOR SEES, and the fallback half is now ACF'S OWN CALL rather than
             // our reading of it (sprint CORE-FIX) - see wpmcp_acf_layout_label().
             'label'    => isset($renamed[$index]) && $renamed[$index] !== ''
                 ? (string) $renamed[$index]
-                : wpmcp_acf_layout_label($field, isset($layouts[$layoutName]) ? $layouts[$layoutName] : null, $index, isset($formatted[$index]) ? $formatted[$index] : array()),
+                : wpmcp_acf_layout_label($field, isset($layouts[$layoutName]) ? $layouts[$layoutName] : null, $index, $loopRow),
             'renamed'  => isset($renamed[$index]) && $renamed[$index] !== '',
             'disabled' => $isDisabled,
         );
@@ -604,8 +705,8 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         // ONLY A DROPPED ROW CARRIES `values`, because a surviving row's values are already in
         // the field's own `value` under this index and repeating them would double the payload of
         // every read on jaygroup's 20,638 repeater rows.
-        if ($isDisabled) {
-            $row['values'] = wpmcp_acf_dropped_row_values($field, $object, $index, $layouts, $layoutName);
+        if ($dropped !== null) {
+            $row['values'] = $dropped['values'];
         }
 
         $rows[] = $row;
@@ -615,7 +716,16 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
 }
 
 /**
- * The values of a row ACF dropped, keyed by sub-field name.
+ * A row ACF dropped, in the TWO SHAPES its two consumers need, from one read per sub-field.
+ *
+ *   `values`  formatted, permission-reduced, keyed by the sub-field NAME a caller sees. The wire.
+ *   `raw`     unformatted, keyed by sub-field KEY, plus `acf_fc_layout` - exactly the row
+ *             `Flexible_Content::load_value()` would have built had it not skipped this one, which
+ *             is what the layout-title filter's loop has to be given (review 81, B1). NOT for the
+ *             caller and never returned to one; see wpmcp_acf_layout_label().
+ *
+ * ONE FUNCTION RATHER THAN TWO because both shapes come from the same `acf_get_value()` per
+ * sub-field, and a dropped row is already the most expensive path this module has.
  *
  * THE KEY SET IS COMPLETE BY CONSTRUCTION, and the VALUES are as complete as ACF's own row loading
  * - which is a narrower claim than round 1 made and the only one this code can support. The keys
@@ -633,14 +743,14 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
  * change would show up first.
  *
  * @param array<string, array> $layouts layout name => the layout definition
- * @return array<string, mixed>
+ * @return array{values: array<string, mixed>, raw: array<string, mixed>}
  */
-function wpmcp_acf_dropped_row_values($field, $object, $index, $layouts, $layoutName) {
+function wpmcp_acf_dropped_row($field, $object, $index, $layouts, $layoutName) {
     $parent = isset($field['name']) ? (string) $field['name'] : '';
-    $values = array();
+    $out    = array('values' => array(), 'raw' => array('acf_fc_layout' => (string) $layoutName));
 
     if ($parent === '' || !isset($layouts[$layoutName]['sub_fields'])) {
-        return $values;
+        return $out;
     }
 
     foreach ((array) $layouts[$layoutName]['sub_fields'] as $sub) {
@@ -667,15 +777,23 @@ function wpmcp_acf_dropped_row_values($field, $object, $index, $layouts, $layout
         // get_field_object() is built on, and it resolves the meta through ACF's own per-location
         // classes - which also removed this module's multilingual-options caveat.
         $sub['name'] = $parent . '_' . (int) $index . '_' . (string) $sub['name'];
+        $raw         = acf_get_value($object['acf_id'], $sub);
 
-        $values[(string) $sub['name']] = wpmcp_acf_format(
-            acf_get_value($object['acf_id'], $sub),
-            $object['acf_id'],
-            $sub
-        );
+        // BOTH SHAPES, FROM ONE READ. `values` is formatted and permission-reduced through the one
+        // read primitive, keyed by the name a caller sees. `raw` is keyed by sub-field KEY and left
+        // unformatted, because it is not for the caller: it is the row the layout-title filter is
+        // given, and `load_value()` builds that from the same `acf_get_value()` result with no
+        // formatting (`pro/fields/class-acf-field-flexible-content.php:593-598`). See
+        // wpmcp_acf_layout_label() for what handing it to a site's own filter does and does not
+        // expose.
+        $out['values'][(string) $sub['name']] = wpmcp_acf_format($raw, $object['acf_id'], $sub);
+
+        if (isset($sub['key']) && (string) $sub['key'] !== '') {
+            $out['raw'][(string) $sub['key']] = $raw;
+        }
     }
 
-    return $values;
+    return $out;
 }
 
 /**

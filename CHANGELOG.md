@@ -104,14 +104,21 @@ the finding, and it is the reason the audit was commissioned: a copy of somebody
 drifts, and theirs cannot drift from itself. Each fix was swept for its whole class rather than its
 one call site.
 
-- **The code tools were advertised and refused on every multisite install.** WordPress denies
-  `edit_themes` on THREE conditions - `DISALLOW_FILE_EDIT`, the `file_mod_allowed` filter, and a
-  network plus a caller who is not a super admin - and this plugin's copy of that decision had the
-  first two. So a Site Administrator on a network, who holds `edit_themes` in their role, saw all six
-  code tools in `tools/list` and was refused every one of them at call time. That is the exact state
-  the listing gate was written to prevent. The same branch was missing from `list-plugins`, where
-  `auto_update` answered true or false for a caller WordPress says cannot update plugins at all; it
-  is `null` for them now, and the tool's description says why.
+- **The code tools were advertised and refused on every multisite install, and the listing no longer
+  has an opinion of its own about when.** WordPress denies `edit_themes` on THREE conditions -
+  `DISALLOW_FILE_EDIT`, the `file_mod_allowed` filter, and a network plus a caller who is not a super
+  admin - and this plugin's copy of that decision had the first two. So a Site Administrator on a
+  network, who holds `edit_themes` in their role, saw all six code tools in `tools/list` and was
+  refused every one of them at call time: the exact state the listing gate was written to prevent.
+  Completing the copy would have left a copy, so the copy is gone - the gate asks
+  `map_meta_cap('edit_themes', ...)`, which answers that question and only that question, and a
+  hardening plugin that denies the capability on WordPress's own `map_meta_cap` filter now switches
+  the listing off too. Which of the reasons it was is still named in the refusal, because an operator
+  who set a constant deliberately and one whose host set another need different sentences.
+  The same missing branch was in `list-plugins`, where `auto_update` answered true or false for a
+  caller WordPress says cannot update plugins at all; it is `null` for them now, and the tool's
+  description says why. That one still reads the constant rather than asking WordPress, because
+  asking runs a filter the tool promises not to run.
 - **A mint failure on Settings > WP MCP was escaped twice**, so an operator whose token was refused
   read `&amp;` for an ampersand and `&#039;` for an apostrophe at the one moment the message
   mattered. The notice is escaped where it is printed, once.
@@ -126,7 +133,14 @@ one call site.
   calling ACF's own public `get_layout_title()`, which runs the documented
   `acf/fields/flexible_content/layout_title` filter family. On any site using those filters, wp-admin
   and this tool disagreed about the label the editor sees. An editor's rename still wins over it -
-  ACF applies that at render time and its public method cannot return one.
+  ACF applies that at render time and its public method cannot return one. The filter is given the
+  row ACF's own renderer gives it, so a filter that builds a title out of the row's content with
+  `get_sub_field()` - the one example ACF's documentation gives - sees the row; and a row ACF dropped
+  is rebuilt for it rather than passed empty, so its label comes from its own values.
+  The `acf` object in every read now reports `layout_title` as a capability of its own, because
+  `get_layout_title()` and its filters are older than the 6.5 disable/rename feature: an ACF Pro
+  between 5.11 and 6.4 filters its layout titles and has no disabled rows, and reporting the two as
+  one had left the label wrong across that whole version range.
 - **And `get-acf-values` built the ACF object id by hand**, where `acf_get_valid_post_id()` appends a
   language suffix to `options` on a multilingual site. `acf_get_value()` is the one ACF reader that
   does not normalise its own argument, and it is the call this module makes for a row ACF dropped -

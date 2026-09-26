@@ -137,6 +137,118 @@ final class CoreFixTest extends TestCase
     }
 
     /**
+     * THE LISTING ASKS `map_meta_cap()` AND NO LONGER RESTATES CORE'S BRANCH SET (round 2, S2).
+     *
+     * ROUND 1 FIXED THE COPY BY COMPLETING IT, WHICH LEFT A COPY. D32's argument is not "our branch
+     * set is wrong", it is "a branch set of our own can go wrong", and the mechanism that removes it
+     * has a name: `map_meta_cap('edit_themes', $user_id)` (wp-includes/capabilities.php:45) runs
+     * core's whole `edit_themes` case (`:607-618`) and answers `['do_not_allow']` on any of its three
+     * site-level branches, WITHOUT testing whether the user holds the capability - which is exactly
+     * the question the listing asks and the reason `current_user_can()` was rejected.
+     *
+     * HOW A DELEGATION IS TOLD FROM A COPY IN THIS TIER, and it is the whole design of this test.
+     * The runtime stub for `map_meta_cap` carries core's own three branches, so on every ordinary
+     * state a gate that asks and a gate that restates answer identically - a behavioural test would
+     * be green either way. So the answer is FORCED to something the branches would not produce: a
+     * plugin denying `edit_themes` on core's own `map_meta_cap` FILTER, on a single site with no
+     * constant set. A gate that reads the constants concludes "nothing forbids this" and lists six
+     * tools that `current_user_can()` then refuses - the advertised-and-refused defect, arriving
+     * through the one route the hand-copy could never see.
+     *
+     * @group sprint-core-fix
+     */
+    public function testTheCodeListingFollowsAPluginsCapabilityFilterRatherThanOurCopyOfCore(): void
+    {
+        WordPressRuntime::logInAs(7, 'an-admin');
+
+        self::assertNull(
+            wpmcp_code_constants_forbid(),
+            'Nothing forbids theme editing in the default stub state - a single site, no constants,'
+            . ' no filter - so the assertion below could not tell the filter from the constants.'
+        );
+
+        // A hardening plugin on core's own map_meta_cap filter. No constant is set and this is not
+        // a network, so NONE of the three branches a hand-copy would test is true.
+        WordPressRuntime::setMetaCap('edit_themes', ['do_not_allow']);
+
+        $refusal = wpmcp_code_constants_forbid();
+
+        self::assertNotNull(
+            $refusal,
+            'A plugin that denies edit_themes on core\'s map_meta_cap filter does not stop the code'
+            . ' tools being LISTED, so this gate is reading its own copy of core\'s branches instead'
+            . ' of asking core. Every such site advertises six tools and refuses all six.'
+        );
+        self::assertSame('wpmcp_forbidden', $refusal->get_error_code());
+        self::assertStringContainsString(
+            'edit_themes',
+            $refusal->get_error_message(),
+            'The refusal does not say that something denied the capability, so an operator whose'
+            . ' hardening plugin did this has nothing at all to go on. Got: '
+            . $refusal->get_error_message()
+        );
+
+        // AND THE ANSWER IS STILL CORE'S WHEN CORE ALLOWS IT: a filter that returns the capability
+        // does not refuse. Without this, a gate that refused whenever it saw a filtered answer -
+        // or simply always - would pass the assertion above.
+        WordPressRuntime::setMetaCap('edit_themes', ['edit_themes']);
+        self::assertNull(
+            wpmcp_code_constants_forbid(),
+            'The gate refuses on a site where core answers that theme editing is allowed, so it is'
+            . ' inverting map_meta_cap rather than reading it.'
+        );
+    }
+
+    /**
+     * And the REASON is still ours, naming which of the site's refusals it was.
+     *
+     * `map_meta_cap()` answers `do_not_allow` and does not say why, and the listing docblock's whole
+     * argument is that an operator who set DISALLOW_FILE_EDIT deliberately and one whose host set
+     * DISALLOW_FILE_MODS need different sentences. So the branches survive as an EXPLANATION, where
+     * a drift costs a slightly wrong reason rather than a hidden or falsely advertised tool.
+     *
+     * @group sprint-core-fix
+     */
+    public function testTheRefusalStillNamesWhichOfTheSitesRefusalsItWas(): void
+    {
+        WordPressRuntime::logInAs(7, 'an-admin');
+
+        WordPressRuntime::addFilter('file_mod_allowed', static fn ($allowed, $context = '') => false);
+
+        self::assertStringContainsString(
+            'file_mod_allowed',
+            wpmcp_code_forbidden_reason(),
+            'A site whose hardening plugin answers false from file_mod_allowed is not told which of'
+            . ' the three switched theme editing off.'
+        );
+
+        WordPressRuntime::install();
+        WordPressRuntime::logInAs(7, 'an-admin');
+        WordPressRuntime::setMultisite(true, [1]);
+
+        self::assertStringContainsString(
+            'multisite',
+            wpmcp_code_forbidden_reason(),
+            'A network install is not named as the reason, so a Site Administrator reading the'
+            . ' refusal cannot tell it from a constant somebody set.'
+        );
+
+        // AND THE FALL-THROUGH IS NOT SILENT. Reached when a map_meta_cap filter denied the
+        // capability for a reason of its own, which no branch here can name - but a refusal with no
+        // reason at all is what sends an operator to a support forum.
+        WordPressRuntime::install();
+        WordPressRuntime::logInAs(7, 'an-admin');
+
+        self::assertStringContainsString(
+            'edit_themes',
+            wpmcp_code_forbidden_reason(),
+            'With nothing on this site forbidding theme editing, the reason function answers'
+            . " something that does not name the capability - so a plugin's own denial arrives as a"
+            . ' refusal with no cause named.'
+        );
+    }
+
+    /**
      * THE CLASS SWEEP. Both places this plugin reproduces a core file-modification deny decision
      * carry core's multisite branch, and the second one is in the same file as the first.
      *

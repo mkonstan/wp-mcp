@@ -530,11 +530,13 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         }
 
         self::assertSame(
-            ['Hero [filtered] & more', 'Editor renamed me', 'Hero [filtered] & more'],
+            ['Hero :: Row zero & more', 'Editor renamed me', 'Hero :: Row two & more'],
             array_column($rows, 'label'),
             'The label a site\'s own acf/fields/flexible_content/layout_title filter produces is'
             . " not what this tool reports, so wp-admin and get-acf-values disagree about the label"
-            . ' the editor sees. The renamed row must still report the rename: ACF applies the'
+            . ' the editor sees. `:: NULL` means the filter RAN and could not SEE the row - the row'
+            . ' it was given is keyed by sub-field NAME and get_sub_field() resolves by KEY, which'
+            . ' is review 81 B1. The renamed row must still report the rename: ACF applies the'
             . ' rename at render time and get_layout_title() cannot return one.'
         );
 
@@ -558,19 +560,103 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * The mu-plugin body for the test above: one filter on ACF's own documented hook.
+     * SPRINT CORE-FIX ROUND 2: the same fix, on the row ACF DROPPED - which has no raw row to pass
+     * and must be REBUILT rather than passed empty.
+     *
+     * WHY IT NEEDS ITS OWN POST. The class fixture's disabled row is also RENAMED, so its label
+     * comes from the rename and never from the filter - the test above cannot reach the dropped-row
+     * path at all. This builds one post whose second row is disabled and NOT renamed, so the label
+     * is the filtered title and the filter has to see a row `load_value()` skipped.
+     *
+     * WHAT GOES WRONG WITHOUT THE REBUILD, and it is not "the filter sees nothing":
+     * `get_sub_field_object()` falls back to `acf_get_value($row['post_id'], $sub_field)`, and
+     * `Layout::get_title()` opens its loop with `post_id => 0` - so `acf_get_valid_post_id(0)`
+     * GUESSES from `get_the_ID()` and then the queried object, which in a REST request is not this
+     * caller's object. The answer is unpredictable rather than empty, which is worse.
+     *
+     * @group acf-data
+     */
+    public function testADroppedRowsLabelIsBuiltFromTheRowAcfSkipped(): void
+    {
+        $slug   = 'acf-layout-title-filter';
+        $prefix = self::fieldPrefix();
+        $host   = Fixtures::createPost(Fixtures::name('acf-dropped-label-host'), 'publish', self::$authorId, 'dropped label');
+
+        WpCli::evaluate(sprintf(
+            'update_field(%s, array('
+            . '   array("acf_fc_layout" => "hero", "heading" => "Kept row"),'
+            . '   array("acf_fc_layout" => "hero", "heading" => "Dropped row",'
+            . '         "acf_fc_layout_disabled" => 1)'
+            . ' ), %d);'
+            . ' echo "ok";',
+            self::phpString($prefix . 'blocks'),
+            $host
+        ));
+
+        MuPlugin::drop($slug, self::layoutTitleFilterSource());
+
+        try {
+            $rows = self::field($this->read(self::$adminToken, ['id' => $host]), $prefix . 'blocks')['rows'];
+        } finally {
+            MuPlugin::remove($slug);
+        }
+
+        self::assertSame(
+            [false, true],
+            array_column($rows, 'disabled'),
+            'The fixture is not the shape this test is about: it needs a kept row and a DISABLED,'
+            . ' un-renamed one.'
+        );
+        self::assertSame(
+            [false, false],
+            array_column($rows, 'renamed'),
+            'The dropped row is reported as renamed, so its label would come from the rename and'
+            . ' this test would prove nothing about the filter.'
+        );
+
+        self::assertSame(
+            ['Hero :: Kept row & more', 'Hero :: Dropped row & more'],
+            array_column($rows, 'label'),
+            "The dropped row's label was not built from the dropped row's OWN values. `:: NULL`"
+            . ' means it was passed an empty row and ACF\'s fallback found nothing; the other row\'s'
+            . ' heading means it was passed the wrong row. `load_value()` skips a disabled row, so'
+            . ' the row the filter needs has to be rebuilt the way load_value() would have built it'
+            . ' - keyed by sub-field KEY, unformatted.'
+        );
+
+        Fixtures::deletePost($host);
+    }
+
+    /**
+     * The mu-plugin body for the two tests above: one filter on ACF's own documented hook, and it
+     * READS THE ROW, because that is the whole question.
+     *
+     * ROUND 1'S FILTER RETURNED `$title . " [filtered] & more"` and that is why the defect shipped:
+     * a filter that ignores the loop proves the filter FIRES and nothing about what it can SEE. ACF
+     * documents exactly one example of this filter and it reads a sub field
+     * (`if ($text = get_sub_field('text')) { $title .= '<b>' . esc_html($text) . '</b>'; }`), so the
+     * documented use is the use the test has to make.
+     *
+     * NULL IS SPELLED OUT rather than concatenated away, because `$title . null` is `$title` and a
+     * missing row would then look like a filter that simply did not append anything.
      *
      * `/name=` RATHER THAN THE BASE HOOK, deliberately: the base hook is the one a reader expects
      * and the `/name=` variant is the one a site actually uses, and both are applied by
      * `Layout::get_title()` in that order. Using the narrow one proves the whole family arrives.
      * The field's `_name` is the fixture's prefixed `..._blocks`.
+     *
+     * ` & more` STAYS, for the entity half: `wp_kses()` normalises the bare `&` to `&amp;`, so a
+     * label that reaches the wire with `&amp;` in it is ACF's escaping shipped undecoded.
      */
     private static function layoutTitleFilterSource(): string
     {
         return 'add_filter('
             . '"acf/fields/flexible_content/layout_title/name=" . ' . self::phpString(self::fieldPrefix() . 'blocks') . ','
             . ' function ($title, $field, $layout, $i) {'
-            . ' return $title . " [filtered] & more"; }, 10, 4);';
+            . ' $heading = get_sub_field("heading");'
+            . ' if ($heading === null) { $heading = "NULL"; }'
+            . ' if ($heading === "") { $heading = "EMPTY"; }'
+            . ' return $title . " :: " . $heading . " & more"; }, 10, 4);';
     }
 
     /**
@@ -757,7 +843,15 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * The read says which of the two guarantees this site provides, in its own output (item 7).
+     * The read says which of the guarantees this site provides, in its own output (item 7).
+     *
+     * THREE NOW, NOT TWO (sprint CORE-FIX round 2, review 81 S3). `layout_title` is a separate
+     * capability from `layout_metadata` because the two have separate floors: the
+     * `acf/fields/flexible_content/layout_title` filter family and `get_layout_title()` predate the
+     * 6.5 disable/rename accessors, so an ACF Pro 5.11-6.4 site answers `layout_title: true,
+     * layout_metadata: false` - it filters its layout titles and has no disable feature. Reporting
+     * them as one had folded those two facts together and left the label wrong on that whole
+     * version range.
      *
      * @group acf-data
      */
@@ -766,10 +860,11 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         $read = $this->read(self::$adminToken);
 
         self::assertSame(
-            ['values' => true, 'layout_metadata' => true],
+            ['values' => true, 'layout_metadata' => true, 'layout_title' => true],
             $read['acf'],
             'The read does not state which halves of the ACF face this site provides, so a caller'
-            . ' cannot tell "no disabled layouts" from "this ACF cannot report them".'
+            . ' cannot tell "no disabled layouts" from "this ACF cannot report them", or "the label'
+            . ' is filtered" from "the label is the stored one".'
         );
         self::assertSame(
             ['type' => 'post', 'id' => self::$host, 'acf_id' => self::$host],

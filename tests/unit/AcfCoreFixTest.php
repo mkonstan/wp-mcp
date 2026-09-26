@@ -168,8 +168,96 @@ final class AcfCoreFixTest extends TestCase
             $source,
             "ACF's HTML escaping is being shipped onto the JSON wire. get_title() applies"
             . ' esc_html() because its own caller prints into wp-admin; a caller of this tool reads'
-            . ' `&amp;` where the editor sees `&`. wp_specialchars_decode(..., ENT_QUOTES) is the'
-            . " exact inverse of the _wp_specialchars() that esc_html() applied."
+            . ' `&amp;` where the editor sees `&`.'
+        );
+
+        // AND THE FILE NO LONGER CLAIMS THAT DECODE IS AN INVERSE (round 2, review 81 S4).
+        // `esc_html()` passes `$double_encode = false`, so an entity already in the stored label
+        // survives the escape and is then DECODED here: `Tom &amp;amp; Jerry` comes back as
+        // `Tom &amp; Jerry`. MEASURED. The answer is the text an editor sees rendered - which is
+        // the D29 answer - and it is not the stored bytes.
+        self::assertStringNotContainsString(
+            'byte-identical to the',
+            $source,
+            'The file still claims the decoded title is byte-identical to the stored label. It is'
+            . ' not: esc_html() does not double-encode, so an entity already in the label is'
+            . ' decoded rather than round-tripped.'
+        );
+        self::assertStringContainsString(
+            'IT IS A RENDERING, NOT AN INVERSE',
+            $source,
+            'The correction to that claim is gone, so the next author inherits the false version.'
+        );
+    }
+
+    /**
+     * ITEM 7(a), THE HALF ROUND 1 GOT BACKWARDS: the row handed to the filter is the RAW,
+     * KEY-KEYED one, and a DROPPED row is rebuilt rather than passed empty.
+     *
+     * WHY THIS IS THE ASSERTION THAT MATTERS. `Layout::get_title()` opens an `acf_add_loop()` so
+     * the filter can read the row, and ACF's documentation gives exactly one example of the filter
+     * doing so with `get_sub_field()`. `get_sub_field_object()` resolves through
+     * `get_row_sub_value($sub_field['KEY'])`, so the row must be keyed by sub-field KEY - which is
+     * what `load_value()` builds and what both of ACF's own callers pass. Round 1 passed
+     * `acf_format_value_for_rest()`'s output, keyed by NAME, so every `get_sub_field()` answered
+     * NULL and the label came back EMPTY on exactly the sites the fix was for: WORSE than the
+     * stored label it replaced. MEASURED against ACF Pro 6.8.10: `'Hero :: NULL'` name-keyed
+     * against `'Hero :: ROW ZERO'` key-keyed.
+     *
+     * AND AN EMPTY ROW IS NOT NEUTRAL EITHER. `get_sub_field_object()` falls back to
+     * `acf_get_value($row['post_id'], $sub_field)` and the loop's `post_id` is 0, so
+     * `acf_get_valid_post_id(0)` guesses from `get_the_ID()` and the queried object - not this
+     * caller's object in a REST request. MEASURED: `'Hero :: NULL'` for a dropped row passed
+     * `array()`, `'Hero :: ROW ONE'` for the same row rebuilt.
+     *
+     * A SOURCE ASSERTION HERE, and the behaviour over HTTP against real ACF in
+     * tests/integration/AcfValueReadTest.php, whose filter now READS `get_sub_field()` - because a
+     * filter that ignores the loop proves the filter fires and nothing about what it can see, which
+     * is why round 1's integration test was green on the defect.
+     *
+     * @group sprint-core-fix
+     */
+    public function testTheLayoutTitleFilterIsGivenTheRawKeyKeyedRow(): void
+    {
+        $source = RepoFile::read('modules/acf.php');
+
+        self::assertStringContainsString(
+            "\$loopRow = \$field['value'][\$index];",
+            $source,
+            "A surviving row's loop row is not `\$field['value'][\$index]`, the load_value() output"
+            . ' keyed by sub-field KEY. If it is the formatted value again, every get_sub_field() in'
+            . ' a layout_title filter returns NULL and the label comes back empty.'
+        );
+        self::assertStringNotContainsString(
+            'isset($formatted[$index]) ? $formatted[$index] : array()',
+            $source,
+            'The formatted, NAME-keyed row is being handed to the filter again. That is the defect:'
+            . ' get_sub_field() resolves by sub-field KEY.'
+        );
+
+        // A DROPPED ROW IS REBUILT, NOT PASSED EMPTY - and it is rebuilt keyed by KEY.
+        self::assertStringContainsString(
+            "\$loopRow = \$dropped['raw'];",
+            $source,
+            'A dropped row is handed something other than the rebuilt raw row, so the filter falls'
+            . " back to acf_get_value() with the loop's post_id of 0 and ACF guesses which object it"
+            . ' is on.'
+        );
+        self::assertStringContainsString(
+            "\$out['raw'][(string) \$sub['key']] = \$raw;",
+            $source,
+            "The rebuilt row is not keyed by sub-field KEY, or is not unformatted - load_value()"
+            . ' stores the bare acf_get_value() result under $sub_field[\'key\'] and the filter'
+            . ' reads it by that key.'
+        );
+
+        // AND `values` STILL GOES THROUGH THE ONE READ PRIMITIVE. The raw shape exists for the
+        // filter's loop only; a caller must never receive an unreduced value.
+        self::assertStringContainsString(
+            "\$out['values'][(string) \$sub['name']] = wpmcp_acf_format(\$raw, \$object['acf_id'], \$sub);",
+            $source,
+            "The dropped row's wire values no longer go through wpmcp_acf_format(), so the"
+            . ' permission reduction is skipped on the one path that was added for D29.'
         );
     }
 
@@ -179,13 +267,20 @@ final class AcfCoreFixTest extends TestCase
      * `acf_get_valid_post_id` is REQUIRED: every read goes through it, and it is `@since 5.0.0`,
      * so it is present wherever the 5.11 floor is and the floor does not move.
      *
-     * `get_layout_title` is OPTIONAL, in the existing `layout_metadata` capability, and that is
-     * the part a future author must not "tidy". A required METHOD is probed by
-     * wpmcp_module_face_missing() at `plugins_loaded`, where ACF's field types have not been
-     * registered yet (`acf/include_field_types` fires from `init` priority 5) - so
-     * `acf_get_field_type('flexible_content')` is NULL, the probe reports the method missing, and
-     * the module never registers on a site that has everything. The module's own header says this;
-     * this asserts it.
+     * `get_layout_title` is OPTIONAL, and in ITS OWN capability rather than in `layout_metadata`
+     * (round 2, review 81 S3). Round 1 folded it into `layout_metadata`, whose floor is ACF Pro 6.5,
+     * on the premise that "where these two accessors are missing there are no rows to label" -
+     * FALSE: Flexible Content rows exist in every Pro version, and 6.5 brought the disable/rename
+     * FEATURE. The filter family is documented as "Added in version 5.3.6", so folding them together
+     * left the label wrong on Pro 5.11-6.4 by construction. D30's rule is to gate on the SYMBOL, so
+     * the symbol gets its own entry and its own reported name.
+     *
+     * STILL OPTIONAL, NEVER REQUIRED, and that is the part a future author must not "tidy". A
+     * required METHOD is probed by wpmcp_module_face_missing() at `plugins_loaded`, where ACF's
+     * field types have not been registered yet (`acf/include_field_types` fires from `init`
+     * priority 5) - so `acf_get_field_type('flexible_content')` is NULL, the probe reports the
+     * method missing, and the module never registers on a site that has everything. The module's
+     * own header says this; this asserts it.
      *
      * @group sprint-core-fix
      */
@@ -202,12 +297,29 @@ final class AcfCoreFixTest extends TestCase
         );
 
         self::assertNotEmpty($face['optional']['layout_metadata']['methods'], 'The layout-metadata methods went.');
-        self::assertContains(
-            'get_layout_title',
+        self::assertSame(
+            ['get_disabled_layouts', 'get_renamed_layouts'],
             $face['optional']['layout_metadata']['methods'][0]['names'],
-            'get_layout_title is not declared, so ModuleApiFaceTest reports it as a foreign symbol'
-            . ' the module reaches for undeclared - and on ACF Pro below 6.5 the module would call'
-            . ' a method that is not there.'
+            'layout_metadata declares something other than the two 6.5 accessors it is named for.'
+        );
+
+        // AND get_layout_title IS ITS OWN CAPABILITY, WITH ITS OWN FLOOR. Folding it back into
+        // layout_metadata would re-open the defect on every ACF Pro 5.11-6.4 site: the filter
+        // family predates 6.5, so a site with the filter and without the disable feature would
+        // silently keep the stored label while wp-admin shows the filtered title.
+        self::assertArrayHasKey(
+            'layout_title',
+            $face['optional'],
+            'get_layout_title has no capability of its own, so it is gated on a floor that is not'
+            . ' its own. It and the acf/fields/flexible_content/layout_title filter family predate'
+            . ' the 6.5 disable/rename accessors.'
+        );
+        self::assertSame(
+            ['get_layout_title'],
+            $face['optional']['layout_title']['methods'][0]['names'],
+            'The layout_title capability does not declare exactly the one method it is for, so'
+            . ' either ModuleApiFaceTest reports a foreign symbol the module reaches for undeclared,'
+            . ' or the capability answers about a symbol nobody calls.'
         );
 
         // AND IT IS NOT IN THE REQUIRED HALF. This is the assertion the module header's warning
@@ -244,21 +356,23 @@ final class AcfCoreFixTest extends TestCase
             . ' check is not reading it and adding it to the declaration proved nothing.'
         );
 
-        // AND THE OPTIONAL HALF STILL DOES NOT GATE REGISTRATION. A new name in the optional
-        // methods list must not turn up here, or every ACF Pro site below 6.5 loses its values.
+        // AND NEITHER OPTIONAL CAPABILITY GATES REGISTRATION. A name in an optional methods list
+        // must not turn up here, or an ACF Pro site below 6.5 loses its VALUES over a layout
+        // feature it was never going to use.
         self::assertNotContains(
             '->get_layout_title()',
             $missing,
-            'get_layout_title is being treated as required. Flexible Content is a PRO field type,'
-            . ' so where the layout accessors are missing there are no layout rows to label and'
-            . ' refusing to serve VALUES over it invents a middle state.'
+            'get_layout_title is being treated as required. It refines a layout LABEL, and refusing'
+            . ' to serve values over its absence invents a middle state.'
         );
+        self::assertNotContains('->get_disabled_layouts()', $missing);
 
         self::assertSame(
-            ['layout_metadata' => false],
+            ['layout_metadata' => false, 'layout_title' => false],
             \wpmcp_module_face_capabilities('acf'),
-            'The optional capability is no longer reported as one capability, so the tool cannot'
-            . ' state which of the two guarantees the host site provides.'
+            'The two optional capabilities are not reported separately, so the tool cannot tell a'
+            . ' caller that this site filters its layout titles but has no disable/rename feature -'
+            . ' which is every ACF Pro between 5.11 and 6.4.'
         );
     }
 

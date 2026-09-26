@@ -55,10 +55,12 @@
 #             where this plugin restated a decision WordPress or ACF already makes, and the
 #             restatement drifted. Four of its assertions are SWEEPS over every shipped PHP file
 #             rather than checks of one call site, so a red one names the file and line it found -
-#             that is the class coming back, not the instance. The multisite branch of core's
-#             `edit_themes` denial is EXECUTED here against a stub that is core's own one-line
-#             body, because this project has no network install; a red one there is this plugin's
-#             copy of that branch, not WordPress's.
+#             that is the class coming back, not the instance.
+#             The code-tool listing no longer copies core's `edit_themes` deny branches at all: it
+#             asks `map_meta_cap()`, and the tier proves that by FORCING that function's answer
+#             through core's own `map_meta_cap` filter to something the branches would not produce.
+#             So a red there is the gate reading a copy again, not WordPress changing. The multisite
+#             states are still driven against stubs, because this project has no network install.
 sprint-0
 sprint-1
 sprint-2

@@ -154,10 +154,14 @@ final class AcfModuleTest extends TestCase
             );
         }
 
+        // TWO OPTIONAL CAPABILITIES SINCE SPRINT CORE-FIX ROUND 2, because they have two floors:
+        // `get_layout_title()` and the filter family it runs predate 6.5's disable/rename
+        // accessors, so an ACF Pro 5.11-6.4 site filters its layout titles and has no disable
+        // feature. Reporting them as one left the label wrong on that whole version range.
         self::assertSame(
-            ['layout_metadata' => false],
+            ['layout_metadata' => false, 'layout_title' => false],
             \wpmcp_module_face_capabilities('acf'),
-            'The optional capability is not reported, so the tool cannot state which of the two'
+            'The optional capabilities are not reported, so the tool cannot state which of the'
             . ' guarantees the host site provides.'
         );
     }
@@ -283,15 +287,21 @@ final class AcfModuleTest extends TestCase
 
         // AND THE OPTIONAL BLOCK IS WHERE THE METHODS ARE, or this assertion is about an empty face.
         //
-        // get_layout_title JOINED THEM IN SPRINT CORE-FIX, and it is here for the same reason they
-        // are: the layout label now comes from ACF's own method, which runs the documented
-        // acf/fields/flexible_content/layout_title filter family, and a method has to be declared
-        // or ModuleApiFaceTest reports it undeclared. Below ACF Pro 6.5 the whole capability is
-        // absent and the label falls back to the layout's own stored one.
         self::assertSame(
-            ['get_disabled_layouts', 'get_renamed_layouts', 'get_layout_title'],
+            ['get_disabled_layouts', 'get_renamed_layouts'],
             $face['optional']['layout_metadata']['methods'][0]['names'],
-            'The layout-metadata capability no longer declares the three methods it needs.'
+            'The layout-metadata capability no longer declares the two accessors it is named for.'
+        );
+
+        // AND get_layout_title IS A CAPABILITY OF ITS OWN (sprint CORE-FIX round 2). Round 1 put it
+        // in layout_metadata, whose floor is Pro 6.5 - but the method and the
+        // acf/fields/flexible_content/layout_title filter family are older, so that gated a fix on
+        // a version premise instead of on the symbol and left the label wrong on Pro 5.11-6.4.
+        self::assertSame(
+            ['get_layout_title'],
+            $face['optional']['layout_title']['methods'][0]['names'],
+            'get_layout_title is not declared in its own capability, so it is either undeclared -'
+            . ' which ModuleApiFaceTest reports - or gated on a floor that is not its own.'
         );
     }
 

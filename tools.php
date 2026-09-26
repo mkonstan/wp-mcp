@@ -142,63 +142,94 @@ function wpmcp_code_forbidden() {
  * the same split endpoint.php already makes between the scope gate and the capability
  * checks inside each tool.
  *
- * THE ONE EXCEPTION IS MULTISITE, AND IT IS CORE'S THIRD DENY BRANCH (sprint CORE-FIX).
- * `map_meta_cap`'s `edit_themes` case has THREE deny branches, not two
+ * AND THE SITE'S OWN REFUSALS ARE NO LONGER COPIED AT ALL - THEY ARE ASKED OF `map_meta_cap()`
+ * (sprint CORE-FIX, round 2). `map_meta_cap`'s `edit_themes` case has THREE deny branches
  * (wp-includes/capabilities.php:607-618): DISALLOW_FILE_EDIT, then
  * `wp_is_file_mod_allowed('capability_edit_themes')`, then
- * `is_multisite() && ! is_super_admin( $user_id )`. This function had the first two, so on
- * a network install every non-super-admin - including a Site Administrator, who holds
- * `edit_themes` in their role - was SHOWN all six code tools and refused every call. That is
- * the exact "advertised and refused" state the docblock above says this split fixed, and it
- * is D32's argument in one function: we copied core's check, got two branches of three, and
- * the copy drifted where core's cannot drift from itself.
+ * `is_multisite() && ! is_super_admin( $user_id )`. This function used to test the first two, so on
+ * a network install every non-super-admin - including a Site Administrator, who holds `edit_themes`
+ * in their ROLE - was SHOWN all six code tools and refused every call: the exact "advertised and
+ * refused" state the docblock above says this split fixed.
  *
- * SO THE THIRD BRANCH READS THE CALLER AND STILL BELONGS HERE. It is not a ROLE fact - no
- * role on a network grants theme file editing to a site administrator, and no token minted
- * for one can ever pass it - so "another token's user may" is false for every token except a
- * network administrator's. The registry is built inside the request, after the token's user
- * is the current user, so asking is well defined; and the split the paragraph above describes
- * is unchanged, because what stays out of here is the ROLE capability itself.
+ * ROUND 1 OF THIS SPRINT ADDED THE MISSING BRANCH, WHICH LEFT A COPY, AND A COPY IS THE DEFECT.
+ * D32's argument is not "our branch set is wrong", it is "a branch set of our own can go wrong" -
+ * so round 2 deletes it. `map_meta_cap('edit_themes', get_current_user_id())` answers exactly the
+ * question this function asks - does the SITE deny theme editing, whatever the role - because it
+ * runs those three branches and does not test whether the user holds the capability. There is now
+ * no second statement of the rule to drift.
+ *
+ * THE THIRD BRANCH READS THE CALLER, AND THAT IS WHY THIS FUNCTION MAY ASK IT. It is not a ROLE
+ * fact - no role on a network grants theme file editing to a site administrator, and no token
+ * minted for one can ever pass it - so "another token's user may" is false for every token except
+ * a network administrator's. The registry is built inside the request, after the token's user is
+ * the current user, so `get_current_user_id()` is that user; and the split the paragraph above
+ * describes is unchanged, because what stays out of here is the ROLE capability itself.
+ *
+ * WHY the refusal says is still ours, in wpmcp_code_forbidden_reason(), because `map_meta_cap()`
+ * answers `do_not_allow` and does not say which branch. A wrong REASON misinforms an operator; a
+ * wrong DECISION hides a tool they can use or advertises one they cannot. Only the second is what
+ * this function owes.
  */
 function wpmcp_code_constants_forbid() {
-    // THE FILE-MOD HALF IS THE PLATFORM'S ANSWER, NOT A CONSTANT READ (1.1.1).
-    // `wp_is_file_mod_allowed('capability_edit_themes')` (wp-includes/load.php:1829, since
-    // 4.8) is `! DISALLOW_FILE_MODS` passed through the `file_mod_allowed` filter, and it is
-    // the exact call `map_meta_cap` makes for `edit_themes` (capabilities.php:607-611) - so a
-    // hardening plugin that switches file editing off through that filter now switches the
-    // LISTING off too. Before this, such a site advertised all six code tools and refused
-    // every call, which is the same "advertised and refused" defect the constants split fixed
-    // for DISALLOW_FILE_EDIT, measured on seosemia.net (see the docblock above).
+    // THE DECISION IS CORE'S, ASKED OF CORE. `map_meta_cap('edit_themes', $user_id)`
+    // (wp-includes/capabilities.php:45) runs the whole `edit_themes` case - DISALLOW_FILE_EDIT,
+    // then `wp_is_file_mod_allowed('capability_edit_themes')`, then
+    // `is_multisite() && ! is_super_admin($user_id)` (`:607-618`) - and returns
+    // `array('do_not_allow')` when any of them denies and `array('edit_themes')` when none does.
+    // It does NOT test whether the user HOLDS the capability, which is exactly the split this
+    // function exists to make: the site's own three refusals decide the LISTING, the role decides
+    // the CALL, and wpmcp_code_forbidden() asks `current_user_can()` for the second half.
     //
-    // The context string is core's own for this capability, so a filter that answers
-    // per-context - which is why the parameter exists - gets asked the same question core
-    // asks it.
-    if (!wp_is_file_mod_allowed('capability_edit_themes')) {
-        return new WP_Error(
-            'wpmcp_forbidden',
-            defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS
-                ? 'File modification is disabled on this site (DISALLOW_FILE_MODS).'
-                : 'File modification is disabled on this site (the file_mod_allowed filter).'
-        );
-    }
-    // DISALLOW_FILE_EDIT STAYS A DIRECT CONSTANT READ, because core's is too: map_meta_cap
-    // tests the constant itself and has no filter in front of it, so there is nothing to
-    // delegate to and a filter of our own would disagree with `current_user_can`.
-    if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
-        return new WP_Error('wpmcp_forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
-    }
-    // CORE'S THIRD DENY BRANCH (capabilities.php:613), and it is LAST here because it is last
-    // there: when more than one applies, the operator is told about the one core would have
-    // stopped at. `is_super_admin()` with no argument asks about the current user, which is the
-    // same user `current_user_can('edit_themes')` resolves $user_id to - so the listing and the
-    // run closures cannot answer differently.
-    if (is_multisite() && !is_super_admin()) {
-        return new WP_Error(
-            'wpmcp_forbidden',
-            'Theme file editing on a network is limited to network administrators (multisite).'
-        );
+    // THIS REPLACED THREE HAND-COPIED BRANCHES, AND THAT IS THE WHOLE POINT OF THE SPRINT
+    // (D32; review 81, S2). Round 1 of sprint CORE-FIX fixed a copy of core's branch set by adding
+    // the branch it was missing - which left a copy. A copy drifts; this cannot, because there is
+    // no longer a second statement of the rule to drift from. The previous version also claimed
+    // its branches were "in core's order"; two of the three were in the OPPOSITE order, which is
+    // the kind of false detail a copy accumulates and a delegation cannot.
+    //
+    // IT RUNS THE `map_meta_cap` FILTER, and that is correct rather than a cost: the run closures'
+    // `current_user_can('edit_themes')` runs the same filter, so the listing and the call cannot
+    // answer differently - which is the one property this gate must have.
+    if (in_array('do_not_allow', (array) map_meta_cap('edit_themes', get_current_user_id()), true)) {
+        return new WP_Error('wpmcp_forbidden', wpmcp_code_forbidden_reason());
     }
     return null;
+}
+
+/**
+ * WHICH of the site's refusals it was, as a sentence for the operator.
+ *
+ * SEPARATE FROM THE DECISION, and the separation is the fix. `map_meta_cap()` answers
+ * `do_not_allow` and does not say why, so the branches live on here - but they no longer DECIDE
+ * anything. If one of them ever drifts from core the operator reads a slightly wrong reason for a
+ * refusal that is still exactly core's, instead of seeing a tool they cannot use. That is the
+ * difference between a copy of a decision and a copy of an explanation, and only the first is a
+ * defect: the docblock above says the refusal has to name which of the three it was, because an
+ * operator who set DISALLOW_FILE_EDIT deliberately and one whose host set DISALLOW_FILE_MODS need
+ * different things from the message.
+ *
+ * THE ORDER IS CORE'S (capabilities.php:607-618), so when more than one applies the operator is
+ * told about the one core would have stopped at.
+ */
+function wpmcp_code_forbidden_reason() {
+    if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
+        return 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).';
+    }
+
+    if (!wp_is_file_mod_allowed('capability_edit_themes')) {
+        return defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS
+            ? 'File modification is disabled on this site (DISALLOW_FILE_MODS).'
+            : 'File modification is disabled on this site (the file_mod_allowed filter).';
+    }
+
+    if (is_multisite() && !is_super_admin()) {
+        return 'Theme file editing on a network is limited to network administrators (multisite).';
+    }
+
+    // Reached only if a `map_meta_cap` filter denied `edit_themes` for a reason of its own, which
+    // is a plugin's decision and not one this file can name. Deliberately not silent: a refusal
+    // with no reason is what sends an operator to a support forum.
+    return 'Theme file editing is disabled on this site (a plugin denied edit_themes).';
 }
 
 function wpmcp_code_denylist() {
@@ -5838,19 +5869,19 @@ function wpmcp_inventory_tools() {
         // carries it, as code-list and sql-select do; it writes nothing.
         'write' => true,
         'annotations' => $adminReadHints,
-        'description' => 'List installed plugins and which are active. Returns count and plugins: file (the'
-            . ' plugin\'s id, such as "akismet/akismet.php"), name and version from its header, active,'
-            . ' network_active (multisite only), and auto_update - true when the plugin is in the'
-            . ' site\'s stored auto-update list, false when not, null when you cannot update plugins'
-            . ' (your role lacks update_plugins, wp-config sets DISALLOW_FILE_MODS, or a network'
-            . ' limits it to network admins). auto_update'
-            . ' does not reflect auto-updates switched off site-wide, a plugin forcing its own answer,'
-            . ' or whether an update source exists. It reads plugin files and stored settings'
-            . ' directly: no update, auto-update, plugin-header or per-option filter runs, so no'
-            . ' update check is triggered. Hooks every tool call runs still run - capability, database'
-            . ' query and option filters, and wp-mcp\'s tools filter - and a plugin that goes remote'
-            . ' from those does so here too. Needs an admin-scope token and the activate_plugins'
-            . ' capability (Administrators).',
+        'description' => 'List installed plugins and which are active. Returns count and plugins:'
+            . ' file (the plugin id, e.g. "akismet/akismet.php"), name and version from its header,'
+            . ' active, network_active (multisite only), and auto_update - true when the plugin is'
+            . ' in this site\'s stored auto-update list, false when not, null when you cannot update'
+            . ' plugins at all (no update_plugins, wp-config sets DISALLOW_FILE_MODS, or a network'
+            . ' limits updates to network admins). auto_update ignores auto-updates switched off'
+            . ' site-wide, a plugin forcing its own answer, and whether an update source exists. It'
+            . ' reads plugin files and stored settings directly, so no update, auto-update or'
+            . ' plugin-header filter runs. Other hooks do run - capability, database query and'
+            . ' option filters, and the wp-mcp tools filter - and on a network it asks who the'
+            . ' network admins are, reading a network option through its filters. A plugin that goes'
+            . ' remote from those does so here too. Needs an admin-scope token and activate_plugins'
+            . ' (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),
         'run' => function ($a) {
             // Core's REST gate (class-wp-rest-plugins-controller.php:113). The capability checks
@@ -5879,10 +5910,26 @@ function wpmcp_inventory_tools() {
             // `is_multisite() && ! is_super_admin( $user_id )`, then the capability. Without the
             // middle one, a Site Administrator on a network - who holds update_plugins in their
             // role and cannot update a single plugin - was told true or false where core says
-            // "you cannot update plugins", which is what `auto_update: null` is for. Same class
-            // as wpmcp_code_constants_forbid()'s missing third branch, same file, one copy of
-            // core's decision each. is_multisite() reads a constant and is_super_admin() reads
-            // the user object already loaded, so the tool's no-remote-work contract holds.
+            // "you cannot update plugins", which is what `auto_update: null` is for.
+            //
+            // THIS IS THE ONE PLACE THE COPY STAYS, and it is not the same decision as the code
+            // gate's. There `map_meta_cap()` replaced our branches outright (round 2); here it
+            // cannot, because `map_meta_cap('update_plugins', ...)` calls
+            // `wp_is_file_mod_allowed('capability_update_core')`, whose `file_mod_allowed` filter
+            // is a HOOK - and this tool's contract, in its own description, is that no
+            // update-related hook fires, because that is where plugins go remote. A previous
+            // test's fixture made an outbound request from exactly there. So the file-mod half is
+            // read from the constant and the filter half is deliberately not asked; that is a
+            // ledger row, not drift, and it is the reason this branch is written out.
+            //
+            // AND `is_super_admin()` IS NOT FREE, WHICH ROUND 1 CLAIMED IT WAS (review 81, S1).
+            // It said the call "reads the user object already loaded". FALSE on a network:
+            // `is_super_admin()` calls `get_super_admins()` (capabilities.php:1163-1167), which is
+            // `get_site_option('site_admins')` unless the `$super_admins` global is set - so it
+            // runs `pre_site_option_site_admins`, `default_site_option_site_admins` and
+            // `site_option_site_admins`, and reads the network options cache or the database.
+            // Nothing remote, and no UPDATE hook - which is what the contract is about - but it is
+            // a network-option read through its filters and the description now says so.
             $fileMods = !(defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS)
                 && !(is_multisite() && !is_super_admin());
             $canAuto  = $fileMods && !empty(wp_get_current_user()->allcaps['update_plugins']);
@@ -5916,9 +5963,9 @@ function wpmcp_inventory_tools() {
             . ' has a templates/index.html or block-templates/index.html), and menu_locations - for'
             . ' the active theme, the classic menu locations registered (location and description);'
             . ' null for other themes or when you cannot edit theme options. It reads theme files and'
-            . ' stored settings directly: no theme, update or per-option filter runs, so no update'
-            . ' check is triggered. Hooks every tool call runs still run - capability, database query'
-            . ' and option filters, and wp-mcp\'s tools filter - and a plugin that goes remote from'
+            . ' stored settings directly, so no theme, update or theme-header filter runs and no'
+            . ' update check is triggered. Other hooks do run - capability, database query and option'
+            . ' filters, and wp-mcp\'s tools filter - and a plugin that goes remote from'
             . ' those does so here too. Needs an admin-scope token and the switch_themes capability'
             . ' (Administrators).',
         'inputSchema' => array('type' => 'object', 'properties' => array()),

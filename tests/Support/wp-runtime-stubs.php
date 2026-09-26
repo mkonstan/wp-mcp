@@ -372,15 +372,87 @@ if (!function_exists('is_multisite')) {
 
 if (!function_exists('is_super_admin')) {
     /**
-     * ADDED FOR SPRINT CORE-FIX, beside is_multisite() and for the same gate. Core's takes an
-     * optional user id and falls back to the current user; both call sites in this plugin pass
-     * nothing, so the stub answers about the current user and ignores an id it is not given.
+     * ADDED FOR SPRINT CORE-FIX, beside is_multisite() and for the same gate.
+     *
+     * CORE'S TWO ARMS, NOT ONE (review 81, S5). Round 1 answered from a list of ids on any site,
+     * and the report called that "core's own one-line body" - it is neither core's nor one line.
+     * Core (`wp-includes/capabilities.php:1177-1198`) answers from `get_super_admins()` on a
+     * NETWORK and from `has_cap('delete_users')` on a SINGLE SITE, and both arms are here because
+     * the second is reachable: a caller with no `is_multisite()` guard in front of it would
+     * otherwise be tested against a stub that says false where core says true.
+     *
+     * BY ID RATHER THAN BY LOGIN on the network arm, and that IS a divergence: core matches
+     * `$user->user_login` against `get_super_admins()`. The unit tier's users are an id and a login
+     * string with no object behind them, so membership of a set is the closest honest model; the
+     * DECISION - is this user in the network's admin set - is the same, and nothing in this plugin
+     * reads the login.
      */
     function is_super_admin($user_id = false)
     {
         $id = $user_id ? (int) $user_id : (int) ($GLOBALS['wpmcp_test_wp']['current_user_id'] ?? 0);
 
-        return in_array($id, (array) ($GLOBALS['wpmcp_test_wp']['super_admins'] ?? []), true);
+        if (!$id) {
+            return false;
+        }
+
+        if (is_multisite()) {
+            return in_array($id, (array) ($GLOBALS['wpmcp_test_wp']['super_admins'] ?? []), true);
+        }
+
+        // Core's single-site arm, verbatim in substance: `$user->has_cap('delete_users')`.
+        return (bool) current_user_can('delete_users');
+    }
+}
+
+if (!function_exists('map_meta_cap')) {
+    /**
+     * CORE'S `edit_themes` CASE, AND ONLY THAT CASE (sprint CORE-FIX round 2, review 81 S2).
+     *
+     * `wpmcp_code_constants_forbid()` no longer copies core's three site-level deny branches - it
+     * asks `map_meta_cap('edit_themes', $user_id)` whether any of them denies. So the unit tier has
+     * to answer that question, and the only honest way to do it is with core's own body for the one
+     * capability the plugin asks about (`wp-includes/capabilities.php:607-618`).
+     *
+     * A STUB OF A DELEGATION IS A WEAKER PROOF THAN A STUB OF A BRANCH, AND THAT IS THE POINT.
+     * The branch set now lives in ONE place - core's - so what the unit tier can still prove is
+     * that the plugin asks, and that it converts `do_not_allow` into a refusal and anything else
+     * into null. The four states the test drives exercise all three of core's branches THROUGH this
+     * function, so a plugin that stopped asking, or that inverted the answer, goes red.
+     *
+     * EVERY OTHER CAPABILITY ANSWERS `array($cap)` rather than guessing. Core's real function maps
+     * dozens of meta capabilities and reproducing them here would be this file inventing WordPress;
+     * nothing in the plugin passes anything else to it, and a future caller that did would get a
+     * permissive answer and should add its arm here deliberately.
+     */
+    function map_meta_cap($cap, $user_id, ...$args)
+    {
+        // CORE ENDS WITH `apply_filters( 'map_meta_cap', $caps, $cap, $user_id, $args )`, and this
+        // is that filter - the one hook a hardening plugin uses to deny a capability outright. It
+        // is here rather than left out because it is the only way the unit tier can make this
+        // function's answer DIVERGE from the three branches below: with core's own body on both
+        // sides, a gate that asks and a gate that hand-copies are indistinguishable. Forcing the
+        // answer is what proves the plugin asks.
+        if (isset($GLOBALS['wpmcp_test_wp']['map_meta_cap'][$cap])) {
+            return (array) $GLOBALS['wpmcp_test_wp']['map_meta_cap'][$cap];
+        }
+
+        if ($cap !== 'edit_themes' && $cap !== 'edit_files' && $cap !== 'edit_plugins') {
+            return array($cap);
+        }
+
+        if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
+            return array('do_not_allow');
+        }
+
+        if (!wp_is_file_mod_allowed('capability_edit_themes')) {
+            return array('do_not_allow');
+        }
+
+        if (is_multisite() && !is_super_admin($user_id)) {
+            return array('do_not_allow');
+        }
+
+        return array($cap);
     }
 }
 

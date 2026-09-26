@@ -30,6 +30,7 @@ namespace WpMcp\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use WpMcp\SchemaValidator;
+use WpMcp\Tests\Support\WordPressRuntime;
 use WpMcp\Tests\Support\WordPressStubs;
 
 final class SchemaValidatorTest extends TestCase
@@ -41,6 +42,29 @@ final class SchemaValidatorTest extends TestCase
         // Nothing requires src/SchemaValidator.php by path; the plugin's own
         // spl_autoload_register is what finds it, so this also proves that still works.
         WordPressStubs::loadPlugin();
+    }
+
+    /**
+     * THE RUNTIME STUBS, AND THIS CLASS OWES THEM TO ITSELF (sprint CORE-FIX round 2, review 81 B2).
+     *
+     * `SchemaValidator` called no WordPress function at all until this sprint made `asList()` use
+     * `wp_json_encode()`, which lives in the RUNTIME stub set. Without this line the class ERRORS
+     * when run alone - `Call to undefined function WpMcp\wp_json_encode()` - and is green inside
+     * `--testsuite unit` only because `AcfCoreFixTest` sorts first and installs the stubs into the
+     * process before this class runs. So the tier's 303 green was true for ONE ORDERING, and the
+     * one class that exists to hold this file was the class that could not prove it.
+     *
+     * tests/bootstrap.php states the rule this breaks: stubs are a per-test-case concern, because
+     * defining them globally "would silently mask a future load-time dependency on a real WordPress
+     * function - exactly the drift this harness exists to catch". A sibling class masked it instead,
+     * which is the same failure with an extra step. Asking for the stubs HERE is the per-test-case
+     * answer, not a widening of the global set.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        WordPressRuntime::install();
     }
 
     /**

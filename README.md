@@ -875,14 +875,19 @@ with nothing saying a fourth exists. A `flexible_content` field therefore also r
 ]
 ```
 
-`label` is the label the editor sees, which is the rename when a layout has one. A disabled row
+`label` is the label the editor sees: the rename when a layout has one, and otherwise the title
+ACF's own `get_layout_title()` returns, so a site that filters its layout titles through
+`acf/fields/flexible_content/layout_title` gets the same label here as in wp-admin. A disabled row
 carries its own `values`, formatted and permission-reduced like everything else - including a
 sub-field that is itself a group, a clone, a repeater or another Flexible Content field, because
-those values are loaded with `acf_get_value()`, the same call ACF's own row loader makes. Rows are
-reported this way only on ACF **Pro 6.5** or newer, where the feature exists at all; below that
-`acf` reports `layout_metadata: false` and there are no disabled layouts to report. Nothing about
-this is guessed from a hidden meta key - the state comes from ACF's own public accessors, and the
-values from its own loader.
+those values are loaded with `acf_get_value()`, the same call ACF's own row loader makes.
+
+The `acf` object in every read says which guarantees the site provides. Disabled and renamed rows
+are reported only on ACF **Pro 6.5** or newer, where the feature exists at all; below that
+`layout_metadata` is `false` and there are no disabled layouts to report. The filtered label is
+older, so `layout_title` is reported separately and is `true` on any Pro version that has the
+method. Nothing about this is guessed from a hidden meta key - the state comes from ACF's own public
+accessors, and the values from its own loader.
 
 **No ACF schema tools.** Field structure reaches a caller as metadata on a values read - the key,
 name, type and label of the fields this object holds, and the layout of each row it has - and never
