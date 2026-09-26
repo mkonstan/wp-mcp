@@ -404,6 +404,81 @@ if (!function_exists('is_super_admin')) {
     }
 }
 
+/*
+ * ------------------------------------------------------------------------------------------------
+ * THE FIVE BELOW EXIST FOR ONE REASON: tests/unit/AcfResolveGateTest.php.
+ *
+ * `wpmcp_acf_resolve()` is the capability boundary the ACF module's whole disclosure argument rests
+ * on - the layout-title filter can put an un-reduced sub-value on the wire, and what stops that
+ * reaching a reader wp-admin would not show it to is those four `current_user_can()` calls and
+ * nothing else (review 81, pressure point 1). A boundary described in a review file is not enforced;
+ * one EXECUTED by a test is. Executing it needs the object lookups the function makes on its way to
+ * each check, so they are here - each one core's answer in a line, driven by the test globals, and
+ * not one of them speculative.
+ * ------------------------------------------------------------------------------------------------
+ */
+
+if (!function_exists('get_post')) {
+    /**
+     * A post, or null. The test says which ids exist and what post_type each one has; anything else
+     * is "no such post", which is the first refusal wpmcp_acf_resolve() makes.
+     */
+    function get_post($post = null, $output = 'OBJECT', $filter = 'raw')
+    {
+        $posts = (array) ($GLOBALS['wpmcp_test_wp']['posts'] ?? array());
+        $id    = (int) (is_object($post) ? ($post->ID ?? 0) : $post);
+
+        if (!isset($posts[$id])) {
+            return null;
+        }
+
+        return (object) array('ID' => $id, 'post_type' => (string) $posts[$id]);
+    }
+}
+
+if (!function_exists('get_term')) {
+    /** A term, or null. Same shape of arrangement as get_post() above. */
+    function get_term($term, $taxonomy = '', $output = 'OBJECT', $filter = 'raw')
+    {
+        $terms = (array) ($GLOBALS['wpmcp_test_wp']['terms'] ?? array());
+        $id    = (int) (is_object($term) ? ($term->term_id ?? 0) : $term);
+
+        if (!in_array($id, array_map('intval', $terms), true)) {
+            return null;
+        }
+
+        return (object) array('term_id' => $id, 'taxonomy' => 'category');
+    }
+}
+
+if (!function_exists('post_type_exists')) {
+    /** True for the post types the test registered. */
+    function post_type_exists($post_type)
+    {
+        return in_array((string) $post_type, (array) ($GLOBALS['wpmcp_test_wp']['post_types'] ?? array()), true);
+    }
+}
+
+if (!function_exists('is_post_type_viewable')) {
+    /**
+     * Every post type the test registered is viewable. The distinction between registered and
+     * viewable is `wpmcp_post_type_ok()`'s business and has its own tests; this file only has to get
+     * the ACF gate as far as its capability checks.
+     */
+    function is_post_type_viewable($post_type)
+    {
+        return post_type_exists(is_object($post_type) ? ($post_type->name ?? '') : $post_type);
+    }
+}
+
+if (!function_exists('sanitize_key')) {
+    /** Core's body (wp-includes/formatting.php): lowercase, and only [a-z0-9_-] survive. */
+    function sanitize_key($key)
+    {
+        return preg_replace('/[^a-z0-9_\-]/', '', strtolower((string) $key));
+    }
+}
+
 if (!function_exists('map_meta_cap')) {
     /**
      * CORE'S `edit_themes` CASE, AND ONLY THAT CASE (sprint CORE-FIX round 2, review 81 S2).

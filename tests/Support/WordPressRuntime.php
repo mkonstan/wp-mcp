@@ -47,6 +47,11 @@ final class WordPressRuntime
             // What core's own `map_meta_cap` FILTER answers for a capability, when a test sets one.
             // Empty means "nobody filtered it", which is every ordinary site.
             'map_meta_cap'    => [],
+            // The objects the ACF resolve gate can look up: post id => post_type, term ids, and the
+            // registered post types. Empty means "nothing exists", which is the gate's first refusal.
+            'posts'           => [],
+            'terms'           => [],
+            'post_types'      => [],
         ];
 
         // plugin_basename()'s symlink map. A global rather than a key of the array above, because
@@ -125,6 +130,29 @@ final class WordPressRuntime
     public static function setMetaCap(string $capability, array $caps): void
     {
         $GLOBALS['wpmcp_test_wp']['map_meta_cap'][$capability] = $caps;
+    }
+
+    /**
+     * Make a post exist, of a registered and viewable post type, so that the ACF resolve gate
+     * reaches its capability checks instead of stopping at "no such post".
+     *
+     * ONE CALL FOR BOTH because they are one arrangement: a post whose type is not registered is
+     * refused by `wpmcp_post_type_ok()` before any capability is asked, and a test that wanted that
+     * would be testing `wpmcp_post_type_ok()` rather than the gate.
+     */
+    public static function addPost(int $id, string $postType = 'post'): void
+    {
+        $GLOBALS['wpmcp_test_wp']['posts'][$id] = $postType;
+
+        if (!in_array($postType, $GLOBALS['wpmcp_test_wp']['post_types'], true)) {
+            $GLOBALS['wpmcp_test_wp']['post_types'][] = $postType;
+        }
+    }
+
+    /** Make a term exist, for the same reason addPost() exists. */
+    public static function addTerm(int $id): void
+    {
+        $GLOBALS['wpmcp_test_wp']['terms'][] = $id;
     }
 
     /** Make get_userdata($id) return a user. */

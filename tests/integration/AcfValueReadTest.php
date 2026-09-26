@@ -568,11 +568,15 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
      * path at all. This builds one post whose second row is disabled and NOT renamed, so the label
      * is the filtered title and the filter has to see a row `load_value()` skipped.
      *
-     * WHAT GOES WRONG WITHOUT THE REBUILD, and it is not "the filter sees nothing":
-     * `get_sub_field_object()` falls back to `acf_get_value($row['post_id'], $sub_field)`, and
-     * `Layout::get_title()` opens its loop with `post_id => 0` - so `acf_get_valid_post_id(0)`
-     * GUESSES from `get_the_ID()` and then the queried object, which in a REST request is not this
-     * caller's object. The answer is unpredictable rather than empty, which is worse.
+     * WHAT GOES WRONG WITHOUT THE REBUILD: every `get_sub_field()` in the filter answers nothing.
+     * `get_sub_field_object()` finds no value under the key and falls back to
+     * `acf_get_value($row['post_id'], $sub_field)`; `Layout::get_title()` opens its loop with
+     * `post_id => 0`, so `acf_get_valid_post_id(0)` looks for `get_the_ID()` and then the queried
+     * object, and in a REST request neither exists because the main query never runs before the
+     * route dispatches. MEASURED empty - round 2's docblock said "unpredictable rather than empty,
+     * which is worse", which was the hazard feared rather than the one measured (review 81, S6).
+     * Empty is enough to fail the feature: the row reports a label built from no values where
+     * wp-admin shows one built from its own.
      *
      * @group acf-data
      */

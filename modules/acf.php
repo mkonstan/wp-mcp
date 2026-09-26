@@ -521,23 +521,50 @@ function wpmcp_acf_field_entry($field, $object) {
  * so a surviving row is `$field['value'][$index]` and nothing new is read.
  *
  * AND A DROPPED ROW IS NOT `array()`, WHICH WAS THE OTHER HALF OF THE SAME MISTAKE. `load_value()`
- * skips a disabled row, so `$field['value']` has a gap there. An empty row does not make the filter
- * see nothing: `get_sub_field_object()` falls back to `acf_get_value($row['post_id'], $sub_field)`
- * and the loop's `post_id` is 0, so `acf_get_valid_post_id(0)` GUESSES from `get_the_ID()` and the
- * queried object - which in a REST request is not this caller's object. MEASURED: `'Hero :: NULL'`
- * for a dropped row passed `array()`. So the row is REBUILT the way `load_value()` would have built
- * it, by wpmcp_acf_dropped_row(), and the filter then sees the dropped row's OWN values -
- * `'Hero :: ROW ONE'`, which is what wp-admin shows for a disabled row.
+ * skips a disabled row, so `$field['value']` has a gap there, and an empty row makes every
+ * `get_sub_field()` in the filter answer NOTHING: `get_sub_field_object()` finds no value under the
+ * key, falls back to `acf_get_value($row['post_id'], $sub_field)`, and the loop's `post_id` is 0 -
+ * so `acf_get_valid_post_id(0)` looks for `get_the_ID()` and then the queried object, and in a REST
+ * request neither exists because the main query never runs before the route dispatches.
+ * MEASURED: `'Hero :: NULL'` for a dropped row passed `array()`, and
+ * `acf_get_valid_post_id(0)` is NULL rather than some other object's id. EMPTY AND WRONG, then -
+ * round 2 wrote "unpredictable rather than empty, which is worse", which was the hazard feared and
+ * not the one measured (review 81, S6). Empty is enough: a disabled row would report a label built
+ * from no values while wp-admin shows one built from its own. So the row is REBUILT the way
+ * `load_value()` would have built it, by wpmcp_acf_dropped_row(), and the filter then sees the
+ * dropped row's OWN values - `'Hero :: ROW ONE'`, which is what wp-admin shows for a disabled row.
  *
  * WHAT THIS HANDS THE SITE'S OWN FILTER, AND IT IS A DELIBERATE EXCEPTION TO THE ONE-READ-PRIMITIVE
  * RULE. The row is UNFORMATTED and NOT permission-reduced, because that is the row ACF's renderer
  * passes and a reduced one would answer differently from wp-admin - which is the defect, again. So a
  * site-author filter that composes a title out of a sub-value can put a value on the wire that did
- * not come through `wpmcp_acf_format()`. Bounded, and recorded as a ledger row: the filter is the
- * site owner's own code, it already has `get_field()`, and whatever it returns is the string
- * wp-admin renders in the layout handle for any editor. It is not a route a CALLER can reach - a
- * token holder cannot add a filter - and the module has no write surface, so nothing read here is
- * written back. A site that does not want a sub-value in a layout title does not put one there.
+ * not come through `wpmcp_acf_format()`, and that is not theoretical: MEASURED in-process, a `user`
+ * sub-field pointing at an administrator came back as the bare id `2` in `value` for a low-privilege
+ * caller, while a filter calling `get_sub_field('author')['user_email']` put that administrator's
+ * e-mail into `label` for the same caller (review 81, pressure point 1). **The label CAN carry what
+ * the reduction withholds.**
+ *
+ * WHAT A CALLER CANNOT DO IS REGISTER THE FILTER; WHAT BOUNDS THE VALUE IS THE RESOLVE GATE, AND
+ * SAYING ONLY THE FIRST WAS HALF AN ANSWER (review 81, S7). The bound is NOT the reduction - the
+ * measurement above is exactly the reduction being bypassed. It is `wpmcp_acf_resolve()`, which
+ * refuses anyone without EDIT rights on the object before a single row is built:
+ * `manage_options` for an options page, `read_post` and then `edit_post` for a post, `edit_term`
+ * for a term, `edit_user` for a user. MEASURED: that same low-privilege caller is refused on all
+ * four object types. So every reader who reaches this function can open the wp-admin screen where
+ * ACF renders the identical string, from the identical filter, on the identical raw row
+ * (`Render.php:159-172` passes `load_value()`'s row; `Layout.php` opens the loop with `post_id => 0`
+ * exactly as we do). The label is at parity with wp-admin FOR ITS READER, which is what D29 asks
+ * for. There is no anonymous caller: every token is minted for a user and endpoint.php runs the
+ * request as that user.
+ *
+ * **SO LOOSENING ANY OF THOSE FOUR CHECKS BREAKS THIS, AND NOTHING ELSE HERE WILL STOP IT.** Turning
+ * `edit_post` into `read_post` would hand a filter's output to readers wp-admin never shows it to.
+ * tests/unit/AcfResolveGateTest.php holds all four, in the gate group, for exactly that reason - a
+ * future sprint will have a good reason to loosen one, and that is the moment this paragraph has to
+ * be read again rather than discovered.
+ *
+ * And the module has no write surface, so nothing read here is written back. A site that does not
+ * want a sub-value in a layout title does not put one there.
  *
  * @param array      $field  the Flexible Content field array
  * @param array|null $layout the layout definition, or null when the stored name has none
