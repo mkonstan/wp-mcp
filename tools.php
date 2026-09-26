@@ -4163,16 +4163,15 @@ function wpmcp_comment_tools() {
             // over the two safe columns instead, which keeps the filtering - and
             // therefore the pagination - in SQL.
             //
-            // AND THE COLUMN LIST *IS* REACHABLE, WHICH THIS COMMENT USED TO DENY (sprint
-            // CORE-FIX). It said the columns "cannot be narrowed", full stop, and that is
-            // false: `WP_Comment_Query::get_search_sql( $search, $columns )` takes the
-            // column list as a parameter and the class's `__call()` proxy forwards exactly
-            // that one name, so it is publicly callable
-            // (class-wp-comment-query.php:132-134, :1169). What core gives no hook for is
-            // the list `$query_vars['search']` uses; the SQL builder itself is ours to call.
-            // Calling it would replace the two `$wpdb->prepare` lines below with one core
-            // call - which is a refactor, deliberately NOT done here, and it is recorded so
-            // the next author finds a true claim rather than a closed door.
+            // AND THE COLUMN LIST *IS* REACHABLE, so the clause below is CORE'S OWN BUILDER
+            // over our two columns (sprint DELETIONS; the claim that it "cannot be narrowed"
+            // was corrected in sprint CORE-FIX and the code follows it here).
+            // `WP_Comment_Query::get_search_sql($search, $columns)` takes the column list as a
+            // parameter, and the class's `__call()` proxy forwards exactly that one name - so a
+            // protected method is publicly callable, by core's design since 4.0
+            // (class-wp-comment-query.php:132-134, :1169). What core gives no hook for is the
+            // list `$query_vars['search']` uses; the SQL builder itself is ours to call, and
+            // calling it makes the `esc_like` wildcarding and the `OR` assembly core's.
             $search = isset($a['search']) ? trim((string) $a['search']) : '';
             $filter = null;
             if ($search !== '') {
@@ -4186,13 +4185,13 @@ function wpmcp_comment_tools() {
 
                 $filter = function ($clauses) use ($search) {
                     global $wpdb;
-                    $like = '%' . $wpdb->esc_like($search) . '%';
-                    $clauses['where'] .= $wpdb->prepare(
-                        " AND ({$wpdb->comments}.comment_content LIKE %s"
-                        . " OR {$wpdb->comments}.comment_author LIKE %s)",
-                        $like,
-                        $like
-                    );
+                    // A bare WP_Comment_Query RUNS NOTHING: its constructor only fills
+                    // $query_var_defaults and queries when handed args (:278-330), so
+                    // constructing one inside comments_clauses fires no hook of its own.
+                    $clauses['where'] .= (new WP_Comment_Query())->get_search_sql($search, array(
+                        $wpdb->comments . '.comment_content',
+                        $wpdb->comments . '.comment_author',
+                    ));
                     return $clauses;
                 };
                 add_filter('comments_clauses', $filter);

@@ -1601,6 +1601,24 @@ function wpmcp_file_versions_for($rel, $limit = 50) {
     return is_array($rows) ? $rows : array();
 }
 
+/**
+ * The stored form of a token. sha256, and it STAYS sha256.
+ *
+ * NOT `wp_fast_hash()`, AND THE REASON IS THE MIGRATION AND NOT THE ALGORITHM (sprint DELETIONS).
+ * Core's is deterministic and would work in the `WHERE token_hash = %s` lookup - verified: it is
+ * `'$generic$' . base64url(sodium_crypto_generichash($m, 'wp_fast_hash_6.8+', 30))`, a fixed key
+ * with no random salt, 49 characters, which fits `char(64)`. Core's own docblock names exactly our
+ * input class ("security keys and application passwords which are generated with high entropy"),
+ * so both functions are correct choices here and there is no defect to fix.
+ *
+ * WHAT MAKES IT UNDELETABLE IS THAT ONLY THE HASH IS AT REST. A one-shot rehash is impossible:
+ * rehashing needs the plaintext, and the plaintext exists once, in wpmcp_mint()'s return value.
+ * The only migration available is lazy - try the new hash, fall back to sha256, rehash on a
+ * successful old match - which keeps this function forever for the fallback, and can never be
+ * retired because a token that is not used again is never migrated and nothing can prove one
+ * exists. So the swap deletes nothing, adds a second lookup to every authentication, and puts
+ * every live token at risk of a mistake in the fallback. Leave it.
+ */
 function wpmcp_hash($raw) {
     // High-entropy token (256-bit) -> a fast cryptographic hash is appropriate.
     return hash('sha256', $raw);

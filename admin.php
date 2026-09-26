@@ -393,7 +393,10 @@ function wpmcp_render_admin() {
       // operator who needs to be told the log is public.
       ?>
 
-      <?php if ($notice): ?><div class="notice notice-info is-dismissible"><p><?php echo esc_html($notice); ?></p></div><?php endif; ?>
+      <?php // wp_admin_notice() assembles the classes and the <p>, and runs wp_admin_notice_args
+            // / _markup so a site that restyles notices reaches ours. IT DOES NOT ESCAPE - the
+            // message is interpolated raw (functions.php:9271) - so esc_html() stays, once. ?>
+      <?php if ($notice) { wp_admin_notice(esc_html($notice), array('type' => 'info', 'dismissible' => true)); } ?>
 
       <h2>Generate a token</h2>
       <form method="post">

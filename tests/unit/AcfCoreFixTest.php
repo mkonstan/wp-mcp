@@ -423,8 +423,12 @@ final class AcfCoreFixTest extends TestCase
         // AND THE THIRD, IN tools.php, FOR THE SAME REASON: list-comments said WP_Comment_Query's
         // search columns cannot be narrowed. They can - get_search_sql($search, $columns) takes
         // the column list and the class's __call() proxy forwards exactly that one method name
-        // (class-wp-comment-query.php:132-134, :1169). Replacing our clause with it is a refactor
-        // and out of this sprint's scope; shipping a false reason for not doing so is not.
+        // (class-wp-comment-query.php:132-134, :1169).
+        //
+        // SPRINT DELETIONS THEN WALKED THROUGH THE DOOR, so the assertion moved from the prose to
+        // the CALL. A comment saying the method is reachable can go stale silently; a call to it
+        // cannot, and it carries the correction with it. The "cannot be narrowed" claim is still
+        // asserted absent, because a rewrite could reintroduce it beside a hand-built clause.
         $tools = RepoFile::read('tools.php');
 
         self::assertStringNotContainsString(
@@ -433,10 +437,10 @@ final class AcfCoreFixTest extends TestCase
             "list-comments still says WP_Comment_Query's search columns cannot be narrowed."
         );
         self::assertStringContainsString(
-            'get_search_sql( $search, $columns )',
+            '->get_search_sql($search,',
             $tools,
-            'The correction naming the reachable method is gone, so the next author reads a closed'
-            . ' door where there is an open one.'
+            'list-comments no longer CALLS the method whose reachability this sprint corrected, so'
+            . ' the next author reads a closed door where there is an open one.'
         );
     }
 }

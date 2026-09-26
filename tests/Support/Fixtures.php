@@ -959,10 +959,19 @@ final class Fixtures
      * @param string $email author email, or '' to leave it empty. Set it only when a
      *                      test needs to prove the email is NOT reachable - it is
      *                      never returned by any tool.
+     * @param string $author author DISPLAY NAME, or '' to leave it empty. Separate from
+     *                      $email because list-comments' search covers this column and
+     *                      deliberately does not cover that one, so a test that pins the
+     *                      narrowing needs a fixture that differs in exactly one of them.
      * @return int the new comment's ID
      */
-    public static function createComment(int $postId, string $content, bool $approved, string $email = ''): int
-    {
+    public static function createComment(
+        int $postId,
+        string $content,
+        bool $approved,
+        string $email = '',
+        string $author = ''
+    ): int {
         self::assertPrefixed($content);
 
         $args = [
@@ -976,6 +985,11 @@ final class Fixtures
         if ($email !== '') {
             self::assertPrefixed($email);
             $args[] = '--comment_author_email=' . $email;
+        }
+
+        if ($author !== '') {
+            self::assertPrefixed($author);
+            $args[] = '--comment_author=' . $author;
         }
 
         $id = (int) WpCli::run($args);

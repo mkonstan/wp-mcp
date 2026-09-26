@@ -504,9 +504,14 @@ final class CoreFixTest extends TestCase
     /**
      * THE CLASS SWEEP. Every `LIKE %s` in shipped SQL takes its value from `esc_like()`.
      *
-     * Six LIKE clauses ship, in two files, and each one is here by name with what it is for -
-     * because "every LIKE is escaped" is only a sweep if the list is the whole list. The
-     * `search` clause in list-comments was already correct; the three schema probes were not.
+     * THREE LIKE CLAUSES SHIP, IN ONE FILE, and the count is asserted below because "every LIKE
+     * is escaped" is only a sweep if the list is the whole list. This docblock said "six, in two
+     * files" and that was never true - MEASURED 2026-09-26: `grep -c 'LIKE %s'` was 3 in
+     * wp-mcp.php and 2 in tools.php, five in two files, and the sweep-for-emptiness below passed
+     * either way. The two in tools.php then went with sprint DELETIONS, which replaced
+     * list-comments' hand-built clause with `WP_Comment_Query::get_search_sql()` - core's builder
+     * calls `esc_like()` itself, so that clause is no longer one this plugin has to escape and
+     * tests/integration/PlatformDeletionsTest.php proves the escaping still happens.
      *
      * @group sprint-core-fix
      */
@@ -548,17 +553,34 @@ final class CoreFixTest extends TestCase
         // AND THE SWEEP FOUND SOMETHING TO LOOK AT. A pattern that matched nothing would report
         // an empty list of failures for ever, which is the silent-position failure this project
         // keeps catching.
+        // THE COUNT IS OVER EVERY SHIPPED FILE, not just the one that happens to hold them all
+        // today. A count stated in prose beside an assertion that checks a narrower thing is how
+        // "six, in two files" survived being false; this one makes the docblock's number the
+        // number under test, so moving a LIKE between shipped files is red rather than invisible.
+        $shipped = 0;
+
+        foreach (self::SHIPPED as $relative) {
+            $shipped += preg_match_all('/LIKE %s/', RepoFile::read($relative));
+        }
+
         self::assertSame(
             3,
-            preg_match_all('/LIKE %s/', RepoFile::read('wp-mcp.php')),
-            'wp-mcp.php no longer has the three schema probes the sweep above is about, so an'
-            . ' empty failure list no longer means the sweep passed.'
+            $shipped,
+            'The shipped plugin no longer has exactly the three schema probes the sweep above is'
+            . ' about (it has ' . $shipped . '), so an empty failure list no longer means the'
+            . ' sweep passed. If a LIKE was added, name it in the docblock and re-count.'
         );
+        // list-comments' clause is THE ONE PLACE the pattern comes from a CALLER rather than from
+        // a name this plugin chose, so it is the one that must not stop being escaped. It no
+        // longer escapes anything itself: it hands the term to core's builder, which does. A
+        // rewrite that went back to a hand-built clause has to come back through the sweep above,
+        // and this assertion is what says which of the two shapes is shipping.
         self::assertStringContainsString(
-            '$wpdb->esc_like($search)',
+            '->get_search_sql($search,',
             RepoFile::read('tools.php'),
-            "list-comments' search clause has stopped escaping its LIKE, and it is the one place"
-            . ' the pattern comes from a CALLER rather than from a name this plugin chose.'
+            "list-comments' search no longer goes through WP_Comment_Query::get_search_sql(), so"
+            . ' the esc_like() that clause relies on is not core\'s any more. Either restore the'
+            . ' call or put the escaping back and let the sweep above cover it.'
         );
     }
 
@@ -580,6 +602,12 @@ final class CoreFixTest extends TestCase
      * settings page: driving it would mean stubbing the page, not the decision. What the
      * assertion says is the decision - no writer of $notice escapes, exactly one reader does.
      *
+     * THE READER IS NOW `wp_admin_notice(esc_html($notice), ...)` RATHER THAN `echo esc_html(...)`
+     * (sprint DELETIONS), so the pattern below matches the escape and not the statement around
+     * it. The invariant is unchanged and so is the count: core's wp_get_admin_notice()
+     * interpolates the message RAW, which tests/integration/PlatformDeletionsTest.php pins
+     * against the real function - so this esc_html() is still the only one, and still required.
+     *
      * @group sprint-core-fix
      */
     public function testTheAdminNoticeIsEscapedOnceAndAtOutput(): void
@@ -589,7 +617,7 @@ final class CoreFixTest extends TestCase
 
         self::assertSame(
             1,
-            preg_match_all('/echo esc_html\(\$notice\)/', $admin),
+            preg_match_all('/esc_html\(\$notice\)/', $admin),
             'The admin notice is no longer escaped exactly once where it is printed, so every'
             . ' assertion below is about a different value than the one the operator reads.'
         );

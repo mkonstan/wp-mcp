@@ -229,6 +229,18 @@ define('WPMCP_TRACE_STACK_NOTE_BYTES', 176);
  * them by tests/unit/TraceRowBoundTest.php so the two cannot drift. The two `longtext`/`text`
  * fields keep 2,000 - not because the column is that narrow, but because one event must not
  * become a megabyte of backup.
+ *
+ * AND THEY ARE NOT A SECOND SOURCE OF TRUTH FOR ONE NUMBER, which is what sprint DELETIONS was
+ * sent to check and is why they stay. `$wpdb->insert()` does truncate from the widths it reads
+ * from the database (class-wpdb.php:2993 -> :3445 -> :3624) - but MEASURED against core
+ * 2026-09-26 it is a different number in a different unit. A `varchar` is reported
+ * `'type' => 'char'` (:3464-3469), so $wpdb cuts by CHARACTERS where every cap here is BYTES, and
+ * on utf8mb4 `varchar(191)` holds 764 of them. `message` is a `text` and `data` and `stack` are
+ * `longtext`, which $wpdb reports as 65,535 and 4,294,967,295 bytes, so nothing but
+ * WPMCP_TRACE_TEXT_BYTES and _STACK_BYTES bounds those three at all: deleting the caps would not
+ * raise the 12,960-byte ceiling, it would REMOVE it. And $wpdb's cut is silent where ours says
+ * `...`. The relation to the schema is therefore one-directional - every cap at or below its
+ * column - and the 12,960 figure cannot be read off a CREATE TABLE at runtime.
  */
 define('WPMCP_TRACE_METHOD_BYTES', 64);
 define('WPMCP_TRACE_TOOL_BYTES', 191);
