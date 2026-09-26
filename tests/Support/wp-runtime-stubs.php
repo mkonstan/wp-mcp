@@ -301,15 +301,171 @@ if (!function_exists('do_action')) {
     }
 }
 
+if (!function_exists('wpmcp_test_json_sanity')) {
+    /**
+     * `_wp_json_sanity_check()` reduced to the half that has an observable effect here: every
+     * string in the structure is put through UTF-8 conversion, which DROPS the bytes that are not
+     * valid UTF-8 (wp-includes/functions.php, `_wp_json_convert_string()`).
+     *
+     * Core's other half - the depth counter that throws, so wp_json_encode() can return false on
+     * a structure nested past $depth - is left out because nothing in this plugin builds one, and
+     * a stub that pretended to implement it would be a stub asserting its own behaviour.
+     */
+    function wpmcp_test_json_sanity($value)
+    {
+        if (is_string($value)) {
+            return function_exists('mb_convert_encoding')
+                ? (string) mb_convert_encoding($value, 'UTF-8', 'UTF-8')
+                : (string) iconv('UTF-8', 'UTF-8//IGNORE', $value);
+        }
+
+        if (is_array($value)) {
+            $out = array();
+            foreach ($value as $k => $v) {
+                $out[is_string($k) ? wpmcp_test_json_sanity($k) : $k] = wpmcp_test_json_sanity($v);
+            }
+
+            return $out;
+        }
+
+        return $value;
+    }
+}
+
 if (!function_exists('wp_json_encode')) {
     /**
-     * Core's wrapper adds depth checking and invalid-UTF-8 handling; for the one place
-     * the plugin calls it on a unit path - formatting a non-scalar auth-event value -
-     * json_encode is the same answer.
+     * CORE'S OWN SHAPE (wp-includes/functions.php): try json_encode, and on failure sanity-check
+     * the value and try again.
+     *
+     * THIS USED TO BE A BARE json_encode, with a docblock saying the two were "the same answer"
+     * for the one place the plugin called it. Sprint CORE-FIX made that FALSE: `SchemaValidator`
+     * now renders a non-scalar enum value through this function, and the whole reason it does is
+     * that bare json_encode returns FALSE on a value that is not valid UTF-8 - which concatenates
+     * into the message as the empty string, so a permitted value vanishes from the list of
+     * permitted values. A stub that returned false here would let the pre-fix code pass.
      */
     function wp_json_encode($data, $options = 0, $depth = 512)
     {
-        return json_encode($data, $options, $depth);
+        $json = json_encode($data, $options, $depth);
+
+        if ($json !== false) {
+            return $json;
+        }
+
+        return json_encode(wpmcp_test_json_sanity($data), $options, $depth);
+    }
+}
+
+if (!function_exists('is_multisite')) {
+    /**
+     * ADDED FOR SPRINT CORE-FIX. Core's `map_meta_cap` denies `edit_themes` and `update_plugins`
+     * on `is_multisite() && ! is_super_admin( $user_id )`, and this plugin reproduces both
+     * decisions - so the unit tier has to be able to stand on both sides of that line. Real
+     * WordPress answers from a constant fixed at load; this one reads the global each time, which
+     * is what lets one loaded plugin be tested on a network and on a single site.
+     */
+    function is_multisite()
+    {
+        return (bool) ($GLOBALS['wpmcp_test_wp']['multisite'] ?? false);
+    }
+}
+
+if (!function_exists('is_super_admin')) {
+    /**
+     * ADDED FOR SPRINT CORE-FIX, beside is_multisite() and for the same gate. Core's takes an
+     * optional user id and falls back to the current user; both call sites in this plugin pass
+     * nothing, so the stub answers about the current user and ignores an id it is not given.
+     */
+    function is_super_admin($user_id = false)
+    {
+        $id = $user_id ? (int) $user_id : (int) ($GLOBALS['wpmcp_test_wp']['current_user_id'] ?? 0);
+
+        return in_array($id, (array) ($GLOBALS['wpmcp_test_wp']['super_admins'] ?? []), true);
+    }
+}
+
+if (!function_exists('wp_normalize_path')) {
+    /**
+     * CORE'S OWN BODY (wp-includes/functions.php): backslashes become slashes, repeated slashes
+     * collapse, and a Windows drive letter is upper-cased. Needed only because plugin_basename()
+     * below is core's body too, and this is what core's body calls.
+     */
+    function wp_normalize_path($path)
+    {
+        $wrapper = '';
+        $path    = str_replace('\\', '/', (string) $path);
+        $path    = preg_replace('|(?<=.)/+|', '/', $path);
+
+        if (substr($path, 1, 1) === ':') {
+            $path = ucfirst($path);
+        }
+
+        return $wrapper . $path;
+    }
+}
+
+if (!function_exists('plugin_basename')) {
+    /**
+     * CORE'S OWN BODY (wp-admin/includes/plugin.php), minus the mu-plugins arm it has no
+     * WPMU_PLUGIN_DIR to take. ADDED FOR SPRINT CORE-FIX: wpmcp_scan_plugins() now keys its
+     * array through this function, because get_plugins() keys through it and the two key sets are
+     * compared with each other.
+     *
+     * WRITTEN OUT RATHER THAN RETURNING $file, for the reason FakeWpdb::esc_like() gives: a stub
+     * that was the identity function would make "keyed through plugin_basename" and "keyed by a
+     * raw readdir path" the same assertion.
+     */
+    function plugin_basename($file)
+    {
+        $paths = isset($GLOBALS['wp_plugin_paths']) ? (array) $GLOBALS['wp_plugin_paths'] : array();
+        $file  = wp_normalize_path($file);
+
+        arsort($paths);
+
+        foreach ($paths as $dir => $realdir) {
+            if (str_starts_with($file, (string) $realdir)) {
+                $file = $dir . substr($file, strlen((string) $realdir));
+            }
+        }
+
+        $plugin_dir = wp_normalize_path(WP_PLUGIN_DIR);
+        $file       = preg_replace('#^' . preg_quote($plugin_dir, '#') . '/#', '', $file);
+
+        return trim($file, '/');
+    }
+}
+
+if (!function_exists('get_file_data')) {
+    /**
+     * CORE'S OWN SHAPE (wp-includes/functions.php): read the first 8 KB, then one regex per
+     * requested header over that text, with the value stripped of a trailing comment. The
+     * `$context` arm - which is where the `extra_{$context}_headers` filter lives - is absent
+     * because wpmcp_scan_plugins() deliberately passes no context (see its docblock), so a stub
+     * that had one could not be exercised.
+     */
+    function get_file_data($file, $default_headers, $context = '')
+    {
+        $fp = @fopen($file, 'r');
+
+        if (!$fp) {
+            return array_fill_keys(array_keys((array) $default_headers), '');
+        }
+
+        $data = fread($fp, 8 * 1024);
+        fclose($fp);
+        $data = str_replace("\r", "\n", (string) $data);
+
+        $out = array();
+
+        foreach ((array) $default_headers as $field => $regex) {
+            if (preg_match('/^(?:[ \t]*<\?php)?[ \t\/*#@]*' . preg_quote($regex, '/') . ':(.*)$/mi', $data, $m) && $m[1]) {
+                $out[$field] = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $m[1]));
+            } else {
+                $out[$field] = '';
+            }
+        }
+
+        return $out;
     }
 }
 

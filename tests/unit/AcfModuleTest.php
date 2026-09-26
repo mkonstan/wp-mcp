@@ -282,10 +282,16 @@ final class AcfModuleTest extends TestCase
         );
 
         // AND THE OPTIONAL BLOCK IS WHERE THE METHODS ARE, or this assertion is about an empty face.
+        //
+        // get_layout_title JOINED THEM IN SPRINT CORE-FIX, and it is here for the same reason they
+        // are: the layout label now comes from ACF's own method, which runs the documented
+        // acf/fields/flexible_content/layout_title filter family, and a method has to be declared
+        // or ModuleApiFaceTest reports it undeclared. Below ACF Pro 6.5 the whole capability is
+        // absent and the label falls back to the layout's own stored one.
         self::assertSame(
-            ['get_disabled_layouts', 'get_renamed_layouts'],
+            ['get_disabled_layouts', 'get_renamed_layouts', 'get_layout_title'],
             $face['optional']['layout_metadata']['methods'][0]['names'],
-            'The layout-metadata capability no longer declares the two accessors it is named for.'
+            'The layout-metadata capability no longer declares the three methods it needs.'
         );
     }
 

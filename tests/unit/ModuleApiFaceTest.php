@@ -101,6 +101,7 @@ final class ModuleApiFaceTest extends TestCase
         'wp_is_block_theme',
         'wp_setup_nav_menu_item',
         'wp_slash',
+        'wp_specialchars_decode',
         'wp_update_nav_menu_item',
         'wp_update_post',
     ];

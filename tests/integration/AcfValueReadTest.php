@@ -492,6 +492,88 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * SPRINT CORE-FIX, ITEM 7(a): the un-renamed label is the one ACF'S FILTER produced, and the
+     * rename still wins over it.
+     *
+     * THE DEFECT, AND IT IS ONLY VISIBLE WITH THE FILTER ATTACHED. The label used to be
+     * `$layout['label']` read straight out of the field group, while wp-admin prints
+     * `ACF_Field_Flexible_Content::get_layout_title()`, which runs
+     * `acf/fields/flexible_content/layout_title` and its `/name=` and `/key=` variants - three
+     * DOCUMENTED filters. So on any site using them wp-admin and this tool disagreed about the
+     * label, and D29 is precisely "report the label the editor sees". The test above proves
+     * nothing about it: with no filter attached both routes answer `Hero`, which is exactly why
+     * the defect survived a passing suite.
+     *
+     * A SECOND MU-PLUGIN, DROPPED AND REMOVED INSIDE THIS TEST, because the filter has to run in
+     * the REQUEST under test and the class's own mu-plugin is read by every other test here - a
+     * filter left in it would change the labels they assert. `finally` removes it whatever
+     * happens, and MuPlugin::drop() arms the run transient that makes the file inert anyway.
+     *
+     * AND THE RENAME STILL WINS, asserted in the same read. `get_layout_title()` CANNOT return a
+     * rename - it constructs its Layout with `$renamed = ''`, and the precedence is printed in a
+     * private render method - so "call ACF's method" and "report the editor's rename" are two
+     * claims, and a fix that only did the first would report `HERO (filtered)` for the row the
+     * editor renamed.
+     *
+     * @group acf-data
+     */
+    public function testAnUnrenamedLayoutLabelIsTheOneAcfsOwnFilterProduced(): void
+    {
+        $slug = 'acf-layout-title-filter';
+
+        MuPlugin::drop($slug, self::layoutTitleFilterSource());
+
+        try {
+            $rows = self::field($this->read(self::$adminToken), self::fieldPrefix() . 'blocks')['rows'];
+        } finally {
+            MuPlugin::remove($slug);
+        }
+
+        self::assertSame(
+            ['Hero [filtered] & more', 'Editor renamed me', 'Hero [filtered] & more'],
+            array_column($rows, 'label'),
+            'The label a site\'s own acf/fields/flexible_content/layout_title filter produces is'
+            . " not what this tool reports, so wp-admin and get-acf-values disagree about the label"
+            . ' the editor sees. The renamed row must still report the rename: ACF applies the'
+            . ' rename at render time and get_layout_title() cannot return one.'
+        );
+
+        // AND THE ENTITY IS DECODED, not shipped as HTML. get_layout_title() returns
+        // `wp_kses( apply_filters( ..., esc_html( $label ) ), 'acf' )` because its own caller
+        // prints into a wp-admin span; our label goes onto a JSON wire, where `&amp;` is not an
+        // ampersand. The filter above appends ` & more` to one variant for exactly this.
+        self::assertStringNotContainsString(
+            '&amp;',
+            implode(' ', array_column($rows, 'label')),
+            "ACF's HTML escaping is reaching the wire: the caller reads `&amp;` where the editor"
+            . ' sees `&`. wp_specialchars_decode(..., ENT_QUOTES) is the inverse of the'
+            . ' _wp_specialchars() esc_html() applied.'
+        );
+        self::assertStringContainsString(
+            '&',
+            implode(' ', array_column($rows, 'label')),
+            'The ampersand the filter put in the title is gone altogether, so it was stripped'
+            . ' rather than decoded.'
+        );
+    }
+
+    /**
+     * The mu-plugin body for the test above: one filter on ACF's own documented hook.
+     *
+     * `/name=` RATHER THAN THE BASE HOOK, deliberately: the base hook is the one a reader expects
+     * and the `/name=` variant is the one a site actually uses, and both are applied by
+     * `Layout::get_title()` in that order. Using the narrow one proves the whole family arrives.
+     * The field's `_name` is the fixture's prefixed `..._blocks`.
+     */
+    private static function layoutTitleFilterSource(): string
+    {
+        return 'add_filter('
+            . '"acf/fields/flexible_content/layout_title/name=" . ' . self::phpString(self::fieldPrefix() . 'blocks') . ','
+            . ' function ($title, $field, $layout, $i) {'
+            . ' return $title . " [filtered] & more"; }, 10, 4);';
+    }
+
+    /**
      * ITEM 3, THE PART WITH NO ACCESSOR AT ALL: the dropped row's own VALUES come back, formatted
      * and permission-reduced like every other value in the read.
      *

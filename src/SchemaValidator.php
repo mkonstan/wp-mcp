@@ -395,13 +395,25 @@ final class SchemaValidator
         return str_replace(array('~', '/'), array('~0', '~1'), $key);
     }
 
-    /** The permitted values of an enum, for the message. The SCHEMA's own values. */
+    /**
+     * The permitted values of an enum, for the message. The SCHEMA's own values.
+     *
+     * wp_json_encode() AND NOT json_encode(), FOR THE REASON escape()'s DOCBLOCK ARGUES TWENTY
+     * LINES UP (sprint CORE-FIX). Bare `json_encode` returns FALSE on a value that is not valid
+     * UTF-8 (JSON_ERROR_UTF8) and on one nested past its depth, and `false` concatenates into
+     * the message as the empty string - so a permitted value would silently vanish from the
+     * list of permitted values, which is the one sentence this message exists to say.
+     * wp_json_encode() runs `_wp_json_sanity_check()` first, which strips the bad bytes and
+     * returns a string, and it is the call the file already says the plugin uses. This is the
+     * only WordPress function this class calls; it ships inside WordPress and nothing else
+     * loads it.
+     */
     private static function asList(array $values): string
     {
         $rendered = array();
 
         foreach ($values as $value) {
-            $rendered[] = is_string($value) ? $value : json_encode($value);
+            $rendered[] = is_string($value) ? $value : wp_json_encode($value);
         }
 
         return implode(', ', $rendered);

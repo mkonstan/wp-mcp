@@ -38,7 +38,17 @@ final class WordPressRuntime
             'option_writes'   => [],
             'option_deletes'  => [],
             'dbdelta'         => [],
+            // SPRINT CORE-FIX: core denies edit_themes and update_plugins on
+            // `is_multisite() && ! is_super_admin( $user_id )`, and this plugin reproduces both,
+            // so the unit tier has to be able to stand on both sides of that line. Reset to a
+            // single site with no super admins - WordPress's own answer on an ordinary install.
+            'multisite'       => false,
+            'super_admins'    => [],
         ];
+
+        // plugin_basename()'s symlink map. A global rather than a key of the array above, because
+        // that is where WordPress itself keeps it and the stub is core's body.
+        $GLOBALS['wp_plugin_paths'] = [];
 
         $wpdb = new FakeWpdb();
         $GLOBALS['wpdb'] = $wpdb;
@@ -81,6 +91,20 @@ final class WordPressRuntime
     public static function addFilter(string $hook, callable $callback): void
     {
         $GLOBALS['wpmcp_test_wp']['filters'][$hook] = $callback;
+    }
+
+    /**
+     * Put the site on a NETWORK, optionally with the given user ids as super admins.
+     *
+     * Both halves in one call because they are one decision: `is_multisite()` alone is not a
+     * denial and `is_super_admin()` alone is not a network. install() resets to a single site.
+     *
+     * @param list<int> $superAdmins user ids is_super_admin() should answer true for
+     */
+    public static function setMultisite(bool $on, array $superAdmins = []): void
+    {
+        $GLOBALS['wpmcp_test_wp']['multisite']    = $on;
+        $GLOBALS['wpmcp_test_wp']['super_admins'] = array_map('intval', $superAdmins);
     }
 
     /** Make get_userdata($id) return a user. */

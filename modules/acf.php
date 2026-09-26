@@ -128,9 +128,22 @@
  *
  * SO D29'S AUTHORISED EXCEPTION IS NOT USED, and the module has no meta-layout assumption left.
  * D29 priced in reading a protected meta key directly; `analysis/72`'s public layout accessors
- * removed that for the STATE, and `acf_get_value()` removes it for the VALUES - including the
- * multilingual-options caveat round 1 had to write down, because ACF resolves the meta through its
- * own per-location classes. WHAT REMAINS IS ONE UNDOCUMENTED DEPENDENCY AND IT IS A NAMING
+ * removed that for the STATE, and `acf_get_value()` removes it for the VALUES, because ACF
+ * resolves the meta through its own per-location classes.
+ *
+ * THE MULTILINGUAL-OPTIONS CAVEAT DID NOT GO WITH IT, AND THIS PARAGRAPH SAID IT DID (sprint
+ * CORE-FIX). That was FALSE, and it was false in the one direction that costs a caller a wrong
+ * answer rather than a missing one. `acf_get_value()` is the ONE reader among ACF's that does NOT
+ * normalise its `$post_id` (`includes/acf-value-functions.php:78-130`) - `get_field_object()`,
+ * `get_field_objects()` and `acf_format_value_for_rest()` all do - and the identifier this module
+ * handed it was hand-built. So on a site whose translation plugin sets ACF's `current_language`,
+ * a DROPPED row's values came out of the DEFAULT-language options store while every surviving
+ * row came out of the current one: two halves of one answer, from two stores, with nothing
+ * saying so. `wpmcp_acf_object_id()` now puts every identifier through
+ * `acf_get_valid_post_id()`, which is where the language suffix is applied, so the caveat is
+ * closed by a call rather than by a sentence.
+ *
+ * WHAT REMAINS IS ONE UNDOCUMENTED DEPENDENCY AND IT IS A NAMING
  * CONVENTION, NOT A STORAGE LAYOUT: that a Flexible Content sub-field's name is
  * `{$parent}_{$index}_{$sub}`. It is the line above ACF's own `acf_get_value()` call, copied.
  *
@@ -213,6 +226,12 @@ function wpmcp_acf_api_face() {
                 // wpmcp_acf_reload_gapped_rows() for the one thing that depends on it.
                 'acf_get_value',
                 'acf_flush_value_cache',
+                // ADDED IN SPRINT CORE-FIX, and it is REQUIRED because every read goes through
+                // it: wpmcp_acf_object_id() puts the object identifier through ACF's own
+                // normaliser before anything is read with it. `@since 5.0.0`
+                // (includes/api/api-helpers.php:2258), so it is present wherever the four above
+                // are and the 5.11 floor is unchanged.
+                'acf_get_valid_post_id',
             ),
         ),
         'optional' => array(
@@ -223,7 +242,18 @@ function wpmcp_acf_api_face() {
                 'methods'   => array(
                     array(
                         'probe' => 'wpmcp_acf_flexible_content',
-                        'names' => array('get_disabled_layouts', 'get_renamed_layouts'),
+                        // get_layout_title JOINS THEM IN SPRINT CORE-FIX, and it belongs in the
+                        // OPTIONAL half rather than the required one for the reason the file
+                        // header gives: a required METHOD would be probed at `plugins_loaded`,
+                        // where `acf_get_field_type('flexible_content')` is still NULL, and the
+                        // module would never register on a site that has everything.
+                        //
+                        // AND IT BELONGS IN THIS capability rather than a new one, because the
+                        // only caller is a layout row: Flexible Content is a PRO field type, so
+                        // where these two accessors are missing there are no rows to label.
+                        // Below Pro 6.5 the label is the layout's own stored label, which is
+                        // exactly what it was before this sprint.
+                        'names' => array('get_disabled_layouts', 'get_renamed_layouts', 'get_layout_title'),
                     ),
                 ),
             ),
@@ -255,9 +285,16 @@ function wpmcp_acf_layout_metadata_available() {
  *
  * ONE PLACE, because the enum in the inputSchema and the mapping in the run closure are two views
  * of the same list and a third kind added to one of them would otherwise be missing from the
- * other. The identifiers are the ones public
- * `acf_get_valid_post_id()` already produces and accepts - the bare id for a post, and
- * `term_%s` / `user_%s` otherwise - so nothing here reaches for that internal normaliser.
+ * other.
+ *
+ * THE SHAPES ARE NOT THE WHOLE OF THE IDENTIFIER, AND SAYING THEY WERE WAS THE DEFECT
+ * (sprint CORE-FIX). This paragraph used to say the shapes `acf_get_valid_post_id()` produces -
+ * the bare id, `term_%s`, `user_%s` - were what it produces, so "nothing here reaches for that
+ * internal normaliser". Two things were wrong: that function is PUBLIC, not internal
+ * (`includes/api/api-helpers.php:2258`, `@since 5.0.0`), and the shape is not the whole answer -
+ * it appends a LANGUAGE SUFFIX to `options` (`:2311-2318`), so on a multilingual site the string
+ * ACF's own readers use is `options_fr` and the one this file built was `options`. See
+ * wpmcp_acf_object_id().
  *
  * COMMENTS ARE ABSENT ON PURPOSE. ACF supports a comment location and this plugin has no
  * comment-editing surface to mirror; adding one would be a disclosure decision nobody has made.
@@ -266,6 +303,38 @@ function wpmcp_acf_layout_metadata_available() {
  */
 function wpmcp_acf_object_types() {
     return array('post', 'term', 'user', 'options');
+}
+
+/**
+ * THE ACF OBJECT ID, NORMALISED BY ACF (sprint CORE-FIX).
+ *
+ * `acf_get_valid_post_id()` is the public function every ACF reader puts its `$post_id` through
+ * (`includes/api/api-helpers.php:2258-2326`, `@since 5.0.0`), and this module used to build the
+ * four shapes by hand instead. The shapes were right; the normalisation is more than the shape:
+ *
+ *   - `options` GETS A LANGUAGE SUFFIX when a translation plugin has set ACF's
+ *     `current_language` different from its `default_language` (`:2311-2318`), so the store
+ *     ACF's own readers use on a French request is `options_fr`.
+ *   - `acf/pre_load_post_id` and `acf/validate_post_id` are documented filters a translation or
+ *     multi-context plugin uses to redirect a whole location, and a hand-built id runs neither.
+ *
+ * AND THE ONE READER THAT DOES NOT DO IT FOR US IS THE ONE THIS MODULE LEANS ON.
+ * `get_field_object()`, `get_field_objects()` and `acf_format_value_for_rest()` all normalise on
+ * the way in; `acf_get_value()` is the exception - it takes `$post_id` and goes straight to
+ * `acf_get_reference()`/the store (`includes/acf-value-functions.php:78-130`). That is exactly
+ * the call wpmcp_acf_dropped_row_values() makes for a row ACF dropped, so before this a
+ * multilingual site read a dropped row's values out of the DEFAULT-language options store while
+ * every surviving row came from the current one. Two halves of one answer, from two stores.
+ *
+ * NEVER CALLED WITH A FALSY ID. `acf_get_valid_post_id(0)` falls back to `get_the_ID()` and then
+ * to the queried object - a guess about the current screen, which in a REST request is not this
+ * caller's object. Every call site below has already refused an id of 0.
+ *
+ * @param int|string $raw the shape this module built: an int, `term_%d`, `user_%d` or `options`
+ * @return int|string whatever ACF's own readers would use for it
+ */
+function wpmcp_acf_object_id($raw) {
+    return acf_get_valid_post_id($raw);
 }
 
 /**
@@ -295,7 +364,7 @@ function wpmcp_acf_resolve($type, $id) {
             return wpmcp_cannot('read an ACF options page');
         }
 
-        return array('type' => 'options', 'id' => 0, 'acf_id' => 'options');
+        return array('type' => 'options', 'id' => 0, 'acf_id' => wpmcp_acf_object_id('options'));
     }
 
     if ($id <= 0) {
@@ -312,7 +381,7 @@ function wpmcp_acf_resolve($type, $id) {
             return wpmcp_cannot("read this post's ACF fields, which needs permission to edit it");
         }
 
-        return array('type' => 'post', 'id' => $id, 'acf_id' => $id);
+        return array('type' => 'post', 'id' => $id, 'acf_id' => wpmcp_acf_object_id($id));
     }
 
     if ($type === 'term') {
@@ -325,7 +394,7 @@ function wpmcp_acf_resolve($type, $id) {
             return wpmcp_cannot("read this term's ACF fields, which needs permission to edit it");
         }
 
-        return array('type' => 'term', 'id' => $id, 'acf_id' => 'term_' . $id);
+        return array('type' => 'term', 'id' => $id, 'acf_id' => wpmcp_acf_object_id('term_' . $id));
     }
 
     $user = get_userdata($id);
@@ -335,7 +404,7 @@ function wpmcp_acf_resolve($type, $id) {
         return wpmcp_cannot("read this user's ACF fields, which needs permission to edit them");
     }
 
-    return array('type' => 'user', 'id' => $id, 'acf_id' => 'user_' . $id);
+    return array('type' => 'user', 'id' => $id, 'acf_id' => wpmcp_acf_object_id('user_' . $id));
 }
 
 /**
@@ -377,6 +446,71 @@ function wpmcp_acf_field_entry($field, $object) {
     }
 
     return $entry;
+}
+
+/**
+ * THE LABEL THE EDITOR SEES FOR ONE LAYOUT, FROM ACF'S OWN METHOD (sprint CORE-FIX).
+ *
+ * The precedence is ACF'S OWN, READ OFF ITS RENDERER, AND IT STAYS OURS BECAUSE ACF DOES NOT
+ * EXPOSE IT. `Layout::action_buttons()` prints
+ * `! empty($this->renamed) ? esc_html($this->renamed) : $title`
+ * (`src/Pro/Fields/FlexibleContent/Layout.php`), and `$title` is `$this->get_title()`. The rename
+ * half is therefore in a PRIVATE render method: `ACF_Field_Flexible_Content::get_layout_title()`
+ * constructs its Layout with `$renamed = ''` (`pro/fields/class-acf-field-flexible-content.php:1367`),
+ * so it can never return a rename. That is a real gap and it is written down as a ledger row - the
+ * ledger's own summary said the public method "delegates to Layout::get_title(), which runs the
+ * documented filter family", which is true, and implied the precedence came with it, which is not.
+ *
+ * WHAT THE CALL DOES BUY, AND IT IS THE HALF THAT WAS WRONG: the un-renamed title now runs
+ * `acf/fields/flexible_content/layout_title` and its `/name=` and `/key=` variants, three
+ * DOCUMENTED filters. Before this the label was `$layout['label']` straight out of the field
+ * group, so on any site using that filter family wp-admin and our `label` DISAGREED - and D29 is
+ * precisely "report the label the editor sees". Our old comment admitted the method existed: it
+ * said the rule had been "read off ACF's own renderer rather than guessed". It read the logic
+ * instead of calling it.
+ *
+ * THE VALUE IS PASSED BECAUSE THE FILTER GETS A LOOP. `get_title()` opens an `acf_add_loop()`
+ * around the field, the index and the row's value before it filters, so a filter that reads
+ * `get_sub_field()` to build a title from the row's own content - which is the documented use -
+ * sees the row. A dropped row has no formatted value to pass and gets `array()`, which is the
+ * same thing `get_layout_title()` is called with from ACF's own AJAX handler for a new row.
+ *
+ * @param array      $field  the Flexible Content field array
+ * @param array|null $layout the layout definition, or null when the stored name has none
+ * @param int        $index  the row's ORIGINAL index
+ * @param mixed      $value  the row's formatted value, or array() when there is none
+ * @return string
+ */
+function wpmcp_acf_layout_label($field, $layout, $index, $value) {
+    $own = is_array($layout) && isset($layout['label']) ? (string) $layout['label'] : '';
+
+    // A layout name in the stored value with no matching definition - a layout the editor
+    // DELETED from the field group - has no label anywhere to ask for.
+    if (!is_array($layout) || !wpmcp_acf_layout_metadata_available()) { return $own; }
+
+    // Same object, same guard and same absence of a second check as the two accessors above:
+    // the face is what proves `get_layout_title` is there, and it is declared beside them.
+    $title = wpmcp_acf_flexible_content()->get_layout_title(
+        $field,
+        $layout,
+        $index,
+        is_array($value) ? $value : array()
+    );
+
+    // DECODED ONCE, BECAUSE get_title() ESCAPED FOR HTML AND THIS IS NOT HTML. `Layout::get_title()`
+    // returns `wp_kses( apply_filters( ..., esc_html( $label ) ), 'acf' )`, because its only caller
+    // in ACF echoes it into a wp-admin span. Our `label` goes onto a JSON wire, where `&amp;` is
+    // not an ampersand - shipping ACF's output verbatim would put entity garbage in front of the
+    // caller, which is the same defect as double-escaping an admin notice. `wp_specialchars_decode(
+    // $title, ENT_QUOTES )` is the exact inverse of `_wp_specialchars( $text, ENT_QUOTES )` that
+    // `esc_html()` applied, so on a site with no filter the answer is byte-identical to the
+    // layout's own stored label.
+    //
+    // WHAT IS NOT UNDONE, and it is the seam to watch: a filter that deliberately returns MARKUP
+    // gets its markup through `wp_kses`'s `acf` allow-list and onto the wire as markup. That is
+    // what the filter told wp-admin the label is, and stripping it here would be this module
+    // deciding something the site's author already decided.
+    return is_string($title) ? wp_specialchars_decode($title, ENT_QUOTES) : $own;
 }
 
 /**
@@ -458,12 +592,11 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
         $row        = array(
             'index'    => $index,
             'layout'   => $layoutName,
-            // THE LABEL THE EDITOR SEES, which is the rename when there is one and the layout's
-            // own label otherwise - read off ACF's own renderer rather than guessed
-            // (src/Pro/Fields/FlexibleContent/Layout.php: `! empty($this->renamed) ? $this->renamed : $title`).
+            // THE LABEL THE EDITOR SEES, and the fallback half is now ACF'S OWN CALL rather than
+            // our reading of it (sprint CORE-FIX) - see wpmcp_acf_layout_label().
             'label'    => isset($renamed[$index]) && $renamed[$index] !== ''
                 ? (string) $renamed[$index]
-                : (isset($layouts[$layoutName]['label']) ? (string) $layouts[$layoutName]['label'] : ''),
+                : wpmcp_acf_layout_label($field, isset($layouts[$layoutName]) ? $layouts[$layoutName] : null, $index, isset($formatted[$index]) ? $formatted[$index] : array()),
             'renamed'  => isset($renamed[$index]) && $renamed[$index] !== '',
             'disabled' => $isDisabled,
         );
@@ -798,8 +931,19 @@ function wpmcp_acf_user_fields() {
  * One `WP_User` as this module reports it - THE SAME FIELDS AND THE SAME GATE `get-user` USES.
  *
  * `id` and `name` always; `login`, `email`, `roles` and `registered` only for a caller with
- * `list_users`, or `edit_user` on that user, or themselves. That is core's own line and it is
- * `get-user`'s, so the two tools cannot disagree about what a user looks like.
+ * `list_users`, or `edit_user` on that user, or themselves (`edit_user` is how core spells "or
+ * themselves" - map_meta_cap allows `edit_user` on your own id).
+ *
+ * THAT IS `get-user`'s LINE, NOT CORE'S, AND THIS DOCBLOCK USED TO SAY IT WAS CORE'S (sprint
+ * CORE-FIX). It is LOOSER than `WP_REST_Users_Controller`'s: core puts those four fields in the
+ * `edit` CONTEXT, and its `get_item_permissions_check()` refuses an `edit`-context read of
+ * ANOTHER user outright unless the caller can `edit_user` them
+ * (`class-wp-rest-users-controller.php:487`). `list_users` does not satisfy that rule, and here
+ * it does. The reason to keep ours is that a repetition must match the thing it repeats: this is
+ * `get-user`'s gate, `wpmcp_user_out()`'s `$full`, and tests hold the two together - a module
+ * that quietly tightened it would make the same id answer differently through two tools of the
+ * same server. Widening or narrowing it is a decision about `get-user`, in `tools.php`, and it
+ * would have to move both.
  *
  * @return array<string, mixed>
  */

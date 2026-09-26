@@ -15,7 +15,7 @@
  * is not named here. A new option or table without a line in this file is a red test rather
  * than a row left in somebody's database.
  *
- * THE ORDER IS DELIBERATE. The cron hook goes first, so a scheduled flush cannot fire
+ * THE ORDER IS DELIBERATE. The cron hooks go first, so a scheduled flush cannot fire
  * against a table that is about to disappear. Options next, then the tables, then what
  * 1.1.1 and earlier left in `wp-content` - the thing most likely to fail is last, and when
  * it does the rest is already gone.
@@ -68,15 +68,27 @@ $wpmcp_transients = array(
 );
 
 /**
- * Clean one site: its cron hook, its options, its three tables.
+ * Every cron hook the plugin schedules, spelled out for the same reason every option name is:
+ * wp-mcp.php has not run, so wpmcp_cron_hooks() does not exist here (sprint CORE-FIX).
+ *
+ * tests/unit/CronHooksTest.php reads wpmcp_cron_hooks() out of the plugin's source and fails if
+ * a name in it is missing from this list - so a second scheduled job cannot be added without
+ * being removed on delete.
+ */
+$wpmcp_cron_hooks = array(
+    'wpmcp_flush_expired',
+);
+
+/**
+ * Clean one site: its cron hooks, its options, its three tables.
  *
  * What 1.1.1 and earlier left in wp-content is handled once afterwards rather than per
  * site, because that directory is shared across a network.
  */
-function wpmcp_uninstall_site(array $options, array $transients) {
+function wpmcp_uninstall_site(array $options, array $transients, array $cronHooks) {
     global $wpdb;
 
-    wp_clear_scheduled_hook('wpmcp_flush_expired');
+    foreach ($cronHooks as $hook) { wp_clear_scheduled_hook($hook); }
 
     foreach ($options as $option) { delete_option($option); }
     foreach ($transients as $transient) { delete_transient($transient); }
@@ -152,13 +164,13 @@ if (is_multisite()) {
     // get_sites() rather than wp_get_sites(), which has been deprecated since 4.6.
     foreach (get_sites(array('fields' => 'ids', 'number' => 0)) as $wpmcp_site_id) {
         switch_to_blog((int) $wpmcp_site_id);
-        wpmcp_uninstall_site($wpmcp_options, $wpmcp_transients);
+        wpmcp_uninstall_site($wpmcp_options, $wpmcp_transients, $wpmcp_cron_hooks);
         restore_current_blog();
     }
 } else {
-    wpmcp_uninstall_site($wpmcp_options, $wpmcp_transients);
+    wpmcp_uninstall_site($wpmcp_options, $wpmcp_transients, $wpmcp_cron_hooks);
 }
 
 wpmcp_uninstall_trace_dir();
 
-unset($wpmcp_options, $wpmcp_transients);
+unset($wpmcp_options, $wpmcp_transients, $wpmcp_cron_hooks);

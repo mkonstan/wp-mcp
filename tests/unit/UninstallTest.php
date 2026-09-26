@@ -93,11 +93,21 @@ final class UninstallTest extends TestCase
             'The token table is not dropped.'
         );
 
+        // THE HOOK NAME IS NO LONGER A LITERAL IN THE CALL (sprint CORE-FIX): this file declares
+        // $wpmcp_cron_hooks and clears the list, so that a SECOND hook is removed by the same
+        // enumeration. tests/unit/CronHooksTest.php holds that list against wpmcp_cron_hooks() in
+        // the plugin, exactly as this file's option assertion does for the option names.
         self::assertStringContainsString(
-            "wp_clear_scheduled_hook('wpmcp_flush_expired')",
+            'foreach ($cronHooks as $hook) { wp_clear_scheduled_hook($hook); }',
             $uninstall,
             'The hourly flush stays scheduled after the plugin is gone, and WordPress'
             . ' keeps trying to fire a hook nothing listens to.'
+        );
+        self::assertStringContainsString(
+            "'wpmcp_flush_expired',",
+            $uninstall,
+            'The hook this plugin has scheduled since 1.0 is not in $wpmcp_cron_hooks, so the loop'
+            . ' above clears nothing.'
         );
 
         self::assertStringContainsString(

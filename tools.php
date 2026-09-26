@@ -135,11 +135,30 @@ function wpmcp_code_forbidden() {
  * operator who set DISALLOW_FILE_EDIT deliberately has just been told by their own server
  * that theme editing is on offer.
  *
- * THE CAPABILITY HALF STAYS PER-REQUEST and out of here, because it is a property of the
- * token's user rather than of the site: the registry is built once per request but the
- * answer is the same for every caller, while `edit_themes` is not. Listing on the
- * constants and refusing on the capability is the same split endpoint.php already makes
- * between the scope gate and the capability checks inside each tool.
+ * THE ROLE HALF STAYS PER-REQUEST and out of here, because it is a property of the token's
+ * user's ROLE rather than of the site: an Administrator holds `edit_themes` and a
+ * Subscriber does not, so a tool this token's user may not use is still listed, because
+ * another token's user may. Listing on the site's own switches and refusing on the role is
+ * the same split endpoint.php already makes between the scope gate and the capability
+ * checks inside each tool.
+ *
+ * THE ONE EXCEPTION IS MULTISITE, AND IT IS CORE'S THIRD DENY BRANCH (sprint CORE-FIX).
+ * `map_meta_cap`'s `edit_themes` case has THREE deny branches, not two
+ * (wp-includes/capabilities.php:607-618): DISALLOW_FILE_EDIT, then
+ * `wp_is_file_mod_allowed('capability_edit_themes')`, then
+ * `is_multisite() && ! is_super_admin( $user_id )`. This function had the first two, so on
+ * a network install every non-super-admin - including a Site Administrator, who holds
+ * `edit_themes` in their role - was SHOWN all six code tools and refused every call. That is
+ * the exact "advertised and refused" state the docblock above says this split fixed, and it
+ * is D32's argument in one function: we copied core's check, got two branches of three, and
+ * the copy drifted where core's cannot drift from itself.
+ *
+ * SO THE THIRD BRANCH READS THE CALLER AND STILL BELONGS HERE. It is not a ROLE fact - no
+ * role on a network grants theme file editing to a site administrator, and no token minted
+ * for one can ever pass it - so "another token's user may" is false for every token except a
+ * network administrator's. The registry is built inside the request, after the token's user
+ * is the current user, so asking is well defined; and the split the paragraph above describes
+ * is unchanged, because what stays out of here is the ROLE capability itself.
  */
 function wpmcp_code_constants_forbid() {
     // THE FILE-MOD HALF IS THE PLATFORM'S ANSWER, NOT A CONSTANT READ (1.1.1).
@@ -167,6 +186,17 @@ function wpmcp_code_constants_forbid() {
     // delegate to and a filter of our own would disagree with `current_user_can`.
     if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
         return new WP_Error('wpmcp_forbidden', 'Theme file editing is disabled on this site (DISALLOW_FILE_EDIT).');
+    }
+    // CORE'S THIRD DENY BRANCH (capabilities.php:613), and it is LAST here because it is last
+    // there: when more than one applies, the operator is told about the one core would have
+    // stopped at. `is_super_admin()` with no argument asks about the current user, which is the
+    // same user `current_user_can('edit_themes')` resolves $user_id to - so the listing and the
+    // run closures cannot answer differently.
+    if (is_multisite() && !is_super_admin()) {
+        return new WP_Error(
+            'wpmcp_forbidden',
+            'Theme file editing on a network is limited to network administrators (multisite).'
+        );
     }
     return null;
 }
@@ -4094,13 +4124,24 @@ function wpmcp_comment_tools() {
             );
             if (isset($a['post'])) { $args['post_id'] = (int) $a['post']; }
 
-            // `search` is NOT passed to WP_Comment_Query: it hard-codes the columns
-            // comment_author, comment_author_email, comment_author_url,
-            // comment_author_IP and comment_content, with no filter to narrow them
-            // (verified in class-wp-comment-query.php). A tool that says "emails
-            // omitted" while letting a caller prefix-probe them by search does not
-            // omit them. The clause is built here over the two safe columns instead,
-            // which keeps the filtering - and therefore the pagination - in SQL.
+            // `search` is NOT passed to WP_Comment_Query: its `search` var hard-codes the
+            // columns comment_author, comment_author_email, comment_author_url,
+            // comment_author_IP and comment_content, and there is no FILTER on that
+            // choice. A tool that says "emails omitted" while letting a caller
+            // prefix-probe them by search does not omit them. The clause is built here
+            // over the two safe columns instead, which keeps the filtering - and
+            // therefore the pagination - in SQL.
+            //
+            // AND THE COLUMN LIST *IS* REACHABLE, WHICH THIS COMMENT USED TO DENY (sprint
+            // CORE-FIX). It said the columns "cannot be narrowed", full stop, and that is
+            // false: `WP_Comment_Query::get_search_sql( $search, $columns )` takes the
+            // column list as a parameter and the class's `__call()` proxy forwards exactly
+            // that one name, so it is publicly callable
+            // (class-wp-comment-query.php:132-134, :1169). What core gives no hook for is
+            // the list `$query_vars['search']` uses; the SQL builder itself is ours to call.
+            // Calling it would replace the two `$wpdb->prepare` lines below with one core
+            // call - which is a refactor, deliberately NOT done here, and it is recorded so
+            // the next author finds a true claim rather than a closed door.
             $search = isset($a['search']) ? trim((string) $a['search']) : '';
             $filter = null;
             if ($search !== '') {
@@ -4319,12 +4360,14 @@ function wpmcp_comment_tools() {
 }
 
 /* ============================================================
- * Code-edit tools. Listed only when the switch in Settings > WP MCP is on AND neither
- * DISALLOW_FILE_EDIT nor DISALLOW_FILE_MODS is set - see wpmcp_code_constants_forbid(),
- * which endpoint.php's wpmcp_tools() asks before it merges these in. The third gate,
- * `edit_themes`, is per-caller and is checked by each run closure through
- * wpmcp_code_forbidden(); a tool that this token's user may not use is still LISTED,
- * because another token's user may.
+ * Code-edit tools. Listed only when the switch in Settings > WP MCP is on AND nothing core
+ * denies `edit_themes` for outright answers yes: DISALLOW_FILE_EDIT, the `file_mod_allowed`
+ * filter, and - since sprint CORE-FIX - core's third branch, a network install and a caller
+ * who is not a super admin. All three are wpmcp_code_constants_forbid(), which endpoint.php's
+ * wpmcp_tools() asks before it merges these in. The remaining gate is the `edit_themes`
+ * capability ITSELF, which is a property of the token's user's ROLE and is checked by each run
+ * closure through wpmcp_code_forbidden(); a tool that this token's role may not use is still
+ * LISTED, because another token's user may hold the role.
  * ========================================================== */
 function wpmcp_code_tools() {
     return array(
@@ -5452,6 +5495,15 @@ function wpmcp_raw_network_option($name) {
  * are read by get_file_data() with NO context, which is what skips the extra_plugin_headers
  * filter (functions.php:7057), and no plugins cache is read or written.
  *
+ * AND KEYED BY plugin_basename(), BECAUSE get_plugins() IS (:346, sprint CORE-FIX). The keys
+ * of this array are compared with `active_plugins`, whose values activate_plugin() wrote
+ * through that same function - so a key built any other way is a key set that CAN diverge from
+ * the one it is matched against, and `active` reads false for a plugin that is genuinely
+ * active. It normalises separators, resolves a path registered by
+ * wp_register_plugin_realpath() for a symlinked plugin directory, and strips the plugins-dir
+ * prefix. On an ordinary install it changes nothing, which is the point: the two key sets are
+ * now identical BY CONSTRUCTION rather than by both happening to be a raw readdir() path.
+ *
  * @return array<string, array{Name: string, Version: string}> file => headers, by name
  */
 function wpmcp_scan_plugins() {
@@ -5484,7 +5536,7 @@ function wpmcp_scan_plugins() {
         if (!is_readable($root . '/' . $file)) { continue; }
         $headers = get_file_data($root . '/' . $file, array('Name' => 'Plugin Name', 'Version' => 'Version'));
         if ($headers['Name'] === '') { continue; }
-        $plugins[$file] = $headers;
+        $plugins[plugin_basename($file)] = $headers;
     }
 
     uasort($plugins, static function ($a, $b) { return strnatcasecmp($a['Name'], $b['Name']); });
@@ -5790,7 +5842,8 @@ function wpmcp_inventory_tools() {
             . ' plugin\'s id, such as "akismet/akismet.php"), name and version from its header, active,'
             . ' network_active (multisite only), and auto_update - true when the plugin is in the'
             . ' site\'s stored auto-update list, false when not, null when you cannot update plugins'
-            . ' (your role lacks update_plugins, or wp-config sets DISALLOW_FILE_MODS). auto_update'
+            . ' (your role lacks update_plugins, wp-config sets DISALLOW_FILE_MODS, or a network'
+            . ' limits it to network admins). auto_update'
             . ' does not reflect auto-updates switched off site-wide, a plugin forcing its own answer,'
             . ' or whether an update source exists. It reads plugin files and stored settings'
             . ' directly: no update, auto-update, plugin-header or per-option filter runs, so no'
@@ -5819,7 +5872,19 @@ function wpmcp_inventory_tools() {
             // made its request from there. The same rule without the filter: wp-config does not
             // set DISALLOW_FILE_MODS, and the caller's role holds update_plugins. The user object
             // was loaded when the token was checked, so reading its caps runs no hook.
-            $fileMods = !(defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS);
+            //
+            // AND CORE'S SECOND DENY BRANCH, WHICH THIS COPY OMITTED (sprint CORE-FIX).
+            // map_meta_cap's update_plugins case is THREE branches, not one
+            // (capabilities.php:619-641): the file-mod gate, then
+            // `is_multisite() && ! is_super_admin( $user_id )`, then the capability. Without the
+            // middle one, a Site Administrator on a network - who holds update_plugins in their
+            // role and cannot update a single plugin - was told true or false where core says
+            // "you cannot update plugins", which is what `auto_update: null` is for. Same class
+            // as wpmcp_code_constants_forbid()'s missing third branch, same file, one copy of
+            // core's decision each. is_multisite() reads a constant and is_super_admin() reads
+            // the user object already loaded, so the tool's no-remote-work contract holds.
+            $fileMods = !(defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS)
+                && !(is_multisite() && !is_super_admin());
             $canAuto  = $fileMods && !empty(wp_get_current_user()->allcaps['update_plugins']);
             $autoList = $canAuto ? (array) wpmcp_raw_network_option('auto_update_plugins') : null;
             $items    = array();

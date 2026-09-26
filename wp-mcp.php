@@ -445,12 +445,37 @@ define('WPMCP_TRACE_FILE_OPTION', 'wpmcp_trace_file_left');
 /* ============================================================
  * Activation / upgrade: create the tokens table, migrate data
  * ========================================================== */
+/**
+ * EVERY CRON HOOK THIS PLUGIN SCHEDULES, AS ONE LIST (sprint CORE-FIX).
+ *
+ * THE DEFECT THIS CLOSES was an asymmetry, not a missing call: activation scheduled through
+ * one literal, deactivation hand-rolled `wp_next_scheduled()` + `wp_unschedule_event()` -
+ * which removes exactly ONE event - and uninstall.php used `wp_clear_scheduled_hook()`, which
+ * removes ALL of them. So a site that had somehow accumulated two events for the hook (a
+ * double activation with a hijacked `pre_schedule_event` filter, a restored database, a
+ * migration that copied the cron array) was left with a scheduled job after deactivation,
+ * firing against a plugin that is not loaded. Three sites, three spellings of "the same job".
+ *
+ * ONE LIST, AND REGISTRATION AND REMOVAL BOTH WALK IT, so a second hook added in 2027 is
+ * scheduled and cleared by the same enumeration rather than by whoever remembers.
+ * uninstall.php cannot call this - WordPress includes that file in a request where this one
+ * has not run - so it repeats the names as literals and tests/unit/CronHooksTest.php holds its
+ * list against this one, exactly as UninstallTest does for the option names.
+ *
+ * @return list<string>
+ */
+function wpmcp_cron_hooks() {
+    return array('wpmcp_flush_expired');
+}
+
 register_activation_hook(__FILE__, 'wpmcp_activate');
 function wpmcp_activate() {
     wpmcp_install();
 
-    if (!wp_next_scheduled('wpmcp_flush_expired')) {
-        wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
+    foreach (wpmcp_cron_hooks() as $wpmcp_hook) {
+        if (!wp_next_scheduled($wpmcp_hook)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', $wpmcp_hook);
+        }
     }
 
     // NOTHING HERE FOR THE TRACE LOG SINCE 1.1.2, and its absence is the point: it is a
@@ -794,11 +819,24 @@ function wpmcp_client_columns_notice() {
         . ' privilege: grant it, then deactivate and reactivate this plugin to add them.</p></div>';
 }
 
-/** Is the file-versions table really there? The upgrade gate, not decoration. */
+/**
+ * Is the file-versions table really there? The upgrade gate, not decoration.
+ *
+ * esc_like() ON THE PATTERN, AND IT IS NOT DECORATION EITHER (sprint CORE-FIX). `_` is a LIKE
+ * wildcard matching ANY ONE CHARACTER, and every table name this plugin has contains three of
+ * them (`wp_wpmcp_file_versions`). `get_var()` returns the FIRST row, so on a database that
+ * holds a same-shaped neighbour - `wp_wpmcpXfile_versions`, or another site's prefix that
+ * differs by one character - the unescaped pattern could match it first, `$found === $table`
+ * would be false, this gate would report the table missing, and wpmcp_install() would run
+ * dbDelta on EVERY REQUEST for ever on a site where nothing is wrong. Needs an oddly named
+ * neighbour to trigger, which is why it had never been seen; the fix is one call, so the
+ * likelihood does not matter. $wpdb->esc_like() is core's own (wp-db.php), and prepare() then
+ * quotes the result - the two are complementary and neither substitutes for the other.
+ */
 function wpmcp_versions_table_exists() {
     global $wpdb;
     $table = wpmcp_versions_table();
-    $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+    $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
     return $found === $table;
 }
 
@@ -808,12 +846,19 @@ function wpmcp_versions_table_exists() {
  * A SECOND FUNCTION RATHER THAN A TABLE ARGUMENT on the token one, because the two
  * tables are checked for different reasons at different points and the token version's
  * name says which table it means at every call site.
+ *
+ * esc_like() FOR THE SAME REASON AS THE TABLE PROBE ABOVE, and here it is sharper: every
+ * column name these two are ever called with contains `_` - window_secs, active_until,
+ * last_used_at, client_name, client_version - and unlike the table probe this
+ * one does NOT compare the answer with what it asked for. A non-empty result is the whole
+ * assertion, so `LIKE 'client_name'` matching a column called `clientXname` would report a
+ * column that is not there, and the installer would skip an ALTER the table needs.
  */
 function wpmcp_versions_column_exists($column) {
     global $wpdb;
     $found = $wpdb->get_col($wpdb->prepare(
         'SHOW COLUMNS FROM ' . wpmcp_versions_table() . ' LIKE %s',
-        $column
+        $wpdb->esc_like($column)
     ));
     return is_array($found) && $found !== array();
 }
@@ -823,7 +868,7 @@ function wpmcp_token_column_exists($column) {
     global $wpdb;
     $found = $wpdb->get_col($wpdb->prepare(
         'SHOW COLUMNS FROM ' . wpmcp_table() . ' LIKE %s',
-        $column
+        $wpdb->esc_like($column)
     ));
     return is_array($found) && $found !== array();
 }
@@ -1347,9 +1392,16 @@ function wpmcp_migrate_token_lifetimes() {
     );
 }
 
+/**
+ * Deactivation removes every event of every hook wpmcp_cron_hooks() names.
+ *
+ * wp_clear_scheduled_hook() AND NOT wp_next_scheduled() + wp_unschedule_event(): the pair
+ * removes the NEXT event and leaves any others, and core's own remover already loops
+ * (wp-includes/cron.php). It is also what uninstall.php has always called, so the two paths
+ * now do the same thing to the same list.
+ */
 register_deactivation_hook(__FILE__, function () {
-    $ts = wp_next_scheduled('wpmcp_flush_expired');
-    if ($ts) { wp_unschedule_event($ts, 'wpmcp_flush_expired'); }
+    foreach (wpmcp_cron_hooks() as $hook) { wp_clear_scheduled_hook($hook); }
 });
 
 /* ============================================================

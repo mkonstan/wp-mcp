@@ -292,7 +292,13 @@ function wpmcp_render_admin() {
         $owner = isset($_POST['wpmcp_user_id']) ? (int) $_POST['wpmcp_user_id'] : 0;
         $res   = wpmcp_mint($scope, $label, $window, $lifetime, $owner);
         if (is_wp_error($res)) {
-            $notice = 'Error: ' . esc_html($res->get_error_message());
+            // ESCAPED ONCE, AT OUTPUT, AND THAT IS NOT HERE (sprint CORE-FIX). $notice is
+            // printed through esc_html() where the notice is rendered, so escaping it again
+            // here turned every `&`, `<` and `'` in a mint refusal into a visible `&amp;`,
+            // `&lt;` and `&#039;` - the operator read entity garbage at the one moment they
+            // needed the message. The other three writers of $notice already pass raw text,
+            // including the renew failure ten lines down; this was the only one that did not.
+            $notice = 'Error: ' . $res->get_error_message();
         } else {
             $owner_user = get_userdata($owner ? $owner : get_current_user_id());
             $minted = array(

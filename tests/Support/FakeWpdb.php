@@ -248,4 +248,17 @@ final class FakeWpdb
     {
         return '';
     }
+
+    /**
+     * CORE'S OWN BODY, one line (wp-includes/class-wpdb.php: `addcslashes( $text, '_%\\' )`).
+     *
+     * Written out rather than returned unchanged because the thing under test in sprint CORE-FIX
+     * is that the plugin CALLS it: a stub that answered `$text` would make the escaped and the
+     * unescaped pattern the same string, and every assertion about the difference would pass on
+     * code that never escaped anything.
+     */
+    public function esc_like($text)
+    {
+        return addcslashes((string) $text, '_%\\');
+    }
 }
