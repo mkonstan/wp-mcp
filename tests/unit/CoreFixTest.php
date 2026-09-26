@@ -576,7 +576,7 @@ final class CoreFixTest extends TestCase
         // rewrite that went back to a hand-built clause has to come back through the sweep above,
         // and this assertion is what says which of the two shapes is shipping.
         self::assertStringContainsString(
-            '->get_search_sql($search,',
+            '(new WP_Comment_Query())->get_search_sql($search,',
             RepoFile::read('tools.php'),
             "list-comments' search no longer goes through WP_Comment_Query::get_search_sql(), so"
             . ' the esc_like() that clause relies on is not core\'s any more. Either restore the'
@@ -603,10 +603,18 @@ final class CoreFixTest extends TestCase
      * assertion says is the decision - no writer of $notice escapes, exactly one reader does.
      *
      * THE READER IS NOW `wp_admin_notice(esc_html($notice), ...)` RATHER THAN `echo esc_html(...)`
-     * (sprint DELETIONS), so the pattern below matches the escape and not the statement around
-     * it. The invariant is unchanged and so is the count: core's wp_get_admin_notice()
-     * interpolates the message RAW, which tests/integration/PlatformDeletionsTest.php pins
-     * against the real function - so this esc_html() is still the only one, and still required.
+     * (sprint DELETIONS), so the pattern below was re-anchored to the new call. The invariant is
+     * unchanged and so is the count: core's wp_get_admin_notice() interpolates the message RAW,
+     * which tests/integration/PlatformDeletionsTest.php pins against the real function - so this
+     * esc_html() is still the only one, and still required.
+     *
+     * AND THE PATTERN IS ANCHORED ON BOTH SIDES, which round 2 of that sprint had to fix. The
+     * re-aimed version was the bare `/esc_html\(\$notice\)/`, which MATCHES
+     * `esc_html(esc_html($notice))` - the count is still 1 and the double escape this test exists
+     * to forbid becomes writable without the suite noticing. The `echo` in the original pattern
+     * was doing anchoring work nobody had named. Requiring the whole
+     * `wp_admin_notice(esc_html($notice),` puts a token on each side of the escape, so a nested
+     * call cannot satisfy it.
      *
      * @group sprint-core-fix
      */
@@ -617,9 +625,10 @@ final class CoreFixTest extends TestCase
 
         self::assertSame(
             1,
-            preg_match_all('/esc_html\(\$notice\)/', $admin),
+            preg_match_all('/wp_admin_notice\(esc_html\(\$notice\),/', $admin),
             'The admin notice is no longer escaped exactly once where it is printed, so every'
             . ' assertion below is about a different value than the one the operator reads.'
+            . ' A nested esc_html(esc_html($notice)) fails here, which is the point.'
         );
 
         preg_match_all('/\$notice\s*(?:=|\.=)\s*(.*?);\n/s', $admin, $matches, PREG_SET_ORDER);

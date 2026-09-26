@@ -437,7 +437,7 @@ final class AcfCoreFixTest extends TestCase
             "list-comments still says WP_Comment_Query's search columns cannot be narrowed."
         );
         self::assertStringContainsString(
-            '->get_search_sql($search,',
+            '(new WP_Comment_Query())->get_search_sql($search,',
             $tools,
             'list-comments no longer CALLS the method whose reachability this sprint corrected, so'
             . ' the next author reads a closed door where there is an open one.'

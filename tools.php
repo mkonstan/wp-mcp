@@ -4188,10 +4188,32 @@ function wpmcp_comment_tools() {
                     // A bare WP_Comment_Query RUNS NOTHING: its constructor only fills
                     // $query_var_defaults and queries when handed args (:278-330), so
                     // constructing one inside comments_clauses fires no hook of its own.
-                    $clauses['where'] .= (new WP_Comment_Query())->get_search_sql($search, array(
+                    $sql = (new WP_Comment_Query())->get_search_sql($search, array(
                         $wpdb->comments . '.comment_content',
                         $wpdb->comments . '.comment_author',
                     ));
+
+                    // AND WHAT HAPPENS IF CORE RENAMES IT: `__call()` RETURNS `false`, and
+                    // `false` concatenates to the empty string - so the search clause would
+                    // VANISH rather than error and list-comments would answer with EVERY comment
+                    // the caller may read while looking like a search that matched them all.
+                    // That is this project's most-repeated defect class: an instrument that
+                    // answers with nothing, where nothing reads as success. `__call()` answers
+                    // `false` for every name but `get_search_sql` (class-wp-comment-query.php:
+                    // 131-136), so the rename, a visibility change to public or private, and the
+                    // proxy's removal all land here as a non-string. Refuse loudly instead: the
+                    // endpoint's boundary turns this into one opaque error plus a trace id
+                    // (endpoint.php:1235), which is a refused call an operator can look up
+                    // rather than a wrong answer nobody questions.
+                    if (!is_string($sql)) {
+                        throw new RuntimeException(
+                            'WP_Comment_Query::get_search_sql() is no longer reachable through'
+                            . ' __call() - it returned ' . gettype($sql) . '. list-comments will'
+                            . ' not answer an unfiltered list to a search.'
+                        );
+                    }
+
+                    $clauses['where'] .= $sql;
                     return $clauses;
                 };
                 add_filter('comments_clauses', $filter);

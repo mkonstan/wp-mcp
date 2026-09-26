@@ -33,6 +33,7 @@ namespace WpMcp\Tests\Integration;
 use RuntimeException;
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
+use WpMcp\Tests\Support\RepoFile;
 use WpMcp\Tests\Support\WpCli;
 
 final class PlatformDeletionsTest extends FixtureIntegrationTestCase
@@ -205,6 +206,77 @@ final class PlatformDeletionsTest extends FixtureIntegrationTestCase
             'Searching for "_" did not return exactly the one comment containing a literal'
             . ' underscore. An empty result means the fixture is missing; all three means the'
             . ' wildcard reached the LIKE unescaped and the search now matches everything.'
+        );
+    }
+
+    /**
+     * ITEM 4, round 2: `__call()` ANSWERS `false`, so the clause can VANISH - and it must not
+     * vanish silently.
+     *
+     * THIS IS THE PROJECT'S MOST-REPEATED DEFECT CLASS. `WP_Comment_Query::__call()` returns
+     * `false` for every name but `get_search_sql`, and `false` concatenates to the empty string -
+     * so a rename, a visibility change, or the proxy's removal would leave list-comments answering
+     * with EVERY comment the caller may read, looking exactly like a search that matched them all.
+     * An instrument that answers with nothing, where nothing reads as success.
+     *
+     * TWO HALVES, AND NEITHER IS A SOURCE ASSERTION ABOUT THE OTHER. The first EXECUTES core's
+     * proxy with a name it does not handle and asserts the answer really is `false` - so if core
+     * ever starts throwing instead, this goes red and the guard in tools.php can be simplified
+     * rather than quietly doing nothing. The second asserts that tools.php refuses on a non-string
+     * instead of concatenating it, which is the only half a unit-tier pattern could reach.
+     *
+     * WHAT THIS CANNOT CATCH: the live rename itself. A test cannot rename a core method, so the
+     * end-to-end proof - that the rename produces a traced `-32603` refusal rather than an
+     * unfiltered list - is a mutation run, recorded in analysis/86. What IS permanent is that the
+     * failure mode is real (half one) and that we check for it (half two).
+     *
+     * @group sprint-deletions
+     */
+    public function testAVanishedSearchClauseIsRefusedRatherThanAnsweredWithEveryComment(): void
+    {
+        $answer = WpCli::evaluate(
+            '$q = new WP_Comment_Query();'
+            . ' echo "\n", wp_json_encode(array('
+            . '   "unknown" => $q->get_search_sql_that_core_does_not_have("x", array("c")),'
+            . '   "known"   => $q->get_search_sql("x", array("c")),'
+            . ' ));'
+        );
+
+        $lines = preg_split('/\r?\n/', trim($answer));
+        $got   = json_decode((string) end($lines), true);
+
+        if (!is_array($got) || !array_key_exists('unknown', $got)) {
+            throw new RuntimeException('Could not exercise __call(): ' . substr($answer, 0, 300));
+        }
+
+        self::assertFalse(
+            $got['unknown'],
+            'WP_Comment_Query::__call() no longer answers false for a name it does not handle, so'
+            . ' the non-string guard in tools.php is now guarding against something else. Read what'
+            . ' it does answer and decide whether the guard should throw or be removed.'
+        );
+
+        // The POSITIVE side, over the same object: the name we DO use answers a string. Without
+        // this the assertion above would pass on a proxy that answered false to everything -
+        // including our call - which is the failure the guard exists for.
+        self::assertIsString(
+            $got['known'],
+            'The name list-comments actually calls no longer answers a string either, so the search'
+            . ' clause is vanishing on every request right now.'
+        );
+
+        // And ours refuses rather than concatenating. `$clauses['where'] .= false` is the silent
+        // path; the guard has to sit between the call and the concatenation, which is why both
+        // tokens are asserted and not just the is_string().
+        $tools = RepoFile::read('tools.php');
+
+        self::assertStringContainsString('if (!is_string($sql)) {', $tools);
+        self::assertStringContainsString("\$clauses['where'] .= \$sql;", $tools);
+        self::assertStringNotContainsString(
+            "\$clauses['where'] .= (new WP_Comment_Query())",
+            $tools,
+            'The search clause is concatenated straight off the __call() proxy again, so a `false`'
+            . ' would append nothing and list-comments would answer every comment to a search.'
         );
     }
 
