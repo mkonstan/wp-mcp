@@ -382,40 +382,25 @@ final class CoreFixTest extends TestCase
      * ============================================================================ */
 
     /**
-     * A PERMITTED VALUE THAT IS NOT VALID UTF-8 IS STILL NAMED IN THE LIST OF PERMITTED VALUES.
+     * WHERE THE UTF-8 ENUM CASE WENT, AND WHY IT COULD NOT STAY HERE (sprint VALIDATOR).
      *
-     * `json_encode()` returns FALSE on JSON_ERROR_UTF8, and `false` concatenates into a string as
-     * `''` - so `SchemaValidator`'s enum failure said "not one of the permitted values: " and
-     * then nothing, for the one value the caller needed to see. Twenty lines above the call, the
-     * same file's own docblock argues for `wp_json_encode` on exactly this ground: it runs
-     * `_wp_json_sanity_check()`, which strips the bad bytes and returns a string.
+     * This item's instance was `SchemaValidator::asList()` calling bare `json_encode()`, which
+     * answers FALSE on JSON_ERROR_UTF8 - and `false` concatenates as `''`, so the one permitted
+     * value the caller needed to see vanished from the message that lists permitted values. The
+     * fix was `wp_json_encode()`, whose `_wp_json_sanity_check()` strips the bad bytes.
      *
-     * THE VALUE IS AN ARRAY BECAUSE A STRING WOULD NOT REACH THE CALL: asList() passes a string
-     * through untouched and only encodes a non-scalar, which is also the only shape where the
-     * whole entry can vanish rather than arrive mangled.
+     * `asList()` NO LONGER EXISTS. `enum` is core's now, and `rest_validate_enum()` builds the
+     * same list with the same rule - `is_scalar($v) ? $v : wp_json_encode($v)`
+     * (wp-includes/rest-api.php:2148-2151) - so the guarantee is unchanged and is no longer a
+     * restatement, which is what D32 asks for. The test moved to
+     * tests/integration/SchemaKeywordsTest::testAnEnumValueCannotVanishFromTheListOfPermittedValues(),
+     * still carrying `@group sprint-core-fix`, because this tier has no WordPress and would
+     * otherwise be asserting the behaviour of a recording double rather than core's.
      *
-     * @group sprint-core-fix
+     * THE CLASS SWEEP BELOW IS UNTOUCHED AND IS WHAT STILL COVERS THIS FILE: no shipped PHP calls
+     * `json_encode` directly, `src/SchemaValidator.php` included. The instance moved tiers; the
+     * class did not move anywhere.
      */
-    public function testAnEnumValueCannotVanishFromTheListOfPermittedValues(): void
-    {
-        // A lone 0xB1 is a continuation byte with no lead byte: not valid UTF-8, which is what
-        // json_encode refuses the whole document on.
-        $failures = SchemaValidator::validate('nope', ['enum' => [['shape' => "bad\xB1value"]]]);
-
-        self::assertCount(1, $failures, 'A value outside the enum was accepted: ' . implode(' | ', $failures));
-        self::assertStringContainsString(
-            'shape',
-            $failures[0],
-            'The permitted value is missing from the message that lists the permitted values,'
-            . ' because json_encode() answered false on a byte that is not valid UTF-8 and false'
-            . ' concatenates as the empty string. Got: ' . $failures[0]
-        );
-        self::assertStringContainsString(
-            'bad',
-            $failures[0],
-            'The value survived as a key but not as a value, so only half of it is being encoded.'
-        );
-    }
 
     /**
      * THE CLASS SWEEP. No shipped file calls `json_encode` or `serialize` directly.

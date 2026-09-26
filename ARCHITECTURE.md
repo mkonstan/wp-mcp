@@ -23,7 +23,7 @@ who checks that pass on every knock and then does the work as that user.
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: one row per traced failure, the lookup by id, the retention sweep, and the `error_log()` fallback. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
-| `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
+| `src/SchemaValidator.php` | Every `tools/call` argument, checked against the tool's `inputSchema` by core's own `rest_validate_value_from_schema()`. Adds three things core cannot be asked for: strict types (`"20"` is not 20), every failure at once behind a JSON Pointer, and a bound on what a refusal echoes back. |
 | `uninstall.php` | Deleting the plugin: all three tables, the options, the cron hook, and whatever 1.1.1 left in `wp-content/wpmcp/`. |
 | `build.txt` | Three git placeholders. The only `export-subst` file: `git archive` writes the commit into it when a zip is cut. |
 

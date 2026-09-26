@@ -696,3 +696,59 @@ if (!class_exists('WP_REST_Request')) {
         }
     }
 }
+
+/**
+ * ADDED FOR SPRINT VALIDATOR. `WpMcp\SchemaValidator` no longer implements JSON Schema: it hands
+ * every keyword core owns to `rest_validate_value_from_schema()`. That function lives in
+ * wp-includes/rest-api.php and pulls in WP_Error, the whole `rest_*` helper family, `__()`,
+ * `_n()`, `number_format_i18n()`, `_doing_it_wrong()` and `wp_sprintf()` behind it - a WordPress
+ * install, which is the one thing this tier by definition does not have (phpunit.xml.dist: "pure
+ * PHP, no WordPress, no Docker").
+ *
+ * SO THE TWO HALVES OF THE CLAIM ARE PROVEN IN TWO TIERS, AND THIS FILE IS HONEST ABOUT WHICH IT
+ * IS. What is below is a RECORDING DOUBLE, not core: it answers what the test told it to answer
+ * and remembers what it was asked. That makes the unit tier able to prove exactly the half that
+ * is OURS - that the strict type check runs first and a type failure never reaches core at all,
+ * that each keyword group is handed over in its own call with a usable `type` and an EMPTY
+ * `$param`, that a WP_Error answer comes back as one failure at the right pointer, and that two
+ * groups produce two failures. It cannot prove that core enforces `pattern`, and it does not
+ * pretend to: tests/integration/SchemaKeywordsTest.php calls a real tool on a real WordPress over
+ * HTTP for each of the thirteen, which is the only place that claim can be made.
+ *
+ * A DOUBLE THAT REIMPLEMENTED THE KEYWORDS WOULD BE THE WHOLE DEFECT BACK AGAIN, one layer out -
+ * the tier would then assert that our copy of core agrees with our copy of core. Hence answers,
+ * not logic.
+ *
+ * Driven by $GLOBALS['wpmcp_test_wp']['schema']:
+ *   calls     list<array{value: mixed, args: array, param: string}>  every delegated call, in order
+ *   answer    null|callable(mixed $value, array $args, string $param): true|WP_Error
+ *   patterns  array<string, mixed>  property name => the schema
+ *                                   rest_find_matching_pattern_property_schema() should return
+ */
+if (!function_exists('rest_validate_value_from_schema')) {
+    function rest_validate_value_from_schema($value, $args, $param = '')
+    {
+        $GLOBALS['wpmcp_test_wp']['schema']['calls'][] = array(
+            'value' => $value,
+            'args'  => $args,
+            'param' => $param,
+        );
+
+        $answer = $GLOBALS['wpmcp_test_wp']['schema']['answer'] ?? null;
+
+        return is_callable($answer) ? $answer($value, $args, $param) : true;
+    }
+}
+
+if (!function_exists('rest_find_matching_pattern_property_schema')) {
+    /**
+     * Core's is a loop over `patternProperties` running each pattern against the property name.
+     * The double does not run patterns - see above - so a test says which name matches what.
+     */
+    function rest_find_matching_pattern_property_schema($property, $args)
+    {
+        $patterns = $GLOBALS['wpmcp_test_wp']['schema']['patterns'] ?? array();
+
+        return array_key_exists((string) $property, $patterns) ? $patterns[(string) $property] : null;
+    }
+}

@@ -52,6 +52,12 @@ final class WordPressRuntime
             'posts'           => [],
             'terms'           => [],
             'post_types'      => [],
+            // SPRINT VALIDATOR: the delegation seam. `calls` is every
+            // rest_validate_value_from_schema() SchemaValidator made; `answer` is what the double
+            // returns (null = true, i.e. core found nothing wrong); `patterns` is what
+            // rest_find_matching_pattern_property_schema() answers per property name. See
+            // tests/Support/wp-runtime-stubs.php for why these are answers and not logic.
+            'schema'          => ['calls' => [], 'answer' => null, 'patterns' => []],
         ];
 
         // plugin_basename()'s symlink map. A global rather than a key of the array above, because
@@ -215,6 +221,44 @@ final class WordPressRuntime
         }
 
         return $found;
+    }
+
+    /**
+     * Every `rest_validate_value_from_schema()` call SchemaValidator has made since install().
+     *
+     * THE EMPTY LIST IS AN ASSERTION, not a shrug: "the strict type check refused this before
+     * core could coerce it" is only observable as "core was never asked".
+     *
+     * @return list<array{value: mixed, args: array<string, mixed>, param: string}>
+     */
+    public static function schemaCalls(): array
+    {
+        return $GLOBALS['wpmcp_test_wp']['schema']['calls'] ?? [];
+    }
+
+    /**
+     * Make the delegated validator answer $answer($value, $args, $param) instead of `true`.
+     *
+     * Returning a WP_Error is how a test stages "core found this wrong"; returning true is how it
+     * stages "core is content", which is install()'s default.
+     */
+    public static function answerSchemaWith(callable $answer): void
+    {
+        $GLOBALS['wpmcp_test_wp']['schema']['answer'] = $answer;
+    }
+
+    /**
+     * Make `rest_find_matching_pattern_property_schema()` answer $schema for the member $property.
+     *
+     * Core decides this by running each `patternProperties` regex against the name; the double
+     * does not run regexes, so the test names the member the pattern is supposed to catch and
+     * tests/integration/SchemaKeywordsTest.php proves the regex half against real core.
+     *
+     * @param mixed $schema
+     */
+    public static function matchPatternProperty(string $property, $schema): void
+    {
+        $GLOBALS['wpmcp_test_wp']['schema']['patterns'][$property] = $schema;
     }
 
     /** Register $id as an existing user and make it the current one. */

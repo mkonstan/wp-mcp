@@ -61,6 +61,19 @@
 #             through core's own `map_meta_cap` filter to something the branches would not produce.
 #             So a red there is the gate reading a copy again, not WordPress changing. The multisite
 #             states are still driven against stubs, because this project has no network install.
+#   sprint-validator is the first group whose subject is a PLATFORM DELEGATION rather than a
+#             behaviour: SchemaValidator stopped implementing JSON Schema and now hands every keyword
+#             core owns to `rest_validate_value_from_schema()`. The group is split across the two
+#             tiers ON PURPOSE and neither half is optional. tests/unit/SchemaValidatorTest.php
+#             drives a RECORDING DOUBLE of core's validator, because the unit tier has no WordPress,
+#             so it can prove only the half that is ours - the hand-over, the strict type check
+#             running first, the pointers, the cap. tests/integration/SchemaKeywordsTest.php calls a
+#             real tool on a real site once per keyword, which is the only place "core enforces it"
+#             can be said. So a red sprint-validator in the unit tier is a wiring change and a red
+#             one in the integration tier is a CORE change - most likely
+#             testCoresOwnAllowedKeywordListIsWhatTheUnitTierTranscribed(), which compares the live
+#             `rest_get_allowed_schema_keywords()` against the list the unit tier holds by hand. If
+#             that one is red, WordPress added or dropped a keyword and the dialect has to follow.
 sprint-0
 sprint-1
 sprint-2
@@ -82,3 +95,4 @@ sprint-14d
 sprint-seam
 sprint-acf-read
 sprint-core-fix
+sprint-validator

@@ -528,6 +528,19 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         nothing says so. Refusing the tool is the loud version of a
  *                         failure that is otherwise silent and model-side. Measured on
  *                         characters rather than bytes, which is what a client counts.
+ *   schema_keyword_unknown
+ *                         the `inputSchema`, at any depth, declares a keyword
+ *                         SchemaValidator::dialect() does not contain - so nothing would
+ *                         enforce it and the argument would reach the tool body unchecked,
+ *                         with no error and no log line. That silence is what sprint
+ *                         VALIDATOR removed for this plugin's own schemas by delegating to
+ *                         `rest_validate_value_from_schema()`, and this is the same removal
+ *                         for a schema the catalog never sees: a built-in is held to the set
+ *                         by tests/unit/ToolContractTest.php, and a filter or module entry
+ *                         has no test, so it is held to it here. The set is core's own
+ *                         twenty-five plus `required`, so what this actually refuses is
+ *                         `$schema`, `$ref`, `allOf`, `not`, `const` and typos - and the fix
+ *                         is to delete the keyword, which was never doing anything.
  *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
  *                         wins and the filter entry is dropped. A same-name entry is
  *                         how the fail-closed rule gets walked around one level up:
@@ -697,6 +710,12 @@ function wpmcp_registry_reject_reason($tool) {
     }
     if (!wpmcp_descriptions_within_limit($tool)) {
         return 'description_too_long';
+    }
+    // NEWEST CHECK, SO IT IS LAST - see the order rule above. SPRINT VALIDATOR. A bare code like
+    // every other reason: the event already names the TOOL, and the offending keyword is the
+    // author's own text, which does not belong in a log row this plugin writes.
+    if (SchemaValidator::unknownKeyword($tool['inputSchema']) !== null) {
+        return 'schema_keyword_unknown';
     }
 
     return '';

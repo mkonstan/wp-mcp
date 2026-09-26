@@ -3,14 +3,25 @@
  * The catalog's own contract: every schema stays inside the validator's dialect, and
  * every tool carries four boolean annotations.
  *
- * WHY THE DIALECT NEEDS A TEST AT ALL. An unsupported keyword is not enforced - the
- * validator walks past `oneOf` without a word, because refusing a legal input over a
- * schema it cannot read would be a decision for the schema's author, not for the caller.
- * That silence is a hole, and the only place it can be closed is here: this plugin's own
- * schemas are held to SchemaValidator::KEYWORDS and ::TYPES, so a tool author who
+ * WHY THE DIALECT NEEDS A TEST AT ALL. An unsupported keyword is not enforced - nothing
+ * looks at it, so the argument reaches the tool body unchecked, with no error and no log
+ * line. That silence is a hole, and this is where it is closed for the catalog: every
+ * built-in schema is held to SchemaValidator::dialect() and ::TYPES, so a tool author who
  * reaches for `$ref` finds out from a red test instead of from an input that was never
- * checked. A filter-added tool is still free to use anything; its unsupported keywords
- * simply do not constrain, and that is said out loud in SchemaValidator's docblock.
+ * checked.
+ *
+ * WHAT SPRINT VALIDATOR CHANGED, BECAUSE IT WOULD OTHERWISE HAVE WEAKENED THIS TEST. The
+ * dialect went from ten constraining keywords to core's own twenty-five plus `required`, so
+ * the assertion below now permits far more - which on its own makes it a weaker test, not a
+ * stronger one. Two things carry that weight instead. `dialect()` is DERIVED from the three
+ * sets that actually do the work (OURS, DELEGATED, ANNOTATIONS), so a keyword cannot be in
+ * the permitted set without something enforcing it or being declared decoration - the hole
+ * this test used to guard against is now unwriteable rather than merely caught. And a
+ * filter-added or module tool is no longer free to use anything: an unknown keyword at any
+ * depth refuses the entry with reason `schema_keyword_unknown`
+ * (wpmcp_registry_reject_reason()), which is asserted by
+ * tests/integration/SchemaKeywordsTest.php. The two together are what this test used to be
+ * alone.
  *
  * WHY THE ANNOTATIONS NEED ONE. `wpmcp_tools()` drops an entry whose annotations are
  * incomplete, so a built-in that forgot them would VANISH from the listing - loud, but
@@ -49,10 +60,11 @@ final class ToolContractTest extends TestCase
             foreach (self::keywordsIn($tool['inputSchema']) as $pointer => $keyword) {
                 self::assertContains(
                     $keyword,
-                    SchemaValidator::KEYWORDS,
+                    SchemaValidator::dialect(),
                     "The inputSchema of {$name} uses '{$keyword}' at {$pointer}, which"
-                    . ' SchemaValidator does not enforce - so that constraint is'
-                    . ' decoration. Either implement the keyword or stop using it.'
+                    . ' SchemaValidator neither enforces nor declares annotation-only - so'
+                    . ' that constraint is decoration. Either use a keyword core validates'
+                    . ' or stop using it.'
                 );
             }
 

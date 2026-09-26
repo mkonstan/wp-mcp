@@ -256,13 +256,20 @@ final class ModuleApiFaceTest extends TestCase
         // THE RESIDUAL LIMIT, HELD BY AN ASSERTION RATHER THAN DESCRIBED. A method name cannot say whose object
         // it is on, so "declared by one of our own classes" is the best excuse rule available - and
         // it means every name below is a name a module could call on a FOREIGN object with no
-        // declaration. Twelve names is a limit a reviewer can hold in their head; the five hundred
+        // declaration. Thirteen names is a limit a reviewer can hold in their head; the five hundred
         // free-function names it used to be were not. Adding a method to a plugin class WIDENS this
         // gate, so it goes red here and the author has to notice.
+        //
+        // SPRINT VALIDATOR MOVED IT BY ONE, AND THE AUTHOR NOTICED HERE. `aslist` and `length` went
+        // when SchemaValidator stopped implementing `enum` and the length keywords; `askcore`,
+        // `dialect` and `unknownkeyword` arrived with the delegation and the registry's
+        // unknown-keyword refusal. Net +1, and every new name is distinctive enough that a module
+        // calling it on a foreign object is improbable - which is the only thing this list is
+        // trading away.
         self::assertSame(
             [
-                'aslist', 'asmap', 'check', 'checkobject', 'escape', 'failure',
-                'length', 'matches', 'start_el', 'typename', 'validate', 'validatearguments',
+                'askcore', 'asmap', 'check', 'checkobject', 'dialect', 'escape', 'failure',
+                'matches', 'start_el', 'typename', 'unknownkeyword', 'validate', 'validatearguments',
             ],
             self::sorted(array_keys(self::pluginDeclarations()['methods'])),
             'The set of method names the face gate excuses has changed. Every name in it is one a'

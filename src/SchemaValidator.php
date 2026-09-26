@@ -2,46 +2,86 @@
 /**
  * Copyright (C) 2026 Max Konstantinovski. GPLv2 or later (see LICENSE).
  *
- * The always-on input validator: a hand-written JSON Schema 2020-12 SUBSET, sized to
- * the dialect the tool catalog actually speaks and not one keyword wider.
+ * The always-on input validator, and IT IS NOT A JSON SCHEMA IMPLEMENTATION. Core's
+ * `rest_validate_value_from_schema()` (wp-includes/rest-api.php:2221) does the keyword work.
+ * This class walks the structure, holds the three things core cannot be asked for, and hands
+ * every remaining keyword to core one group at a time.
  *
- * HAND-WRITTEN RATHER THAN VENDORED, decided in the build plan's log (2026-09-12):
- * `opis/json-schema` would have to be namespace-prefixed to survive inside WordPress,
- * where another plugin may already have loaded a different version of it, and this
- * plugin ships with no vendor directory at all.
+ * WHAT THIS REPLACED (sprint VALIDATOR, D33(1)). The file was a hand-written SUBSET enforcing
+ * ten constraining keywords. `rest_get_allowed_schema_keywords()` (rest-api.php:2169) lists
+ * twenty-five, so core validated THIRTEEN this file silently ignored - `format pattern
+ * patternProperties minProperties maxProperties exclusiveMinimum exclusiveMaximum multipleOf
+ * minItems maxItems uniqueItems anyOf oneOf`. A keyword the validator did not know was not an
+ * error and not a log line: the argument reached the tool body unchecked.
  *
- * THE DIALECT IS A CLOSED LIST, and it was read off the 20 built-in schemas rather than
- * copied from the specification. What they use, in full:
+ * THE THREE ADDITIONS, and none is available by filtering - core's validator body contains no
+ * `apply_filters` at all (verified 2026-09-26, rest-api.php:2221-2352). Each is a GAP rather
+ * than an inherited decision (D32): core decided these for a browser form posting a query
+ * string, and this server is JSON from a tool client, so the decision does not arrive here.
  *
- *   type          object, string, integer, boolean   (and nothing else, today)
- *   properties
- *   required
- *
- * SUPPORTED is wider than USED, by exactly the keywords a tool author here would reach
- * for next - `enum`, `minimum`/`maximum`, `minLength`/`maxLength`, `items`, the
- * remaining `type` names - so that adding one to a schema enforces something instead of
- * being silently ignored. Everything else is absent on purpose: no `$ref`, no `oneOf`,
- * `anyOf`, `allOf`, `not`, no `format`, no `patternProperties`, no `const`. An
- * unsupported keyword in a schema is NOT enforced, which is why
- * tests/unit/ToolContractTest.php asserts that every built-in schema stays inside
- * KEYWORDS - the validator's silence about a keyword it does not know is a hole, and
- * that test is what keeps the hole out of this plugin's own tools.
+ *   1. STRICT TYPES. `"20"` is a string and is REFUSED. `rest_is_integer("20")` is true,
+ *      `rest_is_array("a,b")` splits on commas, `rest_is_object("")` is true - deliberately,
+ *      because REST arguments arrive from query strings where every value is a string. Our
+ *      callers send JSON, where the type is already expressed, and the tools cast
+ *      (`(int) $a['limit']`), so a coerced wrong type becomes a plausible-looking value:
+ *      `(int) "twenty"` is 0, `(int) "5 posts"` is 5. `matches()` therefore runs BEFORE any
+ *      delegation and a type failure returns without calling core at all - which is asserted,
+ *      because "core was not consulted" is the only observable form of this addition.
+ *   2. ALL FAILURES AT ONCE, each at its own JSON Pointer. Core returns the FIRST `WP_Error`
+ *      and stops; a client that fixes one argument per round trip is a worse tool. So this
+ *      class owns the RECURSION - `properties`, `items`, `patternProperties`,
+ *      `additionalProperties` - and asks core once per keyword GROUP per node.
+ *   3. KEY TRUNCATION, and nothing from the caller's VALUES in the message. Argument keys are
+ *      attacker-controlled (arbitrary JSON object members) and end up in a string sent back,
+ *      so `escape()` applies RFC 6901 escaping and a byte-budget cut on a character boundary,
+ *      and the list itself is capped at MAX_FAILURES. It is also why core is called with an
+ *      EMPTY `$param`: core interpolates it into every message, so sending the pointer would
+ *      put an untruncated unescaped key in the reply and duplicate failure()'s own prefix.
  *
  * `additionalProperties: false` IS THE DEFAULT for a tool's top-level schema - see
- * validateArguments() - which is Max's explicit-scope rule applied to the one input
- * dimension that had no allow-list yet: argument keys. An argument nobody declared is
- * refused rather than ignored, so a caller that misspells `limit` finds out instead of
- * silently getting the default.
+ * validateArguments(). CORE'S DECISION, NOT OURS, and this file used to claim it: core ships
+ * `rest_default_additional_properties_to_false()` (rest-api.php:3192) and applies it to every
+ * registered route's args. What is ours is only the SHAPE of the refusal - one line per unknown
+ * key at that key's pointer, rather than core's first-one-and-stop.
  *
- * INTEGER MEANS INTEGER. `"20"` is a string and is refused; nothing here coerces. The
- * tools themselves cast - `(int) $a['limit']` - and a cast turns every wrong type into
- * a plausible-looking value: `(int) "twenty"` is 0, `(int) "5 posts"` is 5. Refusing at
- * the boundary is the only place that distinction still exists.
+ * THE FOUR THINGS THAT MADE THE SWAP DELICATE, resolved rather than left implicit:
  *
- * NOTHING FROM THE CALLER'S VALUES REACHES THE MESSAGE, only the TYPE of what was sent
- * and the KEY it was sent under, truncated. Keys are attacker-controlled (they are
- * arbitrary JSON object members), so the same truncation the protocol-version gate
- * applies to its echoed header applies here, and the failure list itself is capped.
+ *   1. WP VERSION VARIANCE - RESOLVED BY THE FLOOR, WHICH IS ALREADY HIGH ENOUGH. The thirteen
+ *      arrived in core over three releases and the LATEST of them is 5.6.0 (rest-api.php:
+ *      2199-2215). The declared floor is WordPress 6.9 - `Requires at least` in wp-mcp.php,
+ *      enforced on activation by core's own validate_plugin_requirements(), held in four
+ *      places by tests/unit/FloorConsistencyTest.php and executed by ci.yml's floor leg. So all
+ *      thirteen are enforced at the floor, there is no variance to feature-detect, and a future
+ *      floor DROP has to come past this paragraph. SchemaValidatorTest asserts the floor is 5.6 or newer.
+ *   2. ERROR CODES ARE WIRE-VISIBLE - RESOLVED BY DROPPING THEM, NOT MAPPING THEM. Core answers
+ *      `rest_invalid_param`, `rest_too_short`, `rest_not_in_enum` and a dozen more; this
+ *      plugin's contract is that every `WP_Error` it emits carries the `wpmcp_` prefix. Nothing
+ *      here emits a `WP_Error`: this class returns STRINGS and `wpmcp_dispatch()` turns a
+ *      non-empty list into an MCP tool error (`isError: true`, the lines as text), which has no
+ *      code field at all. Core's codes are discarded here and cannot reach a client; only its
+ *      MESSAGE text is relayed, behind our pointer. What a client observes that it did not
+ *      before is the WORDING of five messages once written here (`enum`, `minimum`, `maximum`,
+ *      `minLength`, `maxLength`): core's are longer, localized and pluralized by `_n()`.
+ *      SchemaValidatorTest asserts no `rest_` code appears in any failure line.
+ *   3. `required` IS OURS AND IS NOT IN CORE'S LIST. Core handles it inside
+ *      `rest_validate_object_value_from_schema()`, outside the allowed-keywords list, its
+ *      message names the OBJECT rather than the missing member, and it returns on the first one.
+ *      So dialect() is core's twenty-five PLUS `required`, and `required` is in OURS.
+ *   4. THIRD-PARTY TOOLS - REGISTRATION REFUSES AN UNKNOWN KEYWORD. A tool added through the
+ *      `wpmcp_tools` filter or a module is not in the catalog, so ToolContractTest never sees
+ *      it and its author could declare a keyword nothing enforces. unknownKeyword() below is
+ *      what `wpmcp_registry_reject_reason()` asks; the entry is dropped with reason
+ *      `schema_keyword_unknown` and a `registry_reject` event naming the tool. Same rule as
+ *      `write` and `annotations`: absence of enforcement is not a declaration of safety. The
+ *      cost is that `$schema`, `$ref`, `allOf`, `not` and `const` now refuse the tool instead
+ *      of being ignored, and the fix is to delete the keyword - it never did anything.
+ *
+ * THE ONE PLACE CORE'S COERCION SURVIVES is inside `anyOf`/`oneOf`: core validates each branch
+ * itself (rest-api.php:1993-2087), so a branch declaring `{"type":"integer"}` accepts `"20"`
+ * where a top-level `"type":"integer"` would not. Handling the combinators here instead would be
+ * re-implementing them, which is the overbuild this sprint exists to undo; no built-in schema
+ * uses either (ToolContractTest), and a third-party tool that does now gets branch validation
+ * where it previously got none. SchemaValidatorTest holds the limitation so it cannot drift unnoticed.
  */
 
 declare(strict_types=1);
@@ -51,27 +91,53 @@ namespace WpMcp;
 final class SchemaValidator
 {
     /**
-     * Every keyword this validator understands. The dialect, as a list, so a test can
-     * assert the built-in schemas stay inside it.
+     * The keywords THIS class enforces, because delegating each one would lose something
+     * named in the docblock above: `type` its strictness, `required` its pointer, and the four
+     * structural ones the recursion that gives every failure a pointer of its own.
+     *
+     * `patternProperties` is here because the ITERATION is ours; the pattern MATCHING is core's
+     * `rest_find_matching_pattern_property_schema()`, which is the whole keyword minus the loop.
      */
-    public const KEYWORDS = array(
-        'type',
-        'properties',
-        'required',
-        'enum',
-        'minimum',
-        'maximum',
-        'minLength',
-        'maxLength',
-        'items',
-        'additionalProperties',
-        // Annotation-only, never validated against: they describe, they do not constrain.
-        'description',
-        'title',
-        'default',
+    public const OURS = array('type', 'required', 'properties', 'additionalProperties', 'items', 'patternProperties');
+
+    /**
+     * Handed to `rest_validate_value_from_schema()`, ONE GROUP PER CALL.
+     *
+     * WHY GROUPS AND NOT ONE CALL PER NODE: core returns the first failure and stops, so a node
+     * violating both `pattern` and `maxLength` would report one of them. One call per group
+     * gives one possible failure per group, which is addition 2 applied within a node.
+     *
+     * WHY GROUPS AND NOT ONE CALL PER KEYWORD: core's four number bounds are INTERLOCKED -
+     * `exclusiveMinimum` is only read when `minimum` is also set (rest-api.php:2606-2710), so a
+     * call carrying `exclusiveMinimum` alone enforces nothing at all. They travel together or
+     * they do not travel. The pairs that cannot both fail on one value - too short and too long,
+     * too few and too many - are grouped to save a call; `uniqueItems` is NOT grouped with the
+     * item counts, because a list really can be both too long and full of duplicates.
+     *
+     * @var list<list<string>>
+     */
+    public const DELEGATED = array(
+        array('enum'),
+        array('format'),
+        array('pattern'),
+        array('minLength', 'maxLength'),
+        array('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum'),
+        array('multipleOf'),
+        array('minItems', 'maxItems'),
+        array('uniqueItems'),
+        array('minProperties', 'maxProperties'),
+        array('anyOf'),
+        array('oneOf'),
     );
 
-    /** Every `type` name this validator understands. */
+    /** They describe, they do not constrain. Nothing validates against these, here or in core. */
+    public const ANNOTATIONS = array('description', 'title', 'default');
+
+    /**
+     * Every `type` name this validator understands - and it is core's own `$allowed_types`
+     * (rest-api.php:2243), in core's order, because a name outside that set makes core call
+     * `_doing_it_wrong()` and the delegated type must never be one.
+     */
     public const TYPES = array('object', 'array', 'string', 'integer', 'number', 'boolean', 'null');
 
     /**
@@ -85,10 +151,35 @@ final class SchemaValidator
     private const MAX_KEY = 64;
 
     /**
+     * Every keyword a schema in this plugin may use: core's twenty-five, plus `required`.
+     *
+     * DERIVED, NOT LISTED, AND THAT IS THE POINT. This used to be a hand-written list beside the
+     * implementation, so a keyword could sit in it while nothing checked it - and to
+     * tests/unit/ToolContractTest.php, which reads this, an unenforced keyword in this set reads
+     * as "enforced, so the constraint is real". Composing it from the three sets above makes that
+     * hole impossible to write rather than something a test has to catch: a keyword is here
+     * exactly when it is ours, delegated, or declared annotation-only.
+     *
+     * A METHOD RATHER THAN A CONST because DELEGATED is a list of lists and flattening it is not
+     * a constant expression. `SchemaValidator::KEYWORDS` is gone; callers ask this.
+     *
+     * @return list<string>
+     */
+    public static function dialect(): array
+    {
+        return array_merge(
+            self::OURS,
+            array_merge(...self::DELEGATED),
+            self::ANNOTATIONS
+        );
+    }
+
+    /**
      * The arguments of one `tools/call`, against that tool's `inputSchema`.
      *
      * THE ONE THING THIS ADDS over validate(): `additionalProperties: false` at the TOP
-     * LEVEL when the schema does not say otherwise. Only the top level, and that is
+     * LEVEL when the schema does not say otherwise - core's own default for a registered
+     * route, applied here because a tool is not a route. Only the top level, and that is
      * deliberate - `create-post`'s `terms` is declared `{"type":"object"}` with no
      * `properties` at all, because its members are taxonomy names nobody can enumerate
      * in advance. Defaulting the whole tree closed would refuse every taxonomy name
@@ -128,12 +219,77 @@ final class SchemaValidator
     }
 
     /**
+     * The first keyword anywhere in $schema that dialect() does not contain, or null.
+     *
+     * WHAT THIS IS FOR: `wpmcp_registry_reject_reason()` asks it about every tool a filter or a
+     * module registers, and drops the entry when the answer is not null. A built-in is held to
+     * the same set by tests/unit/ToolContractTest.php, which is a test rather than a runtime
+     * check because a built-in that fails it must not ship at all.
+     *
+     * NO DEPTH CAP, for the same reason check() has none: a schema is the SITE'S code, not the
+     * caller's input, so a hostile depth is a hostile plugin and this walk is not what would
+     * stop it. The walk covers exactly the places a sub-schema can sit.
+     *
+     * @param mixed $schema
+     */
+    public static function unknownKeyword($schema): ?string
+    {
+        $map = self::asMap($schema);
+
+        if ($map === null) {
+            return null;
+        }
+
+        $dialect = self::dialect();
+
+        foreach (array_keys($map) as $keyword) {
+            if (!in_array((string) $keyword, $dialect, true)) {
+                return (string) $keyword;
+            }
+        }
+
+        // Every place a sub-schema can sit: the values of a map of them, the members of a list
+        // of them, or one on its own. A null or a `false` is not a map and stops the descent.
+        $nested = array_merge(
+            array_values((array) self::asMap($map['properties'] ?? null)),
+            array_values((array) self::asMap($map['patternProperties'] ?? null)),
+            is_array($map['anyOf'] ?? null) ? $map['anyOf'] : array(),
+            is_array($map['oneOf'] ?? null) ? $map['oneOf'] : array(),
+            array($map['items'] ?? null, $map['additionalProperties'] ?? null)
+        );
+
+        foreach ($nested as $sub) {
+            $found = self::unknownKeyword($sub);
+
+            if ($found !== null) {
+                return $found;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * The recursive body. Uncapped; call validate().
+     *
+     * THE ORDER OF THE THREE STEPS IS THE CONTRACT. Our strict type check first, so core never
+     * sees a value of the wrong kind and its coercions can never accept one. Then the delegated
+     * keywords of THIS node. Then the members, because a failure inside a member needs the
+     * member's pointer and core's recursion would report core's `param[key]` notation and stop
+     * at the first one.
      *
      * A TYPE FAILURE STOPS THE DESCENT at that node: once the value is known not to be
      * the right kind of thing, every constraint below it would report the same fact
      * again in another five lines, and "/terms: expected object, got string" is the one
      * sentence the caller has to act on.
+     *
+     * $declared IS NULL IN TWO CASES AND BOTH FALL THROUGH TO THE VALUE'S OWN TYPE. A schema
+     * with no `type` at all is one this dialect cannot constrain by kind. A schema whose `type`
+     * is an ARRAY of names is core's multiple-types feature (`@since` 5.3), which
+     * `rest_handle_multi_type_schema()` resolves by asking which type the value is CLOSEST to -
+     * a coercion, and therefore the one core keyword this file will not delegate. Neither is
+     * enforced, exactly as neither was before this sprint, and tests/unit/ToolContractTest.php
+     * is what keeps both out of this plugin's own schemas.
      *
      * @return list<string>
      */
@@ -145,49 +301,18 @@ final class SchemaValidator
             return array();
         }
 
-        if (isset($map['type']) && is_string($map['type']) && !self::matches($value, $map['type'])) {
+        $declared = isset($map['type']) && is_string($map['type']) && in_array($map['type'], self::TYPES, true)
+            ? $map['type']
+            : null;
+
+        if ($declared !== null && !self::matches($value, $declared)) {
             return array(self::failure(
                 $pointer,
-                'expected ' . $map['type'] . ', got ' . self::typeName($value)
+                'expected ' . $declared . ', got ' . self::typeName($value)
             ));
         }
 
-        $failures = array();
-
-        if (isset($map['enum']) && is_array($map['enum']) && !in_array($value, $map['enum'], true)) {
-            $failures[] = self::failure(
-                $pointer,
-                'not one of the permitted values: ' . self::asList($map['enum'])
-            );
-        }
-
-        if (is_int($value) || is_float($value)) {
-            if (isset($map['minimum']) && (is_int($map['minimum']) || is_float($map['minimum']))
-                && $value < $map['minimum']) {
-                $failures[] = self::failure($pointer, 'must be >= ' . $map['minimum']);
-            }
-            if (isset($map['maximum']) && (is_int($map['maximum']) || is_float($map['maximum']))
-                && $value > $map['maximum']) {
-                $failures[] = self::failure($pointer, 'must be <= ' . $map['maximum']);
-            }
-        }
-
-        if (is_string($value)) {
-            $length = self::length($value);
-
-            if (isset($map['minLength']) && is_int($map['minLength']) && $length < $map['minLength']) {
-                $failures[] = self::failure(
-                    $pointer,
-                    'must be at least ' . $map['minLength'] . ' characters long'
-                );
-            }
-            if (isset($map['maxLength']) && is_int($map['maxLength']) && $length > $map['maxLength']) {
-                $failures[] = self::failure(
-                    $pointer,
-                    'must be at most ' . $map['maxLength'] . ' characters long'
-                );
-            }
-        }
+        $failures = self::askCore($value, $map, $declared ?? self::typeName($value), $pointer);
 
         if (isset($map['items']) && is_array($value) && self::matches($value, 'array')) {
             foreach ($value as $index => $element) {
@@ -206,13 +331,58 @@ final class SchemaValidator
     }
 
     /**
-     * `required`, `properties` and `additionalProperties` of one object node.
+     * Every delegated keyword group present at this node, asked of core one call each.
+     *
+     * $type IS ALWAYS SET AND IS ALWAYS ONE OF TYPES, which is not a nicety: core reads
+     * `$args['type']` unconditionally three lines after warning about its absence
+     * (rest-api.php:2245-2251), so a schema without one produces an "Undefined array key"
+     * warning AND a `_doing_it_wrong()` notice - and this suite fails on either. When the node
+     * declares no usable type the value's OWN type is sent, which makes core's type check a
+     * tautology and leaves the group's keyword as the only thing being asked.
+     *
+     * THE `$param` IS EMPTY ON PURPOSE - see addition 3 in the file docblock. Core interpolates
+     * it into every message, and the only name we have for this node is a pointer built from
+     * caller-supplied keys. Sending it would put an untruncated, unescaped key in the reply and
+     * duplicate the prefix failure() already writes.
+     *
+     * @param array<string, mixed> $map
+     * @return list<string>
+     */
+    private static function askCore($value, array $map, string $type, string $pointer): array
+    {
+        $failures = array();
+
+        foreach (self::DELEGATED as $group) {
+            $present = array_intersect_key($map, array_flip($group));
+
+            if ($present === array()) {
+                continue;
+            }
+
+            $verdict = rest_validate_value_from_schema($value, array('type' => $type) + $present, '');
+
+            if (is_wp_error($verdict)) {
+                $failures[] = self::failure($pointer, trim((string) $verdict->get_error_message()));
+            }
+        }
+
+        return $failures;
+    }
+
+    /**
+     * `required`, `properties`, `patternProperties` and `additionalProperties` of one object node.
      *
      * THE ORDER IS THE ORDER THE FAILURES ARE REPORTED IN, and it is fixed rather than
      * incidental: missing required members first (the caller cannot proceed without
      * them), then the declared members it did send, in SCHEMA order, then the members
-     * nobody declared. Two identical calls produce byte-identical messages, which is
-     * what lets a test assert on one.
+     * nobody declared, in the order they arrived. Two identical calls produce byte-identical
+     * messages, which is what lets a test assert on one.
+     *
+     * A MEMBER THAT MATCHES A `patternProperties` PATTERN IS NOT AN ADDITIONAL PROPERTY, and
+     * that precedence is core's (rest-api.php:2454-2463): declared property, then pattern, then
+     * additional. Getting it wrong would refuse every pattern-matched key on a closed object.
+     * The matching itself is `rest_find_matching_pattern_property_schema()`; what is ours is
+     * only walking the members so each failure carries that member's pointer.
      *
      * @param array<string, mixed> $object
      * @param array<string, mixed> $map
@@ -249,29 +419,37 @@ final class SchemaValidator
             }
         }
 
-        if (!array_key_exists('additionalProperties', $map)) {
-            return $failures;
-        }
+        $extra     = array_diff_key($object, (array) $properties);
+        $patterns  = isset($map['patternProperties']);
+        $declared  = array_key_exists('additionalProperties', $map);
+        $subSchema = $declared ? self::asMap($map['additionalProperties']) : null;
 
-        $extra = array_diff_key($object, (array) $properties);
+        foreach ($extra as $name => $member) {
+            $name    = (string) $name;
+            $pattern = $patterns ? rest_find_matching_pattern_property_schema($name, $map) : null;
 
-        if ($map['additionalProperties'] === false) {
-            foreach (array_keys($extra) as $name) {
-                $failures[] = self::failure(
-                    $pointer . '/' . self::escape((string) $name),
-                    'unknown property - this tool declares no such argument'
-                );
+            if ($pattern !== null) {
+                $failures = array_merge($failures, self::check(
+                    $member,
+                    $pattern,
+                    $pointer . '/' . self::escape($name)
+                ));
+                continue;
             }
 
-            return $failures;
-        }
+            if ($declared && $map['additionalProperties'] === false) {
+                $failures[] = self::failure(
+                    $pointer . '/' . self::escape($name),
+                    'unknown property - this tool declares no such argument'
+                );
+                continue;
+            }
 
-        if (self::asMap($map['additionalProperties']) !== null) {
-            foreach ($extra as $name => $sub) {
+            if ($subSchema !== null) {
                 $failures = array_merge($failures, self::check(
-                    $sub,
+                    $member,
                     $map['additionalProperties'],
-                    $pointer . '/' . self::escape((string) $name)
+                    $pointer . '/' . self::escape($name)
                 ));
             }
         }
@@ -280,7 +458,7 @@ final class SchemaValidator
     }
 
     /**
-     * Does $value satisfy the JSON Schema type $type?
+     * Does $value satisfy the JSON Schema type $type? STRICTLY - this is addition 1.
      *
      * THE EMPTY ARRAY IS BOTH, and it has to be: `json_decode('{}', true)` and
      * `json_decode('[]', true)` are the same PHP value, so a validator that picked one
@@ -288,10 +466,11 @@ final class SchemaValidator
      * exists to undo on the way out (see wpmcp_objectify_schema()), seen from the
      * inbound side.
      *
-     * A TYPE NAME THIS DIALECT DOES NOT KNOW PASSES. It cannot be checked, so refusing
-     * on it would refuse a legal input over a schema this validator does not understand
-     * - a decision for the author of the schema, not for the caller. Built-in schemas
-     * are held to TYPES by tests/unit/ToolContractTest.php instead.
+     * EVERY BRANCH IS A REFUSAL CORE WOULD NOT MAKE. `rest_is_integer("20")` is true,
+     * `rest_is_array("a,b")` splits the string on commas, `rest_is_object("")` is true. Those
+     * are right for a query string and wrong for a JSON body, and this function is the whole
+     * difference. It has no default-true case for an unknown name because declaredType()
+     * already refused one.
      */
     private static function matches($value, string $type): bool
     {
@@ -393,41 +572,5 @@ final class SchemaValidator
         }
 
         return str_replace(array('~', '/'), array('~0', '~1'), $key);
-    }
-
-    /**
-     * The permitted values of an enum, for the message. The SCHEMA's own values.
-     *
-     * wp_json_encode() AND NOT json_encode(), FOR THE REASON escape()'s DOCBLOCK ARGUES TWENTY
-     * LINES UP (sprint CORE-FIX). Bare `json_encode` returns FALSE on a value that is not valid
-     * UTF-8 (JSON_ERROR_UTF8) and on one nested past its depth, and `false` concatenates into
-     * the message as the empty string - so a permitted value would silently vanish from the
-     * list of permitted values, which is the one sentence this message exists to say.
-     * wp_json_encode() runs `_wp_json_sanity_check()` first, which strips the bad bytes and
-     * returns a string, and it is the call the file already says the plugin uses. This is the
-     * only WordPress function this class calls; it ships inside WordPress and nothing else
-     * loads it.
-     */
-    private static function asList(array $values): string
-    {
-        $rendered = array();
-
-        foreach ($values as $value) {
-            $rendered[] = is_string($value) ? $value : wp_json_encode($value);
-        }
-
-        return implode(', ', $rendered);
-    }
-
-    /**
-     * Characters, not bytes - JSON Schema counts code points.
-     *
-     * mbstring is a PHP extension and this plugin assumes a bare site, so its absence
-     * degrades to a byte count rather than to a fatal. No built-in schema uses a length
-     * keyword today, so nothing currently depends on the difference.
-     */
-    private static function length(string $value): int
-    {
-        return function_exists('mb_strlen') ? (int) mb_strlen($value, 'UTF-8') : strlen($value);
     }
 }

@@ -7,6 +7,42 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 **Unreleased.** ACF field VALUES, read first and then written, in their own module behind the seam
 1.1.2 established. The read half is here.
 
+### Changed: the input validator delegates to WordPress, and thirteen more schema keywords start being enforced
+
+- **`SchemaValidator` no longer implements JSON Schema.** It was a hand-written subset enforcing ten
+  constraining keywords. `rest_get_allowed_schema_keywords()` lists twenty-five, so core validated
+  **thirteen that this plugin silently ignored**: `format`, `pattern`, `patternProperties`,
+  `minProperties`, `maxProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+  `minItems`, `maxItems`, `uniqueItems`, `anyOf`, `oneOf`. A keyword the validator did not know was
+  not an error and not a log line - the argument reached the tool body unchecked. Every keyword core
+  owns now goes to `rest_validate_value_from_schema()`.
+- **Three things stayed, because core cannot be filtered into doing them** - its validator body
+  contains no `apply_filters` at all. `"20"` is still REFUSED for an integer argument, and the
+  strict check runs before core so `rest_is_integer("20")` never gets a say. Every failure still
+  comes back at once, each behind its own JSON Pointer, because core returns the first `WP_Error` and
+  stops. And a refusal still carries only the TYPE of what arrived and the caller's key, truncated on
+  a character boundary and capped - core is asked with an empty parameter name so it cannot
+  interpolate a caller-supplied key into a message of its own.
+- **What a client sees differently.** Five messages are now core's wording rather than this
+  plugin's: `enum`, `minimum`, `maximum`, `minLength` and `maxLength`. They are longer, localized,
+  and pluralized by `_n()`. Core's ERROR CODES are dropped rather than relayed - a refusal is still
+  an MCP tool error with no code field, so nothing in this plugin emits a code without the `wpmcp_`
+  prefix.
+- **A tool registered through the `wpmcp_tools` filter or a module is REFUSED when its `inputSchema`
+  declares a keyword nothing enforces** - reason `schema_keyword_unknown`, with a `registry_reject`
+  event naming the tool. The permitted set is core's twenty-five plus `required`, so what this
+  actually refuses is `$schema`, `$ref`, `allOf`, `not`, `const` and typos; the fix is to delete the
+  keyword, which was never doing anything. Same rule as `write` and `annotations`: absence of
+  enforcement is not a declaration of safety.
+- **`additionalProperties: false` is documented as core's default, not this plugin's.** Core ships
+  `rest_default_additional_properties_to_false()` and applies it to every registered route; the
+  behaviour is unchanged and the docblock that claimed it was corrected.
+- **Strict types do not reach inside `anyOf`/`oneOf`,** which is stated in the file and held by a
+  test. Core validates each branch with its own coercive checks, so `"20"` satisfies a branch
+  declaring `{"type":"integer"}`. Walking the branches here would mean re-implementing the
+  combinators. No built-in schema uses either, and a third-party tool that does now gets branch
+  validation where it previously got none.
+
 ### Added: `get-acf-values`, and it reads through ACF's own permission-checked path
 
 - **New read tool, `get-acf-values`.** One tool, values only. It takes `object_type` (`post`,
