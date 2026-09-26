@@ -30,6 +30,7 @@ namespace WpMcp\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use WpMcp\SchemaValidator;
+use WpMcp\Tests\Support\CoreSchemaKeywords;
 use WpMcp\Tests\Support\WordPressRuntime;
 use WpMcp\Tests\Support\WordPressStubs;
 
@@ -320,23 +321,6 @@ final class SchemaValidatorTest extends TestCase
     }
 
     /**
-     * Core's own allowed keywords, wp-includes/rest-api.php:2170-2196, in core's order.
-     *
-     * TRANSCRIBED AND NOT DERIVED, because the unit tier has no WordPress. That is a real
-     * weakness and it is covered rather than hidden: tests/integration/SchemaKeywordsTest.php
-     * asks the live site for `rest_get_allowed_schema_keywords()` and compares this list against
-     * it, so a keyword core adds or drops is a red integration test rather than a stale constant.
-     *
-     * @var list<string>
-     */
-    public const CORE_ALLOWED_KEYWORDS = [
-        'title', 'description', 'default', 'type', 'format', 'enum', 'items', 'properties',
-        'additionalProperties', 'patternProperties', 'minProperties', 'maxProperties', 'minimum',
-        'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength',
-        'pattern', 'minItems', 'maxItems', 'uniqueItems', 'anyOf', 'oneOf',
-    ];
-
-    /**
      * WHAT REPLACED THE KEYWORD-BY-KEYWORD BODY, and where its claim is now made.
      *
      * `enum`, `minimum`, `maximum`, `minLength`, `maxLength` were five hand-written checks in
@@ -388,10 +372,12 @@ final class SchemaValidatorTest extends TestCase
      *   and report the same failure twice; one in ANNOTATIONS and DELEGATED would be described as
      *   decoration while constraining.
      *
-     *   Every keyword of `rest_get_allowed_schema_keywords()` is in there. The list below is
-     *   core's own, transcribed from wp-includes/rest-api.php:2170-2196 rather than derived,
-     *   because this tier has no WordPress to ask - so a keyword core adds shows up as a gap
-     *   between this list and core's, which is what the integration tier's live check catches.
+     *   Every keyword of `rest_get_allowed_schema_keywords()` is in there, bar the one we decline.
+     *   The list is tests/Support/CoreSchemaKeywords::ALLOWED - core's own, transcribed rather than
+     *   derived, because this tier has no WordPress to ask - so a keyword core adds shows up as a gap
+     *   between that list and core's, which is what the integration tier's live check catches. It sits
+     *   in tests/Support/ rather than on this class because the integration tier reads it too, and an
+     *   `use WpMcp\Tests\Unit\…` import is what took CI down on `4b138aa`; see tests/unit/TierImportTest.php.
      *
      * @group sprint-validator
      */
@@ -421,7 +407,7 @@ final class SchemaValidatorTest extends TestCase
 
         self::assertSame(
             ['required'],
-            array_values(array_diff(SchemaValidator::dialect(), self::CORE_ALLOWED_KEYWORDS)),
+            array_values(array_diff(SchemaValidator::dialect(), CoreSchemaKeywords::ALLOWED)),
             "The dialect is core's allowed keywords plus exactly one - `required`, which core"
             . ' handles outside rest_get_allowed_schema_keywords() and whose failure message names'
             . ' the object rather than the missing member. Anything else here is a keyword this'
@@ -432,7 +418,7 @@ final class SchemaValidatorTest extends TestCase
         // dropping a second keyword has to come past this line and say why.
         self::assertSame(
             ['oneOf'],
-            array_values(array_diff(self::CORE_ALLOWED_KEYWORDS, SchemaValidator::dialect())),
+            array_values(array_diff(CoreSchemaKeywords::ALLOWED, SchemaValidator::dialect())),
             'The set of core keywords this server declines has changed. `oneOf` is declined because'
             . ' core enforces exactly-one over coercive branch matching, which refuses legal values;'
             . ' any other omission is a keyword core validates and we silently ignore, which is the'

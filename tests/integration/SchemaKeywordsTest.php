@@ -32,12 +32,12 @@ declare(strict_types=1);
 
 namespace WpMcp\Tests\Integration;
 
+use WpMcp\Tests\Support\CoreSchemaKeywords;
 use WpMcp\Tests\Support\Fixtures;
 use WpMcp\Tests\Support\FixtureIntegrationTestCase;
 use WpMcp\Tests\Support\MuPlugin;
 use WpMcp\Tests\Support\TestRecorder;
 use WpMcp\Tests\Support\WpCli;
-use WpMcp\Tests\Unit\SchemaValidatorTest;
 
 final class SchemaKeywordsTest extends FixtureIntegrationTestCase
 {
@@ -838,8 +838,10 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
      * THE LIVE CHECK ON A TRANSCRIPTION: this site's `rest_get_allowed_schema_keywords()` is
      * exactly the list the unit tier holds.
      *
-     * tests/unit/SchemaValidatorTest.php composes the dialect against a hand-transcribed copy of
-     * core's list, because that tier has no WordPress to ask. A transcription goes stale silently,
+     * The unit tier composes the dialect against a hand-transcribed copy of core's list
+     * (tests/Support/CoreSchemaKeywords), because that tier has no WordPress to ask. That copy is in
+     * tests/Support/ and not on a test class because importing one across tiers is what took CI down on
+     * `4b138aa` - see tests/unit/TierImportTest.php. A transcription goes stale silently,
      * and the whole sprint rests on it: a keyword core ADDS is one we would ignore again, and one
      * core DROPS is one we refuse a third-party tool for with nothing behind it. So the list is
      * asked of the site here, where a real WordPress can answer.
@@ -862,15 +864,15 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
 
         self::assertSame(
             [],
-            array_values(array_diff($live, SchemaValidatorTest::CORE_ALLOWED_KEYWORDS)),
-            'This WordPress validates a keyword SchemaValidatorTest::CORE_ALLOWED_KEYWORDS does not'
+            array_values(array_diff($live, CoreSchemaKeywords::ALLOWED)),
+            'This WordPress validates a keyword CoreSchemaKeywords::ALLOWED does not'
             . ' list, so SchemaValidator does not delegate it and a schema using it is ignored -'
             . ' the exact defect sprint VALIDATOR removed, returned by a core upgrade. Add it to'
             . ' SchemaValidator::DELEGATED and to both transcriptions. Live: ' . $json
         );
         self::assertSame(
             [],
-            array_values(array_diff(SchemaValidatorTest::CORE_ALLOWED_KEYWORDS, $live)),
+            array_values(array_diff(CoreSchemaKeywords::ALLOWED, $live)),
             'The unit tier lists a keyword this WordPress does NOT validate, so the dialect permits'
             . ' something nothing enforces and a third-party tool using it registers unchecked.'
             . ' Live: ' . $json
