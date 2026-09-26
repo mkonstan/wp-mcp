@@ -312,8 +312,13 @@ with the trash switched off (`EMPTY_TRASH_DAYS` 0) deletes it outright. `delete-
 different because WordPress is: unless the site defines `MEDIA_TRASH`, an attachment is
 deleted permanently, file and all, whatever `force` says. Both answer `deleted` and
 `trashed` as read back after the call, never as assumed. Every argument is validated
-against the tool's schema before the tool runs: a wrong type or an unknown key comes back
-as an error naming the field, and the tool never executes.
+against the tool's schema before the tool runs, by WordPress's own
+`rest_validate_value_from_schema()`: a wrong type, an unknown key, or a value that violates
+any constraint the schema declares - a `pattern`, a `format`, a `minItems`, a number bound -
+comes back as an error naming the field, and the tool never executes. Since 1.2.0 the
+enforced set is every keyword WordPress itself validates but one - `oneOf`, which this server
+declines rather than half-honour - where before it was a hand-written subset of ten. That is
+a behaviour change: a call that violated a declared constraint used to be let through.
 
 Every description says what the tool returns - field names and their formats - so a
 client does not have to call a tool to learn its shape.
@@ -1263,6 +1268,15 @@ the built-ins are assembled and before scope filtering. An entry must declare a 
 `write`, a string `description`, an array `inputSchema`, all four boolean `annotations`,
 and a callable `run`. An entry missing any of them is refused at registration rather than
 given a default, and it cannot re-declare a built-in's name.
+
+**Since 1.2.0 the `inputSchema` is held to what WordPress can validate.** A keyword outside that
+set - `$schema`, `$ref`, `allOf`, `not`, `const`, `oneOf`, a typo, or a `required` that is not an
+array - is left out of what `tools/list` publishes, and a `registry_strip` event names your tool
+and the keyword so you can find out why the constraint never fired; the tool registers and runs.
+Three arrangements go further and refuse the ENTRY, reason `schema_constraint_unreadable`, because
+leaving them out would change a verdict WordPress is already giving: an `exclusiveMinimum` or
+`exclusiveMaximum` with no `minimum`/`maximum` beside it, one written as anything but a boolean,
+and `enum: []`. See the 1.2.0 entry in CHANGELOG.md.
 
 Since 1.1.2 the plugin's own feature files register through the same checks. The menu tools
 live in `modules/menus.php`, `list-content-types` in `modules/discovery.php` and

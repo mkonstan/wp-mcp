@@ -20,6 +20,7 @@ who checks that pass on every knock and then does the work as that user.
 | `modules.php` | The module seam: the manifest, the loader, `wpmcp_register_module()`, and the gate that checks what comes through it. Defines no tools. |
 | `modules/menus.php` | Module: the five classic menu tools. |
 | `modules/discovery.php` | Module: `list-content-types`. |
+| `modules/acf.php` | Module: `get-acf-values`. Registers only when the ACF API face it declares is present. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: one row per traced failure, the lookup by id, the retention sweep, and the `error_log()` fallback. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
@@ -70,14 +71,16 @@ function; `wpmcp_register_module()` records which function to ask, not what it a
 ## The module seam
 
 **The core is what is left when every module is gone.** A module is one file that adds tools
-and can be deleted without the core noticing. Two exist: `modules/menus.php` (the five classic
-menu tools) and `modules/discovery.php` (`list-content-types`).
+and can be deleted without the core noticing. Three exist: `modules/menus.php` (the five classic
+menu tools), `modules/discovery.php` (`list-content-types`) and `modules/acf.php`
+(`get-acf-values`).
 
 **Why, and it is not tidiness.** `tools.php` was 6,987 lines of a 12,266-line plugin - one file
-with a small core beside it. The next feature in the queue writes ACF values, which is the
-highest blast radius anything here has proposed, and a feature in its own file behind its own
-guard costs a site without ACF nothing and can break nothing there. **What the seam does NOT
-buy is a lighter review.** Scrutiny follows blast radius, not file boundaries: five of the six
+with a small core beside it. The feature the seam was built for is ACF field values - read in
+1.2.0, written later - which is the highest blast radius anything here has proposed, and a
+feature in its own file behind its own guard costs a site without ACF nothing and can break
+nothing there. **What the seam does NOT buy is a lighter review.** Scrutiny follows blast
+radius, not file boundaries: five of the six
 reviewed sprints in this project failed their first review with a green test suite and not one
 of those defects was in the dispatch path. A locked core makes a diff smaller. It does not make
 new code safer.

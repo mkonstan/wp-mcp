@@ -4,18 +4,38 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.2.0
 
-**Unreleased.** ACF field VALUES, read first and then written, in their own module behind the seam
-1.1.2 established. The read half is here.
+**Released 2026-09-26.** Four sprints. **Every `tools/call` argument is now validated by
+WordPress's own `rest_validate_value_from_schema()`** instead of by a hand-written subset, so twelve
+schema keywords that tools were already declaring and this server silently ignored are enforced for
+the first time. **ACF field values are readable**, through a new module that goes through ACF's own
+REST value path and so inherits ACF's permission-checked reduction of the references it returns.
+Seven live defects are fixed, and the one an operator is most likely to have hit is on multisite:
+a Site Administrator was shown all six code tools in `tools/list` and refused every one of them at
+call time. There is no database migration and no schema upgrade - the plugin files change and
+nothing else does.
 
-### Changed: the input validator delegates to WordPress, and thirteen more schema keywords start being enforced
+**The stricter validation is a behaviour change, and it is the point.** A call that used to be
+accepted may now be refused. Until this release, a client that sent a value violating a constraint
+the tool's own `inputSchema` declared - a `pattern`, a `format`, a `minItems`, an
+`exclusiveMaximum`, any of the twelve below - was let through to the tool body unchecked, because
+the validator did not know the keyword and treated not knowing it as nothing to do. It is refused
+now, with every failure reported at once behind its own JSON Pointer. No built-in tool's schema
+changed shape in this release, so the calls this affects are the ones that were already wrong about
+a schema this server has been publishing all along; if you drive this server from a script, that is
+the thing to re-test first. Strict types are unchanged: `"20"` is still refused for an integer
+argument. Five refusal MESSAGES are now core's wording rather than this plugin's.
+
+### Changed: the input validator delegates to WordPress, and twelve more schema keywords start being enforced
 
 - **`SchemaValidator` no longer implements JSON Schema.** It was a hand-written subset enforcing ten
   constraining keywords. `rest_get_allowed_schema_keywords()` lists twenty-five, so core validated
   **thirteen that this plugin silently ignored**: `format`, `pattern`, `patternProperties`,
   `minProperties`, `maxProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
   `minItems`, `maxItems`, `uniqueItems`, `anyOf`, `oneOf`. A keyword the validator did not know was
-  not an error and not a log line - the argument reached the tool body unchecked. Every keyword core
-  owns now goes to `rest_validate_value_from_schema()`.
+  not an error and not a log line - the argument reached the tool body unchecked. **Twelve of the
+  thirteen now go to `rest_validate_value_from_schema()`; the thirteenth, `oneOf`, is a documented
+  non-delivery** - the one keyword of core's twenty-five this server declines, for the reason set out
+  below.
 - **Three things stayed, because core cannot be filtered into doing them** - its validator body
   contains no `apply_filters` at all. `"20"` is still REFUSED for an integer argument, and the
   strict check runs before core so `rest_is_integer("20")` never gets a say. Every failure still
@@ -240,6 +260,25 @@ one call site.
   them is compared against `active_plugins`, which `activate_plugin()` writes through that function.
 - **Four false sentences in shipped prose went with them**, each of which was the JUSTIFICATION for
   one of the defects above.
+
+### Changed: two more statements of a platform decision are the platform's, and one of them is guarded
+
+Nothing a caller sends or reads changes here. Both are the same audit as the section above, taken to
+the rows that were left.
+
+- **`list-comments`' search clause is built by `WP_Comment_Query::get_search_sql()`** instead of by
+  hand. The column list stays ours - the search runs over `comment_content` and `comment_author` and
+  never over the email and IP columns core's own `search` query var includes - but the `esc_like()`
+  wildcarding and the `OR` assembly are core's now, reached through the `__call()` proxy core added
+  in 4.0 for exactly this. The SQL is byte-identical to what it replaced, so a search returns the
+  same comments it did.
+- **And that call is GUARDED, because the failure mode was silence.** `__call()` answers `false` for
+  any name it does not proxy, and `false` concatenates to the empty string - so a rename, a
+  visibility change or the proxy's removal in a future WordPress would make the search clause VANISH
+  and `list-comments` would answer with every comment the caller may read while looking like a search
+  that matched all of them. A non-string now refuses the call: one opaque error and a trace id an
+  operator can look up, rather than a wrong answer nobody questions.
+- **One admin notice is printed by `wp_admin_notice()`** rather than by this plugin's own markup.
 
 ## 1.1.2
 
