@@ -72,7 +72,11 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   picked `object`, under which core ignores the item bounds - so the empty list, the one value
   `minItems: 1` exists to forbid, was accepted. Core refuses it perfectly well when told
   `type: array` (measured), so both readings of the empty value are now asked and a keyword that fails
-  under both is reported once.
+  under **either** reading refuses - which is what makes the change safe: the set of refusals is a
+  strict superset of what it was, never smaller. Where the two readings word the same complaint
+  identically, as `enum` does, it is reported once. **The cost, which is the one behaviour anybody can
+  hit:** `{}` meant as an empty OBJECT is now refused by a **type-less** `minItems: 1`, because PHP
+  cannot tell it from `[]`. Declaring `type: object` on that node removes it, and that is the fix.
 - **`oneOf` is not accepted.** It is the one keyword of core's twenty-five this server declines, and
   the reason is that both ways of honouring it are wrong. Core enforces exactly-one over its coercive
   per-branch type checks, so `oneOf: [integer, boolean]` refuses the integer `1` - `rest_is_boolean(1)`

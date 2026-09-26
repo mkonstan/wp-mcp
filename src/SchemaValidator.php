@@ -578,8 +578,15 @@ final class SchemaValidator
         // when told `type: array` (`p must contain at least 1 item.`) and ignores `minItems` entirely
         // under `type: object`, so nothing was missing from core - only from what we told it. `[]`
         // satisfies both types by matches()'s own doctrine, so both are asked and a failure under
-        // either is a failure. askCore() drops a duplicate line, because a keyword that fails under
-        // both readings - `enum` does, measured - must still report once.
+        // EITHER reading is a failure. That direction is what makes this safe rather than a trade: the
+        // old single reading was `object`, `object` is still one of the two, and every failing reading
+        // reports - so the set of refusals is a strict superset of what it was and no value that was
+        // refused can now pass. askCore() drops a duplicate LINE, because a keyword whose two readings
+        // word the same complaint - `enum` does, measured - must still report once.
+        //
+        // AND THE COST, WHICH IS THE MIRROR OF THE SAME AMBIGUITY: `{}` meant as an empty OBJECT is
+        // refused by a type-less `minItems: 1`, because nothing in PHP can tell it from `[]`. Declaring
+        // `type: object` on that node is the fix and is what any schema meaning an object should say.
         $types = $declared !== null
             ? array($declared)
             : ($value === array() ? array('object', 'array') : array(self::typeName($value)));
