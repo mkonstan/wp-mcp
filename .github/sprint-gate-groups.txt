@@ -51,6 +51,14 @@
 #             likely tests/unit/ModuleApiFaceTest.php, which tokenises each module and fails when a
 #             module calls a foreign symbol it did not declare - that is the gate working, not a
 #             flake, and the fix is to declare the symbol rather than to widen the test.
+#   sprint-core-fix is the first group whose subject is THE PLATFORM LEDGER (D32): seven places
+#             where this plugin restated a decision WordPress or ACF already makes, and the
+#             restatement drifted. Four of its assertions are SWEEPS over every shipped PHP file
+#             rather than checks of one call site, so a red one names the file and line it found -
+#             that is the class coming back, not the instance. The multisite branch of core's
+#             `edit_themes` denial is EXECUTED here against a stub that is core's own one-line
+#             body, because this project has no network install; a red one there is this plugin's
+#             copy of that branch, not WordPress's.
 sprint-0
 sprint-1
 sprint-2
@@ -71,3 +79,4 @@ sprint-14c
 sprint-14d
 sprint-seam
 sprint-acf-read
+sprint-core-fix

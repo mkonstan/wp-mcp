@@ -96,6 +96,49 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   the same question of the same source and two token scanners would be two sets of these holes to
   find twice.
 
+### Fixed: seven places where this plugin restated a decision the platform already makes
+
+An enumeration of all 14,745 shipped lines against the WordPress and ACF functions behind them found
+115 duplications of platform machinery; seven of them were live defects. What they have in common is
+the finding, and it is the reason the audit was commissioned: a copy of somebody else's decision
+drifts, and theirs cannot drift from itself. Each fix was swept for its whole class rather than its
+one call site.
+
+- **The code tools were advertised and refused on every multisite install.** WordPress denies
+  `edit_themes` on THREE conditions - `DISALLOW_FILE_EDIT`, the `file_mod_allowed` filter, and a
+  network plus a caller who is not a super admin - and this plugin's copy of that decision had the
+  first two. So a Site Administrator on a network, who holds `edit_themes` in their role, saw all six
+  code tools in `tools/list` and was refused every one of them at call time. That is the exact state
+  the listing gate was written to prevent. The same branch was missing from `list-plugins`, where
+  `auto_update` answered true or false for a caller WordPress says cannot update plugins at all; it
+  is `null` for them now, and the tool's description says why.
+- **A mint failure on Settings > WP MCP was escaped twice**, so an operator whose token was refused
+  read `&amp;` for an ampersand and `&#039;` for an apostrophe at the one moment the message
+  mattered. The notice is escaped where it is printed, once.
+- **Three schema probes built a LIKE pattern without escaping its wildcards.** `_` matches any one
+  character and is in every table and column name this plugin has, so a same-shaped neighbour table
+  could make the file-versions probe conclude the table was missing - which would have run `dbDelta`
+  on every request, for ever, on a site where nothing was wrong.
+- **Deactivation left cron behind.** It removed the NEXT scheduled event by timestamp where uninstall
+  removed all of them; both now clear one declared list of hooks, so a second scheduled job cannot be
+  added without being removed.
+- **`get-acf-values` reported a Flexible Content layout's label from the field group** instead of
+  calling ACF's own public `get_layout_title()`, which runs the documented
+  `acf/fields/flexible_content/layout_title` filter family. On any site using those filters, wp-admin
+  and this tool disagreed about the label the editor sees. An editor's rename still wins over it -
+  ACF applies that at render time and its public method cannot return one.
+- **And `get-acf-values` built the ACF object id by hand**, where `acf_get_valid_post_id()` appends a
+  language suffix to `options` on a multilingual site. `acf_get_value()` is the one ACF reader that
+  does not normalise its own argument, and it is the call this module makes for a row ACF dropped -
+  so a dropped row's values came out of the DEFAULT-language options store while every surviving row
+  came out of the current one.
+- **`list-plugins` keys its scan the way `get_plugins()` keys its own**, through `plugin_basename()`.
+  Nothing was observably wrong: on the paths `readdir()` can produce, that call is a no-op for core
+  too. The two key sets are now identical by construction rather than by coincidence, because one of
+  them is compared against `active_plugins`, which `activate_plugin()` writes through that function.
+- **Four false sentences in shipped prose went with them**, each of which was the JUSTIFICATION for
+  one of the defects above.
+
 ## 1.1.2
 
 **Released 2026-09-25.** The private trace log stops being a file, and the tool surface starts

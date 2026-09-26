@@ -1020,9 +1020,17 @@ that read and write files inside the active theme.
 The switch is not the only thing that has to be true. If `DISALLOW_FILE_EDIT` or
 `DISALLOW_FILE_MODS` is set in your `wp-config.php`, the six are **not listed at all**,
 whatever the switch says - a tool that can never run is not advertised. Either constant
-also turns the feature off for every token, including one minted before you set it. The
-third gate is the token's user: they need `edit_themes`, and a token whose user does not
-have it sees the tools listed (another token's user may) and is refused when it calls one.
+also turns the feature off for every token, including one minted before you set it. A
+hardening plugin that answers `false` from WordPress's own `file_mod_allowed` filter does
+the same thing.
+
+**On a multisite network the tools are listed only to a network administrator.** WordPress
+itself denies `edit_themes` to everybody else on a network, Site Administrators included,
+so anyone else would have been shown six tools and refused every one of them.
+
+The last gate is the token's user's role: they need `edit_themes`, and a token whose user
+does not have it sees the tools listed (another token's user may) and is refused when it
+calls one.
 
 The file API is fenced:
 
