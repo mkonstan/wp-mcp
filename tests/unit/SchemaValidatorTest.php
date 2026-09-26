@@ -464,8 +464,14 @@ final class SchemaValidatorTest extends TestCase
      * @dataProvider delegatedKeywordCases
      * @group sprint-validator
      */
-    public function testEachNewlyEnforcedKeywordIsHandedToCore(string $keyword, array $schema, $value): void
-    {
+    public function testEachNewlyEnforcedKeywordIsHandedToCore(
+        string $keyword,
+        array $schema,
+        $value,
+        string $sentAs = ''
+    ): void {
+        $sentAs = $sentAs === '' ? $keyword : $sentAs;
+
         $failures = SchemaValidator::validate(
             ['x' => $value],
             ['type' => 'object', 'properties' => ['x' => $schema]]
@@ -482,9 +488,9 @@ final class SchemaValidatorTest extends TestCase
             . ' Before sprint VALIDATOR it produced none and the keyword was silently ignored.'
         );
         self::assertArrayHasKey(
-            $keyword,
+            $sentAs,
             $calls[0]['args'],
-            "The delegated call does not carry '{$keyword}', so core is being asked about"
+            "The delegated call does not carry '{$sentAs}', so core is being asked about"
             . ' something else: ' . implode(', ', array_keys($calls[0]['args']))
         );
         self::assertContains(
@@ -507,7 +513,10 @@ final class SchemaValidatorTest extends TestCase
         self::assertCount(1, $group, "'{$keyword}' is in " . count($group) . ' delegated groups.');
         self::assertSame(
             [],
-            array_values(array_diff(array_keys($calls[0]['args']), array_merge(['type'], $group[0]))),
+            array_values(array_diff(
+                array_keys($calls[0]['args']),
+                array_merge(['type', $sentAs], $group[0])
+            )),
             'The delegated call carries a keyword outside its own group, so core may recurse or'
             . ' early-return past a sibling: ' . implode(', ', array_keys($calls[0]['args']))
         );
@@ -516,7 +525,7 @@ final class SchemaValidatorTest extends TestCase
     /**
      * One row per keyword core validates and this class did not, plus the five it used to.
      *
-     * @return array<string, array{0: string, 1: array<string, mixed>, 2: mixed}>
+     * @return array<string, array{0: string, 1: array<string, mixed>, 2: mixed, 3?: string}>
      */
     public static function delegatedKeywordCases(): array
     {
@@ -534,7 +543,9 @@ final class SchemaValidatorTest extends TestCase
             'maxItems'         => ['maxItems', ['type' => 'array', 'maxItems' => 1], [1, 2]],
             'uniqueItems'      => ['uniqueItems', ['type' => 'array', 'uniqueItems' => true], [1, 1]],
             'anyOf'            => ['anyOf', ['anyOf' => [['type' => 'integer'], ['type' => 'boolean']]], 'twenty'],
-            'oneOf'            => ['oneOf', ['oneOf' => [['type' => 'integer'], ['type' => 'boolean']]], 'twenty'],
+            // ASKED AS `anyOf`, and the row says so rather than being quietly exempted. See
+            // testOneOfIsAskedOfCoreAsAnyOfSoALegitimateValueIsNotRefused() for the reason.
+            'oneOf'            => ['oneOf', ['oneOf' => [['type' => 'integer'], ['type' => 'boolean']]], 'twenty', 'anyOf'],
 
             // The five this class used to implement, now core's. Same assertions, because "it is
             // delegated" is the only thing that changed about them.
@@ -849,233 +860,415 @@ final class SchemaValidatorTest extends TestCase
     }
 
     /**
-     * An unknown keyword anywhere in a schema is NAMED, at any depth and in every holder.
+     * EVERY KEYWORD THIS SERVER CANNOT ENFORCE AS WRITTEN IS REMOVED, at any depth and in every
+     * holder a sub-schema can sit in - and the rest of the schema survives untouched.
      *
-     * This is what `wpmcp_registry_reject_reason()` asks about a tool a filter or a module
-     * registers, and the reason it needs asking is that such a tool is in no catalog: nothing
-     * like tests/unit/ToolContractTest.php ever sees it, so registration is the only place its
-     * schema meets the dialect. A holder this walk does not cover is a hole exactly as wide as
-     * the one the sprint closed.
+     * THIS IS THE INVARIANT ROUND 1 CLAIMED AND DID NOT HOLD (review 85 B1). A keyword in the
+     * dialect is not the same as a keyword core applies: `exclusiveMinimum` without `minimum` is
+     * read by nothing (rest-api.php:2614), and neither is `format` beside `type: integer`, because
+     * core dispatches on type first. Round 1 published both and enforced neither, which is the
+     * silent decoration this sprint exists to remove - one level out, in the schema rather than in
+     * the validator.
+     *
+     * A HOLDER THIS WALK DOES NOT COVER IS A HOLE EXACTLY AS WIDE, which is why every holder gets a
+     * row: `wpmcp_tools()` and tests/unit/ToolContractTest.php both stand on this one method, so a
+     * missed holder is missed for the catalog AND for every third party at once.
+     *
+     * @dataProvider unenforceableCases
+     * @group sprint-validator
+     */
+    public function testEveryUnenforceableKeywordIsStrippedWhereverItSits(string $where, array $schema, array $expected): void
+    {
+        [$stripped, $removed] = SchemaValidator::enforceable($schema);
+
+        self::assertSame(
+            $expected,
+            $removed,
+            "In {$where}, enforceable() did not report what it cannot enforce. A keyword it does not"
+            . ' report is one tools/list publishes with nothing applying it.'
+        );
+
+        foreach ($expected as $path) {
+            $keyword = substr($path, strrpos($path, '/') + 1);
+
+            self::assertStringNotContainsString(
+                '"' . $keyword . '"',
+                (string) json_encode($stripped),
+                "In {$where}, '{$keyword}' was reported but is still in the schema, so tools/list"
+                . ' still publishes it.'
+            );
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: array<string, mixed>, 2: list<string>}>
+     */
+    public static function unenforceableCases(): array
+    {
+        return [
+            // Nothing wrong: the whole dialect, correctly typed, survives.
+            'a schema that is entirely enforceable' => [
+                'a clean schema',
+                [
+                    'type'                 => 'object',
+                    'description'          => 'fine',
+                    'required'             => ['a'],
+                    'additionalProperties' => false,
+                    'properties'           => [
+                        'a' => ['type' => 'string', 'pattern' => '^x$', 'minLength' => 1],
+                        'b' => ['type' => 'array', 'items' => ['type' => 'integer', 'multipleOf' => 2]],
+                        'c' => ['type' => 'integer', 'minimum' => 1, 'exclusiveMinimum' => true],
+                        'd' => ['enum' => ['x', 'y']],
+                    ],
+                ],
+                [],
+            ],
+
+            // (1) OUTSIDE THE DIALECT, in each holder a sub-schema can sit in.
+            'unknown at the top level'    => ['the top level', ['type' => 'object', '$schema' => 'x'], ['/$schema']],
+            'unknown in a property'       => ['a property', ['type' => 'object', 'properties' => ['a' => ['$ref' => '#/x']]], ['/properties/a/$ref']],
+            'unknown in items'            => ['items', ['type' => 'array', 'items' => ['allOf' => []]], ['/items/allOf']],
+            'unknown in addlProperties'   => ['additionalProperties', ['type' => 'object', 'additionalProperties' => ['not' => []]], ['/additionalProperties/not']],
+            'unknown in patternProps'     => ['patternProperties', ['type' => 'object', 'patternProperties' => ['^m_' => ['const' => 1]]], ['/patternProperties/^m_/const']],
+            'unknown in an anyOf branch'  => ['an anyOf branch', ['type' => 'string', 'anyOf' => [['type' => 'string'], ['examples' => []]]], ['/anyOf/1/examples']],
+            'unknown in a oneOf branch'   => ['a oneOf branch', ['type' => 'string', 'oneOf' => [['deprecated' => true]]], ['/oneOf/0/deprecated']],
+            'unknown two levels down'     => ['two levels down', ['type' => 'object', 'properties' => ['a' => ['type' => 'object', 'properties' => ['b' => ['readOnly' => true]]]]], ['/properties/a/properties/b/readOnly']],
+
+            // (2) THE EXCLUSIVE BOUND FLAGS - review 85 B1, VERIFIED over HTTPS on round 1's code.
+            'exclusiveMinimum with no minimum' => [
+                'a lone exclusiveMinimum',
+                ['type' => 'integer', 'exclusiveMinimum' => true],
+                ['/exclusiveMinimum'],
+            ],
+            'exclusiveMaximum with no maximum' => [
+                'a lone exclusiveMaximum',
+                ['type' => 'integer', 'exclusiveMaximum' => true],
+                ['/exclusiveMaximum'],
+            ],
+            // The 2020-12 NUMERIC form. Core is draft-04 and reads `exclusiveMinimum: 0` through
+            // `! empty( 0 )`, which is false - so it treats the bound as INCLUSIVE and accepts 0.
+            // Worse than unenforced: silently the opposite of what the schema says.
+            'the numeric 2020-12 form'         => [
+                'the numeric exclusiveMinimum form',
+                ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 0],
+                ['/exclusiveMinimum'],
+            ],
+            'a numeric form with no bound'     => [
+                'a numeric exclusiveMaximum with no maximum',
+                ['type' => 'integer', 'exclusiveMaximum' => 5],
+                ['/exclusiveMaximum'],
+            ],
+            // And the flag survives when it is written the way core reads it.
+            'the pair core actually reads'      => [
+                'a correctly paired exclusiveMinimum',
+                ['type' => 'integer', 'minimum' => 5, 'exclusiveMinimum' => true],
+                [],
+            ],
+
+            // (3) A TYPE-SPECIFIC KEYWORD CORE'S TYPE DISPATCH NEVER REACHES.
+            'format beside a non-string type' => [
+                'format on an integer',
+                ['type' => 'integer', 'format' => 'email'],
+                ['/format'],
+            ],
+            'minItems beside a string type'  => [
+                'minItems on a string',
+                ['type' => 'string', 'minItems' => 2],
+                ['/minItems'],
+            ],
+            'minProperties on an array'      => [
+                'minProperties on an array',
+                ['type' => 'array', 'minProperties' => 1],
+                ['/minProperties'],
+            ],
+            // AN ARRAY KEYWORD WITH NO `type` AT ALL, which review 85 S5 measured: askCore() sends
+            // the VALUE's type, `typeName([])` is `object` because json_decode('{}') and
+            // json_decode('[]') are the same PHP value, so `{minItems: 1}` with `[]` reaches core's
+            // OBJECT validator and the empty list - the one value it exists to refuse - is accepted.
+            'minItems with no type'          => ['minItems with no type', ['minItems' => 1], ['/minItems']],
+            'uniqueItems with no type'       => ['uniqueItems with no type', ['uniqueItems' => true], ['/uniqueItems']],
+
+            // BUT A MISSING `type` IS NOT A DEFECT FOR THE OTHER GROUPS, and these rows are what
+            // stops the rule above from being widened into one. typeName() is exact for a string and
+            // a number, so `{pattern: ...}` is enforced for a string and skipped for an integer -
+            // which is what JSON Schema says `pattern` does. Nothing to strip.
+            'pattern needs no type'          => ['pattern with no type', ['pattern' => '^x$'], []],
+            'minimum needs no type'          => ['minimum with no type', ['minimum' => 1], []],
+            'minProperties needs no type'    => ['minProperties with no type', ['minProperties' => 1], []],
+
+            // AND THE KEYWORDS THIS CLASS ENFORCES ITSELF NEED NO `type` EITHER, because checkObject()
+            // and check() work from the SHAPE OF THE VALUE and never read the declared type. An
+            // earlier draft of this round had them in APPLIES_TO, which would have stripped
+            // `properties` off any third-party schema that omits `type: object` - and
+            // validateArguments() closes the top level by default, so every argument the tool has
+            // would then have been refused as undeclared. No built-in omits it, so the catalog would
+            // not have shown it. These rows are that near-miss, held.
+            'properties need no type'        => [
+                'properties on a node with no type',
+                ['properties' => ['a' => ['type' => 'string']], 'required' => ['a']],
+                [],
+            ],
+            'items need no type'             => ['items with no type', ['items' => ['type' => 'integer']], []],
+            'additionalProperties no type'   => ['additionalProperties with no type', ['additionalProperties' => false], []],
+            'patternProperties no type'      => [
+                'patternProperties on a node with no type',
+                ['patternProperties' => ['^m_' => ['type' => 'integer']]],
+                [],
+            ],
+
+            // A type-INDEPENDENT keyword is never touched by any of it.
+            'enum needs no type'             => ['enum with no type', ['enum' => [1, 2]], []],
+            'anyOf needs no type'            => ['anyOf with no type', ['anyOf' => [['type' => 'string']]], []],
+        ];
+    }
+
+    /**
+     * A non-map stops the descent rather than erroring, and a clean schema comes back IDENTICAL.
+     *
+     * The identity half is what `wpmcp_tools()` leans on to stay cheap - it publishes the returned
+     * array, so a walk that rebuilt every schema into an equal-but-different one would still be
+     * correct and would still be worth knowing about.
      *
      * @group sprint-validator
      */
-    public function testAnUnknownKeywordIsFoundInEveryPlaceASubSchemaCanSit(): void
+    public function testEnforceableLeavesACleanSchemaAloneAndSurvivesANonMap(): void
     {
-        self::assertNull(
-            SchemaValidator::unknownKeyword([
-                'type'                 => 'object',
-                'description'          => 'fine',
-                'required'             => ['a'],
-                'additionalProperties' => false,
-                'properties'           => [
-                    'a' => ['type' => 'string', 'pattern' => '^x$'],
-                    'b' => ['type' => 'array', 'items' => ['type' => 'integer', 'multipleOf' => 2]],
-                ],
-            ]),
-            'A schema using nothing but the dialect was reported as unknown.'
+        $clean = [
+            'type'                 => 'object',
+            'additionalProperties' => false,
+            'properties'           => ['a' => ['type' => 'string']],
+        ];
+
+        self::assertSame([$clean, []], SchemaValidator::enforceable($clean));
+
+        // `additionalProperties: false` is a BOOLEAN in a holder that usually carries a schema.
+        self::assertSame(
+            [['type' => 'object', 'additionalProperties' => false], []],
+            SchemaValidator::enforceable(['type' => 'object', 'additionalProperties' => false])
         );
-
-        $holders = [
-            'top level'            => ['type' => 'object', '$schema' => 'https://example.invalid/s'],
-            'a property'           => ['type' => 'object', 'properties' => ['a' => ['$ref' => '#/x']]],
-            'items'                => ['type' => 'array', 'items' => ['allOf' => []]],
-            'additionalProperties' => ['type' => 'object', 'additionalProperties' => ['not' => []]],
-            'patternProperties'    => ['type' => 'object', 'patternProperties' => ['^m_' => ['const' => 1]]],
-            'an anyOf branch'      => ['type' => 'string', 'anyOf' => [['type' => 'string'], ['examples' => []]]],
-            'a oneOf branch'       => ['type' => 'string', 'oneOf' => [['deprecated' => true]]],
-            'two levels down'      => ['properties' => ['a' => ['properties' => ['b' => ['readOnly' => true]]]]],
-        ];
-        $expected = [
-            'top level'            => '$schema',
-            'a property'           => '$ref',
-            'items'                => 'allOf',
-            'additionalProperties' => 'not',
-            'patternProperties'    => 'const',
-            'an anyOf branch'      => 'examples',
-            'a oneOf branch'       => 'deprecated',
-            'two levels down'      => 'readOnly',
-        ];
-
-        foreach ($holders as $where => $schema) {
-            self::assertSame(
-                $expected[$where],
-                SchemaValidator::unknownKeyword($schema),
-                "An unknown keyword in {$where} was not found, so a tool declaring a constraint"
-                . ' nothing enforces registers and the argument reaches its body unchecked.'
-            );
-        }
-
-        // A NON-MAP STOPS THE DESCENT RATHER THAN ERRORING. `additionalProperties: false` and a
-        // `properties` written as an empty stdClass are both legal and both reach this walk.
-        self::assertNull(SchemaValidator::unknownKeyword(['additionalProperties' => false]));
-        self::assertNull(SchemaValidator::unknownKeyword(['properties' => new \stdClass()]));
-        self::assertNull(SchemaValidator::unknownKeyword('not a schema at all'));
+        self::assertSame([['type' => 'object'], []], SchemaValidator::enforceable(['type' => 'object']));
+        self::assertSame(['not a schema at all', []], SchemaValidator::enforceable('not a schema at all'));
     }
 
     /**
-     * Several failures come back together, in a fixed order, so a caller fixes one call
-     * instead of N.
+     * `oneOf` IS ASKED OF CORE AS `anyOf`, so a value legal under one branch is not refused.
      *
-     * The order is: missing required members, then declared members in SCHEMA order,
-     * then undeclared keys. Asserted because a test elsewhere asserts on the exact text.
+     * REVIEW 85 S2, VERIFIED on a real site: `oneOf: [integer, boolean]` refused the integer `1`.
+     * `rest_is_boolean(1)` is true (rest-api.php:1556-1577), so core counted two matching branches
+     * and answered "matches more than one of the expected formats" to a caller who had done nothing
+     * wrong and had no way to comply. A false refusal is worse than a missing constraint. Under a
+     * COERCIVE branch matcher the exactly-one count is a property of core's coercions rather than of
+     * the value, so branch membership is the part worth enforcing.
      *
-     * @group sprint-5
+     * The observable form is what core is ASKED, which is the only thing this tier can see; the
+     * consequence - `1` accepted on a real site - is
+     * tests/integration/SchemaKeywordsTest::testOneOfAcceptsAValueLegalUnderAnyBranch().
+     *
+     * @group sprint-validator
      */
-    public function testEveryFailureIsReportedInAFixedOrder(): void
+    public function testOneOfIsAskedOfCoreAsAnyOfSoALegitimateValueIsNotRefused(): void
     {
-        $schema = [
-            'type'       => 'object',
-            'properties' => [
-                'id'    => ['type' => 'integer'],
-                'title' => ['type' => 'string'],
-            ],
-            'required'   => ['id'],
-        ];
+        $branches = [['type' => 'integer'], ['type' => 'boolean']];
+
+        SchemaValidator::validate(1, ['oneOf' => $branches]);
+
+        $calls = WordPressRuntime::schemaCalls();
+
+        self::assertCount(1, $calls, 'The combinator was not handed to core in one piece.');
+        self::assertArrayNotHasKey(
+            'oneOf',
+            $calls[0]['args'],
+            'Core was asked about `oneOf`, so it will count matching branches with its own coercive'
+            . ' type checks and refuse the integer 1 for a schema that permits integers.'
+        );
+        self::assertSame(
+            $branches,
+            $calls[0]['args']['anyOf'] ?? null,
+            'The oneOf branches did not reach core as anyOf, unchanged.'
+        );
+    }
+
+    /**
+     * ADDITION 3, THE HALF AN EMPTY `$param` DOES NOT COVER: a combinator failure carries a FIXED
+     * sentence, and no caller byte of any kind.
+     *
+     * REVIEW 85 B2, VERIFIED over HTTPS on round 1's code with a 400-byte key: core interpolates the
+     * caller's PROPERTY NAME into `%1$s is not a valid property of Object` (rest-api.php:2467) and
+     * `rest_format_combining_operation_error()` relays it as "Reason: ..." (:1909). None of that
+     * comes through `$param`, so sending `$param` empty did not stop it and two unit tests plus the
+     * CHANGELOG promised something false. Discarding the combinator's message text is the fix that
+     * keeps the promise exactly.
+     *
+     * @group sprint-validator
+     */
+    public function testACombinatorFailureCarriesAFixedSentenceAndNoCallerBytes(): void
+    {
+        $key = str_repeat('K', 400) . '<script>alert(1)</script>';
+
+        // Core's real shape for this case, reproduced from rest-api.php:1909 + :2467.
+        WordPressRuntime::answerSchemaWith(
+            static fn ($value, array $args) => new \WP_Error(
+                'rest_no_matching_schema',
+                ' does not match the expected format. Reason: ' . $key . ' is not a valid property of Object.'
+            )
+        );
+
+        $failures = SchemaValidator::validate(
+            ['x' => [$key => 1]],
+            [
+                'type'       => 'object',
+                'properties' => ['x' => ['anyOf' => [['type' => 'object'], ['type' => 'boolean']]]],
+            ]
+        );
 
         self::assertSame(
-            [
-                '/id: required property is missing',
-                '/title: expected string, got integer',
-                '/extra: unknown property - this tool declares no such argument',
-            ],
-            SchemaValidator::validateArguments(['title' => 7, 'extra' => true], $schema)
-        );
-    }
-
-    /**
-     * The message carries the caller's KEYS but never the caller's VALUES, and both are
-     * bounded.
-     *
-     * An argument key is arbitrary caller-supplied text that ends up in a string sent
-     * back, which is the same problem the MCP-Protocol-Version gate truncates its echoed
-     * header for. And a body may carry thousands of undeclared keys, so the list of
-     * failures is capped too.
-     *
-     * @group sprint-5
-     */
-    public function testTheFailureListIsBoundedAndEchoesNoValues(): void
-    {
-        $secret    = 'SENSITIVE-VALUE-THAT-MUST-NOT-COME-BACK';
-        $longKey   = str_repeat('k', 500);
-        $arguments = [$longKey => $secret];
-
-        for ($i = 0; $i < 50; $i++) {
-            $arguments['key' . $i] = $secret;
-        }
-
-        $failures = SchemaValidator::validateArguments($arguments, ['type' => 'object']);
-        $text     = implode("\n", $failures);
-
-        self::assertStringNotContainsString(
-            $secret,
-            $text,
-            'A caller-supplied VALUE reached the failure message. Only the type of what'
-            . ' arrived and the key it arrived under may.'
-        );
-        self::assertCount(
-            SchemaValidator::MAX_FAILURES + 1,
+            ['/x: does not match any of the shapes this argument permits'],
             $failures,
-            'The failure list is not capped: ' . count($failures) . ' entries.'
+            "Core's combinator message was relayed instead of replaced, so whatever core chose to"
+            . ' interpolate into it reached the caller: ' . implode(' | ', $failures)
         );
-        self::assertStringContainsString('(and ', (string) end($failures));
-        self::assertStringNotContainsString(
-            str_repeat('k', 200),
-            $text,
-            'A 500-character argument key was echoed in full.'
-        );
+        self::assertStringNotContainsString('<script>', $failures[0], $failures[0]);
+        self::assertStringNotContainsString(str_repeat('K', 20), $failures[0], $failures[0]);
     }
 
     /**
-     * A JSON pointer segment is escaped: `/` and `~` inside a key cannot forge a path.
+     * ADDITION 3, EVERY OTHER PATH: a relayed message is ONE LINE and BOUNDED.
      *
-     * @group sprint-5
+     * TWO SEPARATE GUARANTEES AND THE FIRST IS STRUCTURAL. `wpmcp_dispatch()` joins the failure list
+     * with a newline, so a newline inside a relayed message FORGES a failure line - a caller could
+     * make the refusal appear to say `/id: required property is missing`, which is a sentence about
+     * a different argument entirely. Collapsing whitespace is what makes "one failure, one line"
+     * true of the wire and not just of this array. The cap is the second: no core message, however
+     * built, can carry an unbounded number of bytes back.
+     *
+     * @group sprint-validator
      */
-    public function testPointerSegmentsAreEscaped(): void
+    public function testARelayedMessageIsOneLineAndBounded(): void
     {
-        $failures = SchemaValidator::validateArguments(['a/b' => 1, 'c~d' => 1], ['type' => 'object']);
-
-        self::assertSame(
-            [
-                '/a~1b: unknown property - this tool declares no such argument',
-                '/c~0d: unknown property - this tool declares no such argument',
-            ],
-            $failures,
-            'RFC 6901 escaping is what stops a key containing a slash from reading as two'
-            . ' path segments: ' . implode(' | ', $failures)
-        );
-    }
-
-    /**
-     * A long key truncated ON A CHARACTER BOUNDARY, so the message stays encodable.
-     *
-     * THE CASE IS CONSTRUCTED, NOT SAMPLED: 63 ASCII bytes then a three-byte character,
-     * so its first byte sits at offset 63 and a byte-wise `substr($key, 0, 64)` keeps one
-     * byte of three. That leaves invalid UTF-8 in the failure line, and `json_encode`
-     * refuses the WHOLE document on it (JSON_ERROR_UTF8) rather than the one string -
-     * wp_json_encode's sanity check instead strips the bad bytes, so the caller gets a
-     * mangled message. A two-byte character happens to cut cleanly at 64, which is why
-     * this needs a deliberate width rather than "a long unicode key". Found by review
-     * 2026-09-12.
-     *
-     * @group sprint-5
-     */
-    public function testALongMultiByteKeyIsTruncatedOnACharacterBoundary(): void
-    {
-        // U+20AC EURO SIGN: three bytes, e2 82 ac.
-        $key = str_repeat('a', 63) . "\u{20AC}" . str_repeat('b', 40);
-
-        // THE PREMISE, asserted rather than assumed: a byte-wise cut at MAX_KEY really
-        // does break this key. Without this the test could be green against a key that
-        // happens to cut cleanly, and would then prove nothing about the fix.
-        // preg_match with /u answers 1 on valid UTF-8 and FALSE on invalid - not 0, which
-        // is "no match" - so the premise is "anything but 1".
-        self::assertNotSame(
-            1,
-            preg_match('//u', substr($key, 0, 64)),
-            'This key does not straddle the 64-byte boundary with a partial character, so'
-            . ' it is the wrong fixture for this test.'
+        WordPressRuntime::answerSchemaWith(
+            static fn () => new \WP_Error(
+                'rest_invalid_pattern',
+                "does not match pattern\n/id: required property is missing\r\tand " . str_repeat('Z', 400)
+            )
         );
 
-        $failures = SchemaValidator::validateArguments([$key => 1], ['type' => 'object']);
+        $failures = SchemaValidator::validate('x', ['type' => 'string', 'pattern' => '^y$']);
 
         self::assertCount(1, $failures, implode(' | ', $failures));
+        self::assertStringNotContainsString(
+            "\n",
+            $failures[0],
+            'A newline survived in a relayed message, so a caller can forge an extra failure line'
+            . ' in the refusal wpmcp_dispatch() assembles.'
+        );
+        self::assertStringNotContainsString("\r", $failures[0], $failures[0]);
+        self::assertStringNotContainsString("\t", $failures[0], $failures[0]);
+        self::assertLessThanOrEqual(
+            240,
+            strlen($failures[0]),
+            'A relayed message is not bounded: ' . strlen($failures[0]) . ' bytes.'
+        );
+        self::assertStringEndsWith('...', $failures[0], 'A capped message must say it was cut.');
+        // The part that matters still arrives - a cap that ate the sentence would be worse.
+        self::assertStringContainsString('does not match pattern', $failures[0], $failures[0]);
+    }
+
+    /**
+     * A CAPPED MESSAGE IS STILL VALID UTF-8, which is escape()'s reason applied to the other string
+     * this class relays.
+     *
+     * A byte cut at MAX_MESSAGE can split a multi-byte character, and json_encode refuses the WHOLE
+     * response document on invalid UTF-8 (JSON_ERROR_UTF8) rather than the one string. The fixture
+     * puts a three-byte character so its first byte lands on the boundary, and the premise is
+     * asserted rather than assumed.
+     *
+     * @group sprint-validator
+     */
+    public function testACappedMessageIsStillValidUtf8(): void
+    {
+        $message = str_repeat('m', 199) . "\u{20AC}" . str_repeat('n', 40);
+
+        self::assertNotSame(
+            1,
+            preg_match('//u', substr($message, 0, 200)),
+            'This message does not straddle the cap with a partial character, so it is the wrong'
+            . ' fixture for this test.'
+        );
+
+        WordPressRuntime::answerSchemaWith(static fn () => new \WP_Error('rest_invalid_pattern', $message));
+
+        $failures = SchemaValidator::validate('x', ['type' => 'string', 'pattern' => '^y$']);
+
         self::assertSame(
             1,
             preg_match('//u', $failures[0]),
-            'The failure line is not valid UTF-8: a multi-byte character was cut in half'
-            . ' by a byte-wise truncation. Bytes: ' . bin2hex($failures[0])
+            'The relayed message is not valid UTF-8: bytes ' . bin2hex($failures[0])
         );
-        self::assertIsString(
-            json_encode(['text' => $failures[0]]),
-            'json_encode refused the failure message, which is what invalid UTF-8 does to'
-            . ' the whole response document: ' . bin2hex($failures[0])
-        );
-        self::assertStringContainsString('...', $failures[0], $failures[0]);
-        self::assertStringNotContainsString(
-            str_repeat('b', 10),
-            $failures[0],
-            'The key was not truncated at all.'
-        );
+        self::assertIsString(json_encode(['text' => $failures[0]]));
     }
 
     /**
-     * An empty `properties` written as `new stdClass()` is still read as "no properties".
+     * A MESSAGE WITH A BAD BYTE IS COLLAPSED, NOT ERASED.
      *
-     * site-info used to be written that way and a filter-added tool still may - three of
-     * the integration suite's own fixture tools do. If the validator read stdClass as
-     * "not a map" it would also read it as "no properties declared", which is correct,
-     * but the object form must not become an accidental escape from the closed default.
+     * `preg_replace` with the `/u` modifier answers NULL on a subject that is not valid UTF-8, and
+     * `(string) null` is the empty string - so the whole sentence would VANISH, which is exactly the
+     * failure sprint CORE-FIX found in `json_encode()` returning false. The collapse therefore runs
+     * without `/u`, and this is the test that would catch somebody adding it.
      *
-     * @group sprint-5
+     * @group sprint-validator
      */
-    public function testAnEmptyPropertiesObjectIsHonoured(): void
+    public function testAMessageCarryingAnInvalidByteIsNotErasedByTheCollapse(): void
     {
-        $schema = ['type' => 'object', 'properties' => new \stdClass()];
+        WordPressRuntime::answerSchemaWith(
+            static fn () => new \WP_Error('rest_not_in_enum', "is not one of bad\xB1value")
+        );
 
-        self::assertSame([], SchemaValidator::validateArguments([], $schema));
+        $failures = SchemaValidator::validate('x', ['type' => 'string', 'enum' => ['y']]);
+
+        self::assertCount(1, $failures, implode(' | ', $failures));
+        self::assertStringContainsString(
+            'is not one of bad',
+            $failures[0],
+            'The relayed message was erased rather than collapsed, which is what preg_replace with'
+            . ' /u does to a subject carrying a byte that is not valid UTF-8. Got: ' . $failures[0]
+        );
+        self::assertStringContainsString('value', $failures[0], $failures[0]);
+    }
+
+    /**
+     * The map handed to core's pattern matcher is THIS NODE'S, carrying its own `patternProperties`.
+     *
+     * REVIEW 85 S7: the double used to answer from the property name alone and ignore `$args`
+     * entirely, so the unit tier would have stayed green if checkObject() had handed core the wrong
+     * array - the instrument grading itself. The double now answers null without
+     * `$args['patternProperties']`, which is the only key core reads
+     * (rest-api.php:1870-1880), and records every call so this can assert which map arrived.
+     *
+     * @group sprint-validator
+     */
+    public function testCoresPatternMatcherIsHandedThisNodesOwnPatternProperties(): void
+    {
+        WordPressRuntime::matchPatternProperty('m_hits', ['type' => 'integer']);
+
+        $patterns = ['^m_' => ['type' => 'integer']];
+
         self::assertSame(
-            ['/anything: unknown property - this tool declares no such argument'],
-            SchemaValidator::validateArguments(['anything' => 1], $schema)
+            ['/m_hits: expected integer, got string'],
+            SchemaValidator::validateArguments(
+                ['m_hits' => 'nope'],
+                ['type' => 'object', 'patternProperties' => $patterns]
+            )
+        );
+
+        $calls = WordPressRuntime::patternCalls();
+
+        self::assertCount(1, $calls, 'Core\'s pattern matcher was asked ' . count($calls) . ' times.');
+        self::assertSame('m_hits', $calls[0]['property']);
+        self::assertSame(
+            $patterns,
+            $calls[0]['args']['patternProperties'] ?? null,
+            'Core was handed a map without this node\'s own patternProperties, so the matching it'
+            . ' does is not the matching this schema asked for.'
         );
     }
 }

@@ -57,7 +57,7 @@ final class WordPressRuntime
             // returns (null = true, i.e. core found nothing wrong); `patterns` is what
             // rest_find_matching_pattern_property_schema() answers per property name. See
             // tests/Support/wp-runtime-stubs.php for why these are answers and not logic.
-            'schema'          => ['calls' => [], 'answer' => null, 'patterns' => []],
+            'schema'          => ['calls' => [], 'answer' => null, 'patterns' => [], 'pattern_calls' => []],
         ];
 
         // plugin_basename()'s symlink map. A global rather than a key of the array above, because
@@ -234,6 +234,17 @@ final class WordPressRuntime
     public static function schemaCalls(): array
     {
         return $GLOBALS['wpmcp_test_wp']['schema']['calls'] ?? [];
+    }
+
+    /**
+     * Every `rest_find_matching_pattern_property_schema()` call, so a test can assert that the map
+     * handed to core is the node's own (review 85 S7 - the double used to ignore its `$args`).
+     *
+     * @return list<array{property: string, args: mixed}>
+     */
+    public static function patternCalls(): array
+    {
+        return $GLOBALS['wpmcp_test_wp']['schema']['pattern_calls'] ?? [];
     }
 
     /**

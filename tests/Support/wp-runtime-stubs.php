@@ -724,6 +724,8 @@ if (!class_exists('WP_REST_Request')) {
  *   answer    null|callable(mixed $value, array $args, string $param): true|WP_Error
  *   patterns  array<string, mixed>  property name => the schema
  *                                   rest_find_matching_pattern_property_schema() should return
+ *   pattern_calls list<array{property: string, args: mixed}>  every call to that function, so a
+ *                                   test can assert WHICH map was handed over (review 85 S7)
  */
 if (!function_exists('rest_validate_value_from_schema')) {
     function rest_validate_value_from_schema($value, $args, $param = '')
@@ -744,9 +746,27 @@ if (!function_exists('rest_find_matching_pattern_property_schema')) {
     /**
      * Core's is a loop over `patternProperties` running each pattern against the property name.
      * The double does not run patterns - see above - so a test says which name matches what.
+     *
+     * IT DOES HONOUR `$args`, AND REVIEW 85 S7 IS WHY. The first version ignored the argument
+     * entirely and answered from the name alone, so the unit tier would have stayed green if
+     * `checkObject()` had handed core the wrong array - the instrument grading itself. Core reads
+     * `$args['patternProperties']` and nothing else (rest-api.php:1870-1880), so the double answers
+     * null unless that key is there, and records every call so a test can assert WHICH map was
+     * handed over. What it now guarantees: the production code passes an array carrying this node's
+     * own `patternProperties`. What it still cannot guarantee is that the PATTERNS match what core
+     * would match - that is tests/integration/SchemaKeywordsTest.php's row.
      */
     function rest_find_matching_pattern_property_schema($property, $args)
     {
+        $GLOBALS['wpmcp_test_wp']['schema']['pattern_calls'][] = array(
+            'property' => (string) $property,
+            'args'     => $args,
+        );
+
+        if (!is_array($args) || !isset($args['patternProperties'])) {
+            return null;
+        }
+
         $patterns = $GLOBALS['wpmcp_test_wp']['schema']['patterns'] ?? array();
 
         return array_key_exists((string) $property, $patterns) ? $patterns[(string) $property] : null;

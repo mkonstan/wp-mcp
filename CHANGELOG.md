@@ -21,19 +21,38 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   strict check runs before core so `rest_is_integer("20")` never gets a say. Every failure still
   comes back at once, each behind its own JSON Pointer, because core returns the first `WP_Error` and
   stops. And a refusal still carries only the TYPE of what arrived and the caller's key, truncated on
-  a character boundary and capped - core is asked with an empty parameter name so it cannot
-  interpolate a caller-supplied key into a message of its own.
+  a character boundary and capped. Core is asked with an empty parameter name so it cannot
+  interpolate a caller-supplied key into a message of its own - **and that alone was not enough**:
+  core builds `"<key>" is not a valid property of Object` from the caller's own property name when it
+  validates an object branch of an `anyOf`/`oneOf`, independently of the parameter name, and relayed
+  it out whole. A combinator failure now carries a fixed sentence of ours instead of core's text, and
+  every other relayed message is collapsed to a single line - a newline would otherwise forge an
+  extra failure line in the refusal - and capped at 200 bytes on a character boundary.
 - **What a client sees differently.** Five messages are now core's wording rather than this
   plugin's: `enum`, `minimum`, `maximum`, `minLength` and `maxLength`. They are longer, localized,
   and pluralized by `_n()`. Core's ERROR CODES are dropped rather than relayed - a refusal is still
   an MCP tool error with no code field, so nothing in this plugin emits a code without the `wpmcp_`
   prefix.
-- **A tool registered through the `wpmcp_tools` filter or a module is REFUSED when its `inputSchema`
-  declares a keyword nothing enforces** - reason `schema_keyword_unknown`, with a `registry_reject`
-  event naming the tool. The permitted set is core's twenty-five plus `required`, so what this
-  actually refuses is `$schema`, `$ref`, `allOf`, `not`, `const` and typos; the fix is to delete the
-  keyword, which was never doing anything. Same rule as `write` and `annotations`: absence of
-  enforcement is not a declaration of safety.
+- **This server no longer publishes a constraint it does not apply.** A keyword in an `inputSchema`
+  that nothing enforces *as written* is STRIPPED from what `tools/list` sends, and a `registry_strip`
+  event names the tool and the keyword so its author can find out why the constraint never fired. The
+  tool itself survives. Three shapes go: a keyword outside core's twenty-five plus `required`
+  (`$schema`, `$ref`, `allOf`, `not`, `const`, typos); a type-specific keyword on a node whose `type`
+  it does not apply to, or with no `type` at all, because core dispatches on `type` first and never
+  reaches it (`format` beside `type: integer`, `minItems` beside `type: string`); and an
+  `exclusiveMinimum`/`exclusiveMaximum` without its inclusive partner, or written in JSON Schema
+  2020-12's numeric form, which core - being draft-04 here - reads as *inclusive* and so silently
+  inverts. Stripping changes no verdict: every keyword it removes is one core was already ignoring.
+  **Stripping rather than refusing is WordPress's own decision**, taken twice:
+  `rest_get_endpoint_args_for_schema()` copies only allowed keywords into a route's args, and WP 7.1's
+  `wp_prepare_json_schema_for_client()` strips them recursively "before exposing a schema outside of
+  WordPress's server-side validation" - which is exactly what `tools/list` is.
+- **`oneOf` accepts a value that is legal under any one of its branches.** Core decides "exactly one
+  branch matches" with its own coercive per-branch type checks, so `oneOf: [integer, boolean]`
+  refused the integer `1` - `rest_is_boolean(1)` is true, two branches matched, and a caller who had
+  sent a perfectly legal value was told it "matches more than one of the expected formats" with
+  nothing it could do about it. A false refusal is worse than a missing constraint, so `oneOf` is
+  asked of core as `anyOf`: branch membership is enforced, the exactly-one count is not.
 - **`additionalProperties: false` is documented as core's default, not this plugin's.** Core ships
   `rest_default_additional_properties_to_false()` and applies it to every registered route; the
   behaviour is unchanged and the docblock that claimed it was corrected.

@@ -121,6 +121,10 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             'exactly'  => true,
             'meta'     => ['m_hits' => 7],
             'limit'    => 5,
+            'shaped'   => ['a' => 1],
+            'oneIntStr' => 1,
+            'oneStrBool' => 'x',
+            'oneObjArr' => ['k' => 1],
         ]);
 
         self::assertStringContainsString(
@@ -399,6 +403,17 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             $text,
             'A value outside the enum was accepted: ' . $text
         );
+        // EXACTLY ONE FAILURE LINE, which is the assertion the move out of CoreFixTest lost
+        // (review 85 S6). The old unit test said `assertCount(1, $failures)`; over the wire the
+        // failure list arrives as `Invalid arguments for <tool>:` followed by one line per failure,
+        // so one failure is two lines and no more. It is not decoration: a second line would mean
+        // the enum node produced another complaint as well, and "the permitted value survives
+        // encoding" would then be a claim about whichever line happened to be first.
+        self::assertCount(
+            2,
+            explode("\n", $text),
+            'Expected exactly one failure line under the header, got: ' . $text
+        );
         self::assertStringContainsString(
             'shape',
             $text,
@@ -422,67 +437,230 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * THIRD-PARTY TOOLS: a schema declaring a keyword nothing enforces REFUSES THE TOOL.
+     * THIRD-PARTY TOOLS: a keyword this server cannot enforce is STRIPPED from what is published,
+     * the tool survives, and an event says which keyword went.
      *
-     * A tool added through the `wpmcp_tools` filter is in no catalog, so tests/unit/ToolContractTest.php
-     * never sees it and its author could declare `const`, `$ref` or a typo and get silence. The
-     * decision is the same one `write` and `annotations` already get: absence of enforcement is
-     * not a declaration of safety, so the entry is dropped and a registry_reject event names it.
-     * Documenting that the keyword is ignored was the alternative and was rejected - a constraint
-     * a schema states and nothing applies is the defect this whole sprint is about.
+     * ROUND 1 REFUSED THE WHOLE TOOL AND THE LEDGER ROW WAS MISFILED (review 85 S4). WordPress had
+     * already decided how to treat a schema keyword it cannot validate, and it decided to STRIP and
+     * keep going - `rest_get_endpoint_args_for_schema()` (rest-api.php:3395-3426) at our floor, and
+     * WP 7.1's `wp_prepare_json_schema_for_client()` for the exact context `tools/list` is. A
+     * decision is inherited.
      *
-     * Three halves: absent from the listing, uncallable by name, and the reason is in the log.
+     * WHAT IS ASSERTED IS THE INVARIANT, NOT THE MECHANISM: the published schema contains no
+     * constraint this server does not apply. Four shapes, one per reason - a keyword outside the
+     * dialect, a lone exclusive bound flag, the 2020-12 numeric form core misreads, and a
+     * type-specific keyword on the wrong type.
+     *
+     * THIS FAILS ON `1adb96e` ON ALL FOUR. `const` refused the tool outright, so it was absent from
+     * the listing; the other three were in the dialect, passed registration, and were PUBLISHED with
+     * nothing applying them - which is review 85 B1, measured over HTTPS with a probe tool that ran
+     * with `-5` against `exclusiveMinimum: 0`.
      *
      * @group sprint-validator
      */
-    public function testAToolWhoseSchemaUsesAnUnenforcedKeywordIsRefusedAtRegistration(): void
+    public function testAnUnenforceableKeywordIsStrippedFromWhatIsPublishedAndTheToolSurvives(): void
     {
         TestRecorder::reset();
 
-        $listing = (string) $this->mcp(self::$token)->post('tools/list')->getBody();
+        $listing = $this->listing();
 
-        self::assertStringContainsString(
+        self::assertArrayHasKey(
             self::subject(),
             $listing,
             'The subject tool is missing from the listing, so the wpmcp_tools filter never ran and'
             . ' this test proves nothing.'
         );
-        self::assertStringNotContainsString(
+        self::assertArrayHasKey(
             self::unknown(),
             $listing,
-            'A tool whose inputSchema declares `const` - which nothing enforces - was registered.'
+            'A tool carrying an unenforceable keyword was REFUSED rather than stripped. Core strips;'
+            . ' refusing costs a third party its whole tool over a keyword that was doing nothing.'
         );
 
-        $rejected = [];
+        $published  = (string) json_encode($listing[self::unknown()]['inputSchema'] ?? null);
+        $properties = $listing[self::unknown()]['inputSchema']['properties'] ?? [];
 
-        foreach (TestRecorder::detailsOf(TestRecorder::AUTH . 'registry_reject') as $context) {
-            $rejected[(string) ($context['tool'] ?? '')] = (string) ($context['reason'] ?? '');
+        foreach (['const', 'exclusiveMinimum', 'format'] as $keyword) {
+            self::assertStringNotContainsString(
+                '"' . $keyword . '"',
+                $published,
+                "tools/list publishes `{$keyword}` on a tool where nothing applies it, so the schema"
+                . ' claims a constraint the server does not keep. Published: ' . $published
+            );
         }
 
+        // AND THE ENFORCEABLE PART SURVIVED, or "strip" would just be "delete the schema". `minimum`
+        // beside the stripped numeric flag still constrains, and every property is still declared.
         self::assertSame(
-            'schema_keyword_unknown',
-            $rejected[self::unknown()] ?? null,
-            'No registry_reject event named the tool with the unenforceable keyword, so its author'
-            . ' learns nothing. Events: ' . json_encode($rejected)
+            ['a', 'lone', 'numeric', 'mistyped'],
+            array_keys($properties),
+            'Stripping removed a PROPERTY rather than a keyword: ' . $published
         );
-        self::assertArrayNotHasKey(
-            self::subject(),
-            $rejected,
-            'The subject tool was rejected too, so the walk is refusing keywords core does'
-            . ' validate.'
+        self::assertSame(
+            0,
+            $properties['numeric']['minimum'] ?? null,
+            'The inclusive bound beside the stripped numeric exclusive flag went with it, so a'
+            . ' constraint core DOES apply was thrown away: ' . $published
+        );
+        self::assertSame('string', $properties['a']['type'] ?? null, $published);
+
+        // The tool still runs, which is the whole point of stripping rather than refusing.
+        self::assertStringContainsString(
+            self::RAN,
+            $this->textOf(self::unknown(), ['a' => 'x', 'numeric' => 5]),
+            'A tool whose schema was stripped is not callable, so stripping refused it by another'
+            . ' route.'
         );
 
-        $body = (string) $this->mcp(self::$token)->post('tools/call', [
-            'name'      => self::unknown(),
-            'arguments' => [],
-        ])->getBody();
+        // AND THE ABSENCE IS EXPLICABLE. Inheriting core's behaviour is not inheriting its silence.
+        $stripped = '';
+
+        foreach (TestRecorder::detailsOf(TestRecorder::AUTH . 'registry_strip') as $context) {
+            if ((string) ($context['tool'] ?? '') === self::unknown()) {
+                $stripped = (string) ($context['keywords'] ?? '');
+            }
+        }
+
+        foreach ([
+            '/properties/a/const',
+            '/properties/lone/exclusiveMinimum',
+            '/properties/numeric/exclusiveMinimum',
+            '/properties/mistyped/format',
+        ] as $path) {
+            self::assertStringContainsString(
+                $path,
+                $stripped,
+                "No registry_strip event named {$path}, so its author cannot find out why the"
+                . ' constraint never fires. Event: ' . $stripped
+            );
+        }
+        self::assertSame(
+            [],
+            array_filter(
+                TestRecorder::detailsOf(TestRecorder::AUTH . 'registry_strip'),
+                static fn (array $c): bool => !str_starts_with((string) ($c['tool'] ?? ''), 'wpmcp-test-')
+            ),
+            'A registry_strip event named a tool that is not one of this run\'s fixtures - so a'
+            . ' BUILT-IN publishes a keyword nothing enforces, which tests/unit/ToolContractTest.php'
+            . ' is supposed to make impossible.'
+        );
+    }
+
+    /**
+     * A caller's KEY does not reach the wire through a combinator's object branch.
+     *
+     * REVIEW 85 B2, and it is the one place the shipped invariant was false. `$param` is sent empty
+     * so core cannot interpolate our pointer, but core builds `%1$s is not a valid property of
+     * Object` from the caller's own `$property` when it validates an object BRANCH
+     * (rest-api.php:2467), and `rest_format_combining_operation_error()` relays that verbatim as
+     * "Reason: ..." (:1909). Measured over HTTPS on `1adb96e`: a 400-character key carrying
+     * `<script>` came back whole. So this test FAILS on `1adb96e`, through exactly that path.
+     *
+     * THE KEY IS THE ATTACKER-CONTROLLED PART, by construction - it is an arbitrary JSON object
+     * member. Values were never the leak here and still are not; asserted anyway, because a fix that
+     * traded one for the other would otherwise look green.
+     *
+     * @group sprint-validator
+     */
+    public function testACallerKeyDoesNotReachTheWireThroughACombinatorObjectBranch(): void
+    {
+        $key    = str_repeat('K', 400) . '<script>alert(1)</script>';
+        $secret = 'SENSITIVE-VALUE-THAT-MUST-NOT-COME-BACK';
+
+        // `shaped`'s first branch is a CLOSED object, so an undeclared member is the refusal core
+        // builds from the property name. The second branch is a boolean, so neither branch matches
+        // and the combinator really does fail.
+        $body = $this->call(['shaped' => [$key => $secret]]);
+
+        self::assertStringNotContainsString(
+            self::RAN,
+            $body,
+            'The combinator accepted an object that matches neither branch: ' . $body
+        );
+        self::assertStringNotContainsString(
+            str_repeat('K', 20),
+            $body,
+            'A caller-supplied KEY came back through a combinator branch message. It is not'
+            . ' truncated, not escaped, and unbounded in length - the docblock and the CHANGELOG'
+            . ' both promise otherwise. Body: ' . $body
+        );
+        self::assertStringNotContainsString('<script>', $body, $body);
+        self::assertStringNotContainsString($secret, $body, $body);
+
+        // And the refusal still NAMES the argument, or the fix would have thrown away the one part
+        // of the message a caller can act on.
+        self::assertStringContainsString('/shaped', $body, $body);
+    }
+
+    /**
+     * `oneOf` ACCEPTS A VALUE LEGAL UNDER ANY BRANCH, one case per multi-branch combination.
+     *
+     * REVIEW 85 S2, VERIFIED on a real site: `oneOf: [integer, boolean]` REFUSED the integer `1`,
+     * because `rest_is_boolean(1)` is true (rest-api.php:1556-1577) so core counted two matching
+     * branches and answered "matches more than one of the expected formats". The caller sent a value
+     * the schema permits and has no way to comply - a false refusal, which is worse than a missing
+     * constraint. `oneOf` is therefore asked of core as `anyOf`.
+     *
+     * A CASE PER COMBINATION, because core's coercions conflate different PAIRS of types: an integer
+     * reads as a boolean, a numeric string as an integer, "true" as a boolean, and an empty array as
+     * both an object and an array. A single pair would have left the others unmeasured.
+     *
+     * THIS FAILS ON `1adb96e` on the rows core's coercion double-matches.
+     *
+     * @dataProvider oneOfLegitimateValues
+     * @group sprint-validator
+     */
+    public function testOneOfAcceptsAValueLegalUnderAnyBranch(string $property, $value, string $branches): void
+    {
+        $body = $this->call([$property => $value]);
 
         self::assertStringContainsString(
-            'Unknown tool',
+            self::RAN,
             $body,
-            'A tool refused at registration was still callable by name.'
+            "oneOf {$branches} refused " . var_export($value, true) . ', which is legal under one of'
+            . " its branches. A caller sending that value has done nothing wrong and cannot comply."
+            . ' Body: ' . $body
         );
-        self::assertStringNotContainsString(self::RAN, $body, $body);
+    }
+
+    /** @return array<string, array{0: string, 1: mixed, 2: string}> */
+    public static function oneOfLegitimateValues(): array
+    {
+        return [
+            // THE MEASURED CASE. rest_is_boolean(1) and rest_is_boolean(0) are both true.
+            'integer 1 under [integer, boolean]'  => ['exactly', 1, '[integer, boolean]'],
+            'integer 0 under [integer, boolean]'  => ['exactly', 0, '[integer, boolean]'],
+            'boolean under [integer, boolean]'    => ['exactly', true, '[integer, boolean]'],
+            // rest_is_integer("20") is true, so a string branch and an integer branch both match.
+            'string "20" under [integer, string]' => ['oneIntStr', '20', '[integer, string]'],
+            'integer under [integer, string]'     => ['oneIntStr', 20, '[integer, string]'],
+            // rest_is_boolean("true") is true, so a string branch and a boolean branch both match.
+            'string "true" under [string, bool]'  => ['oneStrBool', 'true', '[string, boolean]'],
+            'string "x" under [string, bool]'     => ['oneStrBool', 'x', '[string, boolean]'],
+            // json_decode('{}') and json_decode('[]') are the same PHP value, so the empty one
+            // satisfies both branches at once.
+            'empty under [object, array]'         => ['oneObjArr', [], '[object, array]'],
+            'a map under [object, array]'         => ['oneObjArr', ['k' => 1], '[object, array]'],
+        ];
+    }
+
+    /**
+     * And `oneOf` still REFUSES a value legal under NO branch, or the row above would be satisfied
+     * by a validator that stopped looking at `oneOf` altogether.
+     *
+     * @group sprint-validator
+     */
+    public function testOneOfStillRefusesAValueLegalUnderNoBranch(): void
+    {
+        $body = $this->call(['oneStrBool' => [1, 2]]);
+
+        self::assertStringNotContainsString(
+            self::RAN,
+            $body,
+            'A list was accepted for oneOf [string, boolean], so oneOf now constrains nothing at'
+            . ' all: ' . $body
+        );
+        self::assertStringContainsString('/oneStrBool', $body, $body);
     }
 
     /**
@@ -558,6 +736,35 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
         // And the limitation is exactly that narrow: outside a combinator the same value is
         // refused, so this is a property of anyOf and not of the validator having given up.
         self::assertStringNotContainsString(self::RAN, $this->call(['limit' => '20']));
+    }
+
+    /**
+     * `tools/list`, decoded, keyed by tool name - so a test can read a PUBLISHED inputSchema.
+     *
+     * Reading the published schema rather than grepping the raw body is the point: "this server does
+     * not publish a constraint it does not apply" is a claim about the schema a client receives, and
+     * a substring search over the envelope cannot tell a keyword in a schema from one in a
+     * description.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function listing(): array
+    {
+        $response = $this->mcp(self::$token)->post('tools/list');
+        $body     = (string) $response->getBody();
+
+        self::assertSame(200, $response->getStatusCode(), $body);
+
+        $tools   = json_decode($body, true)['result']['tools'] ?? null;
+        $byName  = [];
+
+        self::assertIsArray($tools, 'tools/list did not answer with a tool list: ' . $body);
+
+        foreach ($tools as $tool) {
+            $byName[(string) ($tool['name'] ?? '')] = $tool;
+        }
+
+        return $byName;
     }
 
     /** `tools/call` on the subject tool; the TEXT block of the result. */
@@ -637,6 +844,23 @@ add_filter('wpmcp_tools', static function (\$tools) {
                 'distinct' => array('type' => 'array', 'uniqueItems' => true, 'items' => array('type' => 'integer')),
                 'either'   => array('anyOf' => array(array('type' => 'integer'), array('type' => 'boolean'))),
                 'exactly'  => array('oneOf' => array(array('type' => 'integer'), array('type' => 'boolean'))),
+                // REVIEW 85 B2: an OBJECT branch inside a combinator. Core validates the branch
+                // itself and interpolates the caller's own property name into the message it builds
+                // for a closed object - the one path on which a caller's KEY reached the wire.
+                'shaped'   => array('anyOf' => array(
+                    array(
+                        'type'                 => 'object',
+                        'properties'           => array('a' => array('type' => 'integer')),
+                        'additionalProperties' => false,
+                    ),
+                    array('type' => 'boolean'),
+                )),
+                // REVIEW 85 S2: one property per multi-branch `oneOf` combination, because core's
+                // per-branch type checks are coercive and therefore conflate different pairs of
+                // types. `exactly` above is the [integer, boolean] pair that was measured refusing 1.
+                'oneIntStr' => array('oneOf' => array(array('type' => 'integer'), array('type' => 'string'))),
+                'oneStrBool' => array('oneOf' => array(array('type' => 'string'), array('type' => 'boolean'))),
+                'oneObjArr' => array('oneOf' => array(array('type' => 'object'), array('type' => 'array'))),
                 'meta'     => array(
                     'type'                 => 'object',
                     'patternProperties'    => array('^m_' => array('type' => 'integer')),
@@ -649,14 +873,27 @@ add_filter('wpmcp_tools', static function (\$tools) {
         'run'         => \$run,
     );
 
-    // `const` is JSON Schema and core does not validate it, so nothing would enforce it.
+    // FOUR SHAPES THIS SERVER CANNOT ENFORCE, one per reason enforceable() has. Each is stripped
+    // from what tools/list publishes; the TOOL survives, because that is what core does with a
+    // keyword it cannot validate.
     \$tools['{$unknown}'] = array(
         'write'       => false,
         'annotations' => \$annotations,
-        'description' => 'wp-mcp test fixture: a keyword nothing enforces.',
+        'description' => 'wp-mcp test fixture: keywords nothing enforces.',
         'inputSchema' => array(
             'type'       => 'object',
-            'properties' => array('a' => array('type' => 'string', 'const' => 'x')),
+            'properties' => array(
+                // (1) outside the dialect entirely.
+                'a'        => array('type' => 'string', 'const' => 'x'),
+                // (2) an exclusive bound flag with no inclusive partner - core reads it only when
+                //     `minimum` is set (rest-api.php:2614), so alone it constrains nothing.
+                'lone'     => array('type' => 'integer', 'exclusiveMinimum' => true),
+                // (3) the JSON Schema 2020-12 NUMERIC form. Core is draft-04: `! empty( 0 )` is
+                //     false, so it reads the bound as INCLUSIVE and accepts 0.
+                'numeric'  => array('type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 0),
+                // (4) a type-specific keyword core's type dispatch never reaches.
+                'mistyped' => array('type' => 'integer', 'format' => 'email'),
+            ),
         ),
         'run'         => \$run,
     );

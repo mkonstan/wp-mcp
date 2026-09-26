@@ -10,18 +10,31 @@
  * reaches for `$ref` finds out from a red test instead of from an input that was never
  * checked.
  *
- * WHAT SPRINT VALIDATOR CHANGED, BECAUSE IT WOULD OTHERWISE HAVE WEAKENED THIS TEST. The
- * dialect went from ten constraining keywords to core's own twenty-five plus `required`, so
- * the assertion below now permits far more - which on its own makes it a weaker test, not a
- * stronger one. Two things carry that weight instead. `dialect()` is DERIVED from the three
- * sets that actually do the work (OURS, DELEGATED, ANNOTATIONS), so a keyword cannot be in
- * the permitted set without something enforcing it or being declared decoration - the hole
- * this test used to guard against is now unwriteable rather than merely caught. And a
- * filter-added or module tool is no longer free to use anything: an unknown keyword at any
- * depth refuses the entry with reason `schema_keyword_unknown`
- * (wpmcp_registry_reject_reason()), which is asserted by
- * tests/integration/SchemaKeywordsTest.php. The two together are what this test used to be
- * alone.
+ * WHAT SPRINT VALIDATOR CHANGED, BECAUSE IT WOULD OTHERWISE HAVE WEAKENED THIS TEST. The dialect
+ * went from ten constraining keywords to core's own twenty-five plus `required`, so a test that
+ * only checked MEMBERSHIP of that set would now permit far more than it did - a weaker test, not a
+ * stronger one. Round 1 made exactly that mistake and review 85 B1 found it: `exclusiveMinimum`
+ * without `minimum` is in the dialect, so a membership check accepted it, and core reads the flag
+ * only when the bound is there - so the constraint was published and applied to nothing. Decoration,
+ * in this test's own word, produced by the test that exists to forbid it.
+ *
+ * SO THIS NO LONGER CHECKS MEMBERSHIP. It asks `SchemaValidator::enforceable()` whether it would
+ * remove anything from each schema, and requires the answer to be nothing. That is a strictly
+ * stronger question: a keyword is kept only when it is in the dialect AND the node declares a `type`
+ * core's dispatch will read it under AND, for the exclusive bound flags, its partner is present in
+ * the form core reads.
+ *
+ * AND IT IS THE SAME WALK THE REGISTRY USES, which is the other half of the fix (review 85 S3). This
+ * class used to carry a private `keywordsIn()` that descended into `properties` and `items` and
+ * nothing else, while the registry's walk covered six holders - so an unknown keyword in
+ * `additionalProperties`, `patternProperties`, `anyOf` or `oneOf` was invisible HERE and caught
+ * THERE. Two walks agree by luck. There is now one, and `wpmcp_tools()` strips with it while this
+ * test forbids the catalog from needing it: every holder it reaches is proven by
+ * tests/unit/SchemaValidatorTest::testEveryUnenforceableKeywordIsStrippedWhereverItSits().
+ *
+ * A filter-added or module tool is held by the same method at RUNTIME instead: the keyword is
+ * stripped from what `tools/list` publishes and a `registry_strip` event names it, which
+ * tests/integration/SchemaKeywordsTest.php asserts against a real site.
  *
  * WHY THE ANNOTATIONS NEED ONE. `wpmcp_tools()` drops an entry whose annotations are
  * incomplete, so a built-in that forgot them would VANISH from the listing - loud, but
@@ -57,16 +70,25 @@ final class ToolContractTest extends TestCase
     public function testEveryBuiltInSchemaStaysInsideTheDialect(): void
     {
         foreach (WireSerializationTest::catalog() as $name => $tool) {
-            foreach (self::keywordsIn($tool['inputSchema']) as $pointer => $keyword) {
-                self::assertContains(
-                    $keyword,
-                    SchemaValidator::dialect(),
-                    "The inputSchema of {$name} uses '{$keyword}' at {$pointer}, which"
-                    . ' SchemaValidator neither enforces nor declares annotation-only - so'
-                    . ' that constraint is decoration. Either use a keyword core validates'
-                    . ' or stop using it.'
-                );
-            }
+            [$stripped, $removed] = SchemaValidator::enforceable($tool['inputSchema']);
+
+            self::assertSame(
+                [],
+                $removed,
+                "The inputSchema of {$name} declares " . implode(', ', $removed) . ', which this'
+                . ' server publishes and applies to nothing - so that constraint is decoration.'
+                . ' Either write it somewhere core will read it (a keyword in the dialect, on a'
+                . ' node whose `type` it applies to, with an exclusive bound flag beside its'
+                . ' inclusive partner as a boolean) or stop using it. wpmcp_tools() would strip it'
+                . ' from a third party\'s tool; a built-in must not need stripping.'
+            );
+            self::assertSame(
+                $tool['inputSchema'],
+                $stripped,
+                "The inputSchema of {$name} does not survive enforceable() unchanged although"
+                . ' nothing was reported as removed, which means the walk is rewriting a schema it'
+                . ' had no complaint about - and wpmcp_tools() publishes what it returns.'
+            );
 
             foreach (self::typesIn($tool['inputSchema']) as $pointer => $type) {
                 self::assertContains(
@@ -580,43 +602,6 @@ final class ToolContractTest extends TestCase
             ]),
             'A stdClass properties map must not trip the check.'
         );
-    }
-
-    /**
-     * Every keyword used anywhere in a schema, pointer => keyword.
-     *
-     * Recurses through `properties` and `items` only, because those are the two positions
-     * that hold sub-schemas in this dialect. A keyword hiding under something else would
-     * not be enforced either, and would be flagged at its own level.
-     *
-     * @return array<string, string>
-     */
-    private static function keywordsIn($schema, string $pointer = ''): array
-    {
-        $map = self::asMap($schema);
-
-        if ($map === null) {
-            return [];
-        }
-
-        $found = [];
-
-        foreach ($map as $keyword => $value) {
-            $found[$pointer . '/' . $keyword] = (string) $keyword;
-        }
-
-        foreach ((array) self::asMap($map['properties'] ?? null) as $name => $sub) {
-            $found = array_merge(
-                $found,
-                self::keywordsIn($sub, $pointer . '/properties/' . $name)
-            );
-        }
-
-        if (isset($map['items'])) {
-            $found = array_merge($found, self::keywordsIn($map['items'], $pointer . '/items'));
-        }
-
-        return $found;
     }
 
     /**

@@ -37,6 +37,14 @@
  *      and the list itself is capped at MAX_FAILURES. It is also why core is called with an
  *      EMPTY `$param`: core interpolates it into every message, so sending the pointer would
  *      put an untruncated unescaped key in the reply and duplicate failure()'s own prefix.
+ *      AN EMPTY `$param` IS NOT ENOUGH ON ITS OWN, which is what review 85 B2 measured over
+ *      HTTPS: core interpolates the caller's PROPERTY NAME independently of `$param` when it
+ *      recurses into an object branch of a combinator (rest-api.php:2467, relayed by :1909), and
+ *      a 400-byte key carrying markup came back whole. So `relay()` is the other half of this
+ *      addition and it covers every path rather than the one that was found: the combinator
+ *      groups answer with a fixed sentence of ours, and every other relayed message is collapsed
+ *      to ONE LINE - a newline would forge a failure line, since wpmcp_dispatch() joins the list
+ *      with one - and capped at MAX_MESSAGE bytes.
  *
  * `additionalProperties: false` IS THE DEFAULT for a tool's top-level schema - see
  * validateArguments(). CORE'S DECISION, NOT OURS, and this file used to claim it: core ships
@@ -67,21 +75,42 @@
  *      `rest_validate_object_value_from_schema()`, outside the allowed-keywords list, its
  *      message names the OBJECT rather than the missing member, and it returns on the first one.
  *      So dialect() is core's twenty-five PLUS `required`, and `required` is in OURS.
- *   4. THIRD-PARTY TOOLS - REGISTRATION REFUSES AN UNKNOWN KEYWORD. A tool added through the
- *      `wpmcp_tools` filter or a module is not in the catalog, so ToolContractTest never sees
- *      it and its author could declare a keyword nothing enforces. unknownKeyword() below is
- *      what `wpmcp_registry_reject_reason()` asks; the entry is dropped with reason
- *      `schema_keyword_unknown` and a `registry_reject` event naming the tool. Same rule as
- *      `write` and `annotations`: absence of enforcement is not a declaration of safety. The
- *      cost is that `$schema`, `$ref`, `allOf`, `not` and `const` now refuse the tool instead
- *      of being ignored, and the fix is to delete the keyword - it never did anything.
+ *   4. THIRD-PARTY TOOLS - AN UNENFORCEABLE KEYWORD IS STRIPPED, NOT REFUSED, AND SAID OUT LOUD.
+ *      A tool added through the `wpmcp_tools` filter or a module is not in the catalog, so
+ *      ToolContractTest never sees it and its author could declare a constraint nothing applies.
+ *      `enforceable()` below removes it from what `wpmcp_tools()` publishes, and a
+ *      `registry_strip` event names the tool and the keyword. ROUND 1 REFUSED THE WHOLE TOOL AND
+ *      THAT WAS A MISFILED LEDGER ROW (review 85 S4): WordPress already decided how to treat a
+ *      keyword it cannot validate, and it decided to strip - `rest_get_endpoint_args_for_schema()`
+ *      (rest-api.php:3395-3426) at our floor, and WP 7.1's `wp_prepare_json_schema_for_client()`
+ *      for the very context `tools/list` is. A decision is inherited; inheriting core's SILENCE
+ *      is not part of it, which is what the event is for. Three things are removed: a keyword
+ *      outside dialect(), a type-specific keyword whose node declares a `type` it does not apply
+ *      to or no usable `type` at all, and an exclusive bound flag without its inclusive partner.
+ *      Stripping changes no verdict - every keyword it removes is one core was ignoring anyway.
  *
- * THE ONE PLACE CORE'S COERCION SURVIVES is inside `anyOf`/`oneOf`: core validates each branch
- * itself (rest-api.php:1993-2087), so a branch declaring `{"type":"integer"}` accepts `"20"`
- * where a top-level `"type":"integer"` would not. Handling the combinators here instead would be
- * re-implementing them, which is the overbuild this sprint exists to undo; no built-in schema
- * uses either (ToolContractTest), and a third-party tool that does now gets branch validation
- * where it previously got none. SchemaValidatorTest holds the limitation so it cannot drift unnoticed.
+ * NO KEYWORD IS PUBLISHED THAT DOES NOTHING, and that sentence is the sprint's actual invariant.
+ * Round 1 stated it and did not hold it: `exclusiveMinimum` alone sat in dialect(), passed
+ * registration, and core ignored it - a third-party tool RAN with `-5` against
+ * `{"type":"integer","exclusiveMinimum":0}` over HTTPS (review 85 B1). Membership of DELEGATED says
+ * the keyword is HANDED OVER, not that core applies it in the arrangement the schema wrote it in;
+ * APPLIES_TO and EXCLUSIVE_NEEDS are what close that gap, and enforceable() is where they are
+ * applied. `tools/list` publishes only constraints that are applied, and
+ * tests/unit/ToolContractTest.php holds the catalog to the same rule by calling the same method.
+ *
+ * WHERE CORE'S COERCION STILL SURVIVES is inside `anyOf`/`oneOf`: core validates each branch
+ * itself (rest-api.php:1993-2087), so a branch declaring `{"type":"integer"}` accepts `"20"` where
+ * a top-level `"type":"integer"` would not. Handling the combinators here instead would be
+ * re-implementing them, which is the overbuild this sprint exists to undo; no built-in schema uses
+ * either (ToolContractTest), and a third-party tool that does now gets branch validation where it
+ * previously got none. SchemaValidatorTest holds the limitation so it cannot drift unnoticed.
+ *
+ * THE OTHER FACE OF THAT COERCION WAS A FALSE REFUSAL, AND IT IS FIXED. `oneOf: [integer, boolean]`
+ * refused the integer `1`, because `rest_is_boolean(1)` is true and core therefore counted two
+ * matching branches (review 85 S2). A caller who sent a legal value being told it "matches more
+ * than one of the expected formats" is worse than a missing constraint - there is nothing they can
+ * do about it. So `oneOf` is asked of core as `anyOf`: a value valid under ANY branch is accepted.
+ * See askCore().
  */
 
 declare(strict_types=1);
@@ -113,6 +142,11 @@ final class SchemaValidator
      * they do not travel. The pairs that cannot both fail on one value - too short and too long,
      * too few and too many - are grouped to save a call; `uniqueItems` is NOT grouped with the
      * item counts, because a list really can be both too long and full of duplicates.
+     *
+     * AND GROUPING IS NOT WHAT MAKES A LONE `exclusiveMinimum` HARMLESS - a schema that declares
+     * the flag WITHOUT its bound has nothing to group it with, and round 1 published exactly that
+     * and enforced nothing (review 85 B1). The group is how the pair reaches core; enforceable()
+     * is what refuses to publish the flag on its own. Both are needed and neither substitutes.
      *
      * @var list<list<string>>
      */
@@ -149,6 +183,99 @@ final class SchemaValidator
 
     /** Longest key fragment echoed inside a JSON pointer. */
     private const MAX_KEY = 64;
+
+    /**
+     * Longest RELAYED message, in bytes. Ours are fixed sentences; core's are not.
+     *
+     * The combinator groups answer with a fixed sentence of ours (see relay(), and addition 3 in the
+     * file docblock for what they used to leak). This cap is what makes the promise true of EVERY
+     * path, including the next core message that interpolates something we did not predict.
+     */
+    private const MAX_MESSAGE = 200;
+
+    /**
+     * Which declared `type` each DELEGATED type-specific keyword applies to, in CORE.
+     *
+     * THIS IS THE TABLE THAT MAKES "PERMITTED" MEAN "ENFORCED" (review 85 B1). Core dispatches on
+     * `type` and then reads only that type's keywords (rest-api.php:2276-2299), so `format` beside
+     * `type: integer` is read by nothing, and neither is `minItems` beside `type: string`. The
+     * keyword is in the dialect, `tools/list` publishes it, and no value is ever measured against
+     * it - the silent decoration this whole sprint exists to remove, one level out.
+     *
+     * A MISMATCH IS STRIPPED; A MISSING `type` IS NOT, and the difference is not laziness. With no
+     * declared type askCore() sends the VALUE'S own type, so `{"minLength": 3}` is enforced for a
+     * string and skipped for an integer - which is what JSON Schema says should happen, since
+     * `minLength` only ever constrains strings. Core's type-gated dispatch and the specification's
+     * type-gated semantics coincide there, so nothing is lost and there is nothing to strip.
+     * NEEDS_TYPE below is the one place that coincidence breaks.
+     *
+     * ONLY DELEGATED KEYWORDS ARE IN HERE. `properties`, `required`, `additionalProperties`,
+     * `patternProperties` and `items` are in OURS: checkObject() and check() apply them from the
+     * SHAPE OF THE VALUE and never look at the declared type, so they are enforced with or without
+     * one. Putting them in this table - which an earlier draft of this round did - would have
+     * stripped `properties` off a third-party schema that declares no `type`, and
+     * validateArguments() would then have refused every argument the tool has as undeclared. Caught
+     * by reading, before it ran: no built-in omits `type: object`, so the catalog would not have
+     * shown it.
+     *
+     * @var array<string, list<string>>
+     */
+    private const APPLIES_TO = array(
+        'format'           => array('string'),
+        'pattern'          => array('string'),
+        'minLength'        => array('string'),
+        'maxLength'        => array('string'),
+        'minimum'          => array('number', 'integer'),
+        'maximum'          => array('number', 'integer'),
+        'exclusiveMinimum' => array('number', 'integer'),
+        'exclusiveMaximum' => array('number', 'integer'),
+        'multipleOf'       => array('number', 'integer'),
+        'minItems'         => array('array'),
+        'maxItems'         => array('array'),
+        'uniqueItems'      => array('array'),
+        'minProperties'    => array('object'),
+        'maxProperties'    => array('object'),
+    );
+
+    /**
+     * Keywords that must have a DECLARED `type` beside them, because the value's own type cannot be
+     * trusted to supply it.
+     *
+     * THE EMPTY ARRAY IS THE WHOLE REASON, and review 85 S5 measured it. `json_decode('{}', true)`
+     * and `json_decode('[]', true)` are the same PHP value, so typeName() has to pick one and picks
+     * `object` - see matches(). On a node with no declared type askCore() therefore sends `object`
+     * for `[]`, core's OBJECT validator runs, and `{"minItems": 1}` accepts the empty list: the one
+     * value `minItems: 1` exists to refuse. Every other type group is safe without a declaration -
+     * typeName() is exact for a string, a number, a boolean and null, and for `object` the ambiguity
+     * points the generous way (`minProperties` on `[]` counts 0 and refuses correctly).
+     *
+     * So the array keywords need `type: array` written down, and a schema that leaves it out has
+     * them stripped rather than published-and-skipped.
+     *
+     * @var list<string>
+     */
+    private const NEEDS_TYPE = array('minItems', 'maxItems', 'uniqueItems');
+
+    /**
+     * The inclusive bound each exclusive flag is USELESS WITHOUT.
+     *
+     * Core is draft-04 here: `exclusiveMinimum` is a BOOLEAN that modifies `minimum`, and every
+     * bound branch is gated on `isset($args['minimum'])` / `isset($args['maximum'])`
+     * (rest-api.php:2614, 2632, 2650). So the flag alone constrains nothing, and the JSON Schema
+     * 2020-12 NUMERIC form - which is the dialect MCP's `inputSchema` is specified in - is worse
+     * than nothing: `exclusiveMinimum: 0` reaches `! empty( 0 )`, which is false, so core reads it
+     * as "inclusive" and accepts 0. Both forms are stripped rather than published; see
+     * enforceable(). Translating the numeric form into core's pair was the alternative and was
+     * rejected: `{"minimum": 1, "exclusiveMinimum": 5}` is two independent bounds in 2020-12 and
+     * core cannot express both in one call, so translating means this class deciding what the pair
+     * MEANS - a second dialect implementation, which is what this sprint deleted.
+     *
+     * @var array<string, string>
+     */
+    private const EXCLUSIVE_NEEDS = array(
+        'exclusiveMinimum' => 'minimum',
+        'exclusiveMaximum' => 'maximum',
+    );
 
     /**
      * Every keyword a schema in this plugin may use: core's twenty-five, plus `required`.
@@ -219,54 +346,113 @@ final class SchemaValidator
     }
 
     /**
-     * The first keyword anywhere in $schema that dialect() does not contain, or null.
+     * $schema with every keyword this server cannot enforce AS WRITTEN removed, and the list of
+     * what was removed.
      *
-     * WHAT THIS IS FOR: `wpmcp_registry_reject_reason()` asks it about every tool a filter or a
-     * module registers, and drops the entry when the answer is not null. A built-in is held to
-     * the same set by tests/unit/ToolContractTest.php, which is a test rather than a runtime
-     * check because a built-in that fails it must not ship at all.
+     * WHY STRIP AND NOT REFUSE is item 4 of this file's docblock: WordPress decided how to treat a
+     * keyword it cannot validate, twice, and decided to strip. Round 1 refused the whole tool, which
+     * was a divergence with no argument behind it (review 85 S4). What strips fixes is the actual
+     * defect - this server PUBLISHED a constraint and applied nothing - and it costs a third party
+     * nothing but the keyword that was already doing nothing. `wpmcp_tools()` fires a
+     * `registry_strip` event naming what went, because inheriting core's behaviour is not the same
+     * as inheriting core's silence.
+     *
+     * THREE REASONS A KEYWORD IS REMOVED:
+     *   1. it is not in dialect() at all - `$schema`, `$ref`, `allOf`, `not`, `const`, a typo;
+     *   2. it is type-specific and the node declares a `type` it does not apply to, so core's type
+     *      dispatch never reaches it - see APPLIES_TO - or it is one of the ARRAY keywords on a node
+     *      with no declared `type` at all, where the empty array's ambiguity makes the value's own
+     *      type the wrong answer - see NEEDS_TYPE;
+     *   3. it is an exclusive bound flag without its inclusive partner, or written in 2020-12's
+     *      numeric form that core misreads - see EXCLUSIVE_NEEDS.
+     *
+     * THE STRIPPED SCHEMA IS STILL VALID AGAINST THE SAME VALUES. Nothing removed here was being
+     * applied, so no call that used to pass now fails and none that used to fail now passes. What
+     * changes is only what this server CLAIMS, which was the defect.
      *
      * NO DEPTH CAP, for the same reason check() has none: a schema is the SITE'S code, not the
-     * caller's input, so a hostile depth is a hostile plugin and this walk is not what would
-     * stop it. The walk covers exactly the places a sub-schema can sit.
+     * caller's input, so a hostile depth is a hostile plugin and this walk is not what would stop
+     * it. The walk covers exactly the places a sub-schema can sit, and it is the ONLY such walk in
+     * the plugin - tests/unit/ToolContractTest.php holds the catalog with this method rather than a
+     * second walker of its own, because two walks agree by luck (review 85 S3).
      *
-     * @param mixed $schema
+     * @param mixed  $schema
+     * @param string $pointer where this node sits, for the report
+     * @return array{0: mixed, 1: list<string>} [the enforceable schema, '<pointer>/<keyword>' each]
      */
-    public static function unknownKeyword($schema): ?string
+    public static function enforceable($schema, string $pointer = ''): array
     {
         $map = self::asMap($schema);
 
         if ($map === null) {
-            return null;
+            return array($schema, array());
         }
 
         $dialect = self::dialect();
+        $type    = isset($map['type']) && is_string($map['type']) && in_array($map['type'], self::TYPES, true)
+            ? $map['type']
+            : null;
+        $removed = array();
 
-        foreach (array_keys($map) as $keyword) {
-            if (!in_array((string) $keyword, $dialect, true)) {
-                return (string) $keyword;
+        foreach (array_keys($map) as $key) {
+            $keyword = (string) $key;
+
+            if (!in_array($keyword, $dialect, true)) {
+                $removed[] = $keyword;
+                continue;
+            }
+            if (isset(self::APPLIES_TO[$keyword]) && $type !== null
+                && !in_array($type, self::APPLIES_TO[$keyword], true)) {
+                $removed[] = $keyword;
+                continue;
+            }
+            if ($type === null && in_array($keyword, self::NEEDS_TYPE, true)) {
+                $removed[] = $keyword;
+                continue;
+            }
+            if (isset(self::EXCLUSIVE_NEEDS[$keyword])
+                && (!is_bool($map[$keyword]) || !isset($map[self::EXCLUSIVE_NEEDS[$keyword]]))) {
+                $removed[] = $keyword;
             }
         }
 
-        // Every place a sub-schema can sit: the values of a map of them, the members of a list
-        // of them, or one on its own. A null or a `false` is not a map and stops the descent.
-        $nested = array_merge(
-            array_values((array) self::asMap($map['properties'] ?? null)),
-            array_values((array) self::asMap($map['patternProperties'] ?? null)),
-            is_array($map['anyOf'] ?? null) ? $map['anyOf'] : array(),
-            is_array($map['oneOf'] ?? null) ? $map['oneOf'] : array(),
-            array($map['items'] ?? null, $map['additionalProperties'] ?? null)
-        );
+        $report = array();
 
-        foreach ($nested as $sub) {
-            $found = self::unknownKeyword($sub);
+        foreach ($removed as $keyword) {
+            unset($map[$keyword]);
+            $report[] = $pointer . '/' . $keyword;
+        }
 
-            if ($found !== null) {
-                return $found;
+        // THE DESCENT, over every place a sub-schema can sit. A `false` or a null is not a map and
+        // asMap() stops there, which is how `additionalProperties: false` survives untouched.
+        foreach (array('properties', 'patternProperties') as $holder) {
+            foreach ((array) self::asMap($map[$holder] ?? null) as $name => $sub) {
+                [$map[$holder][$name], $found] = self::enforceable(
+                    $sub,
+                    $pointer . '/' . $holder . '/' . $name
+                );
+                $report = array_merge($report, $found);
             }
         }
 
-        return null;
+        foreach (array('anyOf', 'oneOf') as $holder) {
+            foreach (is_array($map[$holder] ?? null) ? array_keys($map[$holder]) : array() as $index) {
+                [$map[$holder][$index], $found] = self::enforceable(
+                    $map[$holder][$index],
+                    $pointer . '/' . $holder . '/' . $index
+                );
+                $report = array_merge($report, $found);
+            }
+        }
+
+        foreach (array('items', 'additionalProperties') as $holder) {
+            if (isset($map[$holder])) {
+                [$map[$holder], $found] = self::enforceable($map[$holder], $pointer . '/' . $holder);
+                $report = array_merge($report, $found);
+            }
+        }
+
+        return array($map, $report);
     }
 
     /**
@@ -343,7 +529,20 @@ final class SchemaValidator
      * THE `$param` IS EMPTY ON PURPOSE - see addition 3 in the file docblock. Core interpolates
      * it into every message, and the only name we have for this node is a pointer built from
      * caller-supplied keys. Sending it would put an untruncated, unescaped key in the reply and
-     * duplicate the prefix failure() already writes.
+     * duplicate the prefix failure() already writes. It is NOT sufficient on its own: core
+     * interpolates the caller's property name independently of `$param`, which is what relay()
+     * exists for.
+     *
+     * `oneOf` IS ASKED AS `anyOf`, AND THAT IS A DELIBERATE DIVERGENCE (review 85 S2). Core decides
+     * "exactly one branch matches" using its own coercive per-branch type checks, so
+     * `oneOf: [integer, boolean]` REFUSES the integer `1` - `rest_is_boolean(1)` is true
+     * (rest-api.php:1556-1577), two branches match, and a caller who sent a perfectly legal value
+     * is told it "matches more than one of the expected formats". A false refusal is worse than a
+     * missing constraint: the caller did nothing wrong and has no way to comply. Under a coercive
+     * matcher the exactly-one COUNT is a property of core's coercions rather than of the value, so
+     * it is not a constraint worth enforcing; branch membership is. So a value valid under any
+     * branch is accepted, `oneOf` constrains what `anyOf` constrains, and the docblock, the
+     * CHANGELOG and a test per multi-branch combination say so.
      *
      * @param array<string, mixed> $map
      * @return list<string>
@@ -359,14 +558,71 @@ final class SchemaValidator
                 continue;
             }
 
+            if ($group === array('oneOf')) {
+                $present = array('anyOf' => $present['oneOf']);
+            }
+
             $verdict = rest_validate_value_from_schema($value, array('type' => $type) + $present, '');
 
             if (is_wp_error($verdict)) {
-                $failures[] = self::failure($pointer, trim((string) $verdict->get_error_message()));
+                $failures[] = self::failure($pointer, self::relay($verdict, $group));
             }
         }
 
         return $failures;
+    }
+
+    /**
+     * Core's verdict as one line of ours: bounded, single-line, and carrying no caller bytes.
+     *
+     * THE COMBINATOR GROUPS ANSWER WITH A FIXED SENTENCE - addition 3 in this file's docblock has the
+     * measurement and the core line numbers. Discarding core's text is the only fix that keeps the
+     * promise exactly rather than approximately, and it costs little: core's inner pointers use its
+     * own `param[key]` notation and stop at the first branch failure, so they were never a pointer a
+     * caller could act on.
+     *
+     * AND EVERY OTHER MESSAGE IS COLLAPSED AND CAPPED, which is two separate guarantees:
+     *
+     *   ONE LINE, because wpmcp_dispatch() joins the failure list with a newline. A newline inside a
+     *   message would FORGE a failure line - a caller could make the refusal appear to say
+     *   `/id: required property is missing` - so every run of whitespace becomes one space. That is
+     *   structural, not cosmetic, and tests/unit/SchemaValidatorTest.php asserts it.
+     *
+     *   BOUNDED, so no message can carry an unbounded number of bytes back however core builds it.
+     *   Cut with mb_strcut for escape()'s reason: a byte cut can split a character and leave invalid
+     *   UTF-8, which json_encode refuses the whole document on.
+     *
+     * MARKUP IS NOT ESCAPED, deliberately. After the two rules above the only bytes a relayed
+     * message can carry are the SCHEMA AUTHOR'S own - a `pattern`, an `enum` value, a bound - and a
+     * pattern legitimately contains `<`, `>` and `&`. Entity-encoding them would corrupt the one
+     * sentence the message exists to say, in order to guard against a client that renders an MCP
+     * tool error as HTML. What this class keeps out is the CALLER'S bytes, and they are out.
+     *
+     * @param \WP_Error    $verdict
+     * @param list<string> $group the delegated group that produced it
+     */
+    private static function relay($verdict, array $group): string
+    {
+        if ($group === array('anyOf') || $group === array('oneOf')) {
+            return 'does not match any of the shapes this argument permits';
+        }
+
+        $message = (string) $verdict->get_error_message();
+        // NO /u MODIFIER, ON PURPOSE. preg_replace with /u returns NULL on a subject that is not
+        // valid UTF-8, and `(string) null` is '' - so a message carrying a bad byte would VANISH
+        // instead of being collapsed, which is the exact failure sprint CORE-FIX found in
+        // json_encode(). `\s` without /u is ASCII, and the bytes that can forge a failure line are
+        // ASCII: line feed, carriage return and tab. The `?? $message` is a second belt
+        // on the same buckle.
+        $message = trim(preg_replace('/\s+/', ' ', $message) ?? $message);
+
+        if (strlen($message) > self::MAX_MESSAGE) {
+            $message = (function_exists('mb_strcut')
+                ? (string) mb_strcut($message, 0, self::MAX_MESSAGE, 'UTF-8')
+                : substr($message, 0, self::MAX_MESSAGE)) . '...';
+        }
+
+        return $message;
     }
 
     /**

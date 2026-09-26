@@ -528,19 +528,13 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         nothing says so. Refusing the tool is the loud version of a
  *                         failure that is otherwise silent and model-side. Measured on
  *                         characters rather than bytes, which is what a client counts.
- *   schema_keyword_unknown
- *                         the `inputSchema`, at any depth, declares a keyword
- *                         SchemaValidator::dialect() does not contain - so nothing would
- *                         enforce it and the argument would reach the tool body unchecked,
- *                         with no error and no log line. That silence is what sprint
- *                         VALIDATOR removed for this plugin's own schemas by delegating to
- *                         `rest_validate_value_from_schema()`, and this is the same removal
- *                         for a schema the catalog never sees: a built-in is held to the set
- *                         by tests/unit/ToolContractTest.php, and a filter or module entry
- *                         has no test, so it is held to it here. The set is core's own
- *                         twenty-five plus `required`, so what this actually refuses is
- *                         `$schema`, `$ref`, `allOf`, `not`, `const` and typos - and the fix
- *                         is to delete the keyword, which was never doing anything.
+ * AND ONE THING THAT IS NOT A REFUSAL AT ALL. An `inputSchema` keyword this server cannot
+ * enforce as written - one outside SchemaValidator::dialect(), one that core's type dispatch
+ * never reaches, or an exclusive bound flag without its inclusive partner - is STRIPPED from
+ * what gets published rather than costing the tool its registration, and a `registry_strip`
+ * event names the tool and the keyword. See wpmcp_strip_unenforceable_schema() below for why
+ * that is the inherited behaviour rather than a softening.
+ *
  *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
  *                         wins and the filter entry is dropped. A same-name entry is
  *                         how the fail-closed rule gets walked around one level up:
@@ -655,7 +649,12 @@ function wpmcp_tools() {
             continue;
         }
 
-        $kept[$name] = $tool;
+        // AND WHAT SURVIVES IS PUBLISHED WITH ONLY THE CONSTRAINTS THAT ARE APPLIED. Every entry,
+        // built-ins included, because "nothing is ever stripped from a built-in" is a claim a test
+        // makes (tests/unit/ToolContractTest.php) and not a reason to exempt them here - an exempt
+        // path is a path the claim is not checked on. Cheap: the walk returns the same array when it
+        // removes nothing, and PHP arrays are copy-on-write.
+        $kept[$name] = wpmcp_strip_unenforceable_schema($name, $tool);
     }
 
     return $kept;
@@ -711,14 +710,71 @@ function wpmcp_registry_reject_reason($tool) {
     if (!wpmcp_descriptions_within_limit($tool)) {
         return 'description_too_long';
     }
-    // NEWEST CHECK, SO IT IS LAST - see the order rule above. SPRINT VALIDATOR. A bare code like
-    // every other reason: the event already names the TOOL, and the offending keyword is the
-    // author's own text, which does not belong in a log row this plugin writes.
-    if (SchemaValidator::unknownKeyword($tool['inputSchema']) !== null) {
-        return 'schema_keyword_unknown';
-    }
+    // NO SCHEMA-KEYWORD CHECK HERE, and round 2 of review 85 is why. An unenforceable keyword does
+    // not refuse the tool any more - `wpmcp_tools()` STRIPS it and says so, which is what core does
+    // with a keyword it cannot validate (twice: `rest_get_endpoint_args_for_schema()` at the floor,
+    // `wp_prepare_json_schema_for_client()` on 7.1). See WpMcp\SchemaValidator::enforceable().
 
     return '';
+}
+
+/**
+ * $tool with every unenforceable schema keyword removed, announcing what it removed.
+ *
+ * WHY THIS IS NOT A REFUSAL (review 85 S4, a D32 correction). The defect was never "the schema
+ * names a keyword we do not validate"; it was that `tools/list` PUBLISHED a constraint and nothing
+ * applied it - the same silence, one level out, that sprint VALIDATOR removed inside the validator.
+ * WordPress already decided how to treat such a keyword and it decided to STRIP it and keep the
+ * schema, in two places: `rest_get_endpoint_args_for_schema()` (wp-includes/rest-api.php:3395-3426)
+ * copies only allowed keywords into a route's args, and WP 7.1's
+ * `wp_prepare_json_schema_for_client()` strips them recursively "before exposing a schema outside of
+ * WordPress's server-side validation, for example in REST responses, Ability metadata, or AI
+ * provider requests" - which is exactly what this function's output is used for. A decision is
+ * inherited, so refusing the whole tool (as round 1 did, with a `schema_keyword_unknown` reason) was
+ * a divergence with nothing behind it.
+ *
+ * INHERITING CORE'S BEHAVIOUR IS NOT INHERITING CORE'S SILENCE, which is the other half and is
+ * what makes this D30's shape. A `registry_strip` event names the tool and the keyword, so the
+ * author of a tool whose `const` never fired reads the reason in the log rather than guessing. Every
+ * built-in is held to the same set by tests/unit/ToolContractTest.php, so nothing is ever stripped
+ * from one and a strip event always names a third party.
+ *
+ * THE KEYWORD PATHS ARE SANITISED BEFORE THEY ARE LOGGED. They are a third party's text - a path
+ * carries their own property names - and a log row this plugin writes is read in wp-admin: only the
+ * characters a JSON Schema keyword or property name can legitimately use survive, and the joined
+ * list is cut at 200. Same reason `origin` and `tool` are bounded in wpmcp_redact_for_log().
+ *
+ * @param string $name the tool's name, for the event
+ * @param array  $tool a registrable entry - `inputSchema` is already known to be an array
+ * @return array the same entry, with its inputSchema reduced to what is enforced
+ */
+function wpmcp_strip_unenforceable_schema($name, $tool) {
+    list($schema, $removed) = SchemaValidator::enforceable($tool['inputSchema']);
+
+    if ($removed === array()) {
+        return $tool;
+    }
+
+    $tool['inputSchema'] = $schema;
+
+    // ONE EVENT PER TOOL, NOT PER KEYWORD, and the volume is the reason. This runs on every request
+    // to the endpoint, exactly like the registry_reject beside it - and registry_reject fires at
+    // most once per bad entry. A row per keyword would multiply that by however many a third party
+    // wrote, so a tool with twenty of them would put twenty rows in the log per MCP request, for
+    // free. Joined, bounded, and capped at the same 200 characters wpmcp_redact_for_log() would
+    // apply anyway.
+    wpmcp_auth_event('registry_strip', array(
+        'tool'     => (string) $name,
+        'keywords' => substr(implode(
+            ' ',
+            array_map(
+                function ($path) { return preg_replace('/[^A-Za-z0-9$_\/-]/', '', (string) $path); },
+                $removed
+            )
+        ), 0, 200),
+    ));
+
+    return $tool;
 }
 
 /**
