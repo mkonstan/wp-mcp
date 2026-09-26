@@ -61,6 +61,9 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     /** A tool whose `enum` holds a value that is not valid UTF-8. */
     private static function badEnum(): string { return Fixtures::name('tool-bad-enum'); }
 
+    /** A tool whose exclusive bound core cannot read as the schema means it. */
+    private static function badBound(): string { return Fixtures::name('tool-bad-bound'); }
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -122,9 +125,9 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             'meta'     => ['m_hits' => 7],
             'limit'    => 5,
             'shaped'   => ['a' => 1],
-            'oneIntStr' => 1,
-            'oneStrBool' => 'x',
-            'oneObjArr' => ['k' => 1],
+            'looseItems'  => [1, 2],
+            'looseUnique' => [1, 2],
+            'branchBound' => [1, 2],
         ]);
 
         self::assertStringContainsString(
@@ -213,23 +216,33 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             'maxItems'          => ['maxItems', ['many' => [1, 2, 3]], '/many'],
             'uniqueItems'       => ['uniqueItems', ['distinct' => [1, 1]], '/distinct'],
             'anyOf'             => ['anyOf', ['either' => 'twenty'], '/either'],
-            'oneOf'             => ['oneOf', ['exactly' => 'twenty'], '/exactly'],
             // patternProperties has two halves: a matched member is validated against the
             // pattern's schema, and an unmatched one is still refused by additionalProperties.
             'patternProperties' => ['patternProperties', ['meta' => ['m_hits' => 'not-a-number']], '/meta/m_hits', 'expected integer, got string'],
+
+            // REVIEW 85 R2-B1, THE THREE THAT WENT PERMISSIVE ON `4a7c0f7`. Each of these RAN there,
+            // because round 2 removed the keyword from the schema dispatch validates against. They
+            // are in this provider rather than a test of their own because they are exactly what it
+            // already asserts: the keyword refuses a bad argument and names the pointer.
+            'minItems, no type'  => ['minItems with no declared type', ['looseItems' => [1]], '/looseItems'],
+            'uniqueItems, no type' => ['uniqueItems with no declared type', ['looseUnique' => [1, 1]], '/looseUnique'],
+            'a bound in a branch' => ['minItems in a type-less anyOf branch', ['branchBound' => [1]], '/branchBound'],
         ];
     }
 
     /**
-     * Every keyword this sprint claims to have newly enforced has a row above.
+     * Every keyword this sprint claims to have newly enforced has a row above - and the ONE it
+     * declines is named here rather than quietly missing.
      *
      * The thirteen are not a round number somebody remembered: they are
-     * `rest_get_allowed_schema_keywords()` minus what the validator already enforced, and a row
-     * missing here is a keyword this sprint claimed and did not demonstrate.
+     * `rest_get_allowed_schema_keywords()` minus what the validator already enforced. Twelve are
+     * delivered. `oneOf` is NOT, and that is a decision with a docblock rather than an omission - see
+     * SchemaValidator::DELEGATED, and testOneOfIsNotEnforcedAndNotPublished() below. A row missing
+     * from either list is a keyword this sprint claimed and did not demonstrate.
      *
      * @group sprint-validator
      */
-    public function testAllThirteenNewlyEnforcedKeywordsHaveACase(): void
+    public function testTwelveOfTheThirteenAreDemonstratedAndTheThirteenthIsDeclined(): void
     {
         $covered = [];
 
@@ -237,13 +250,13 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             $covered[$keyword] = true;
         }
 
-        $newlyEnforced = [
+        $delivered = [
             'format', 'pattern', 'patternProperties', 'minProperties', 'maxProperties',
             'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minItems', 'maxItems',
-            'uniqueItems', 'anyOf', 'oneOf',
+            'uniqueItems', 'anyOf',
         ];
 
-        foreach ($newlyEnforced as $keyword) {
+        foreach ($delivered as $keyword) {
             self::assertArrayHasKey(
                 $keyword,
                 $covered,
@@ -252,7 +265,13 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             );
         }
 
-        self::assertCount(13, $newlyEnforced);
+        self::assertCount(12, $delivered);
+        self::assertArrayNotHasKey(
+            'oneOf',
+            $covered,
+            'There is a row asserting `oneOf` refuses something, so it IS enforced - and then it must'
+            . ' be back in the dialect and must enforce EXACTLY ONE, not at-least-one.'
+        );
     }
 
     /**
@@ -480,7 +499,7 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
         $published  = (string) json_encode($listing[self::unknown()]['inputSchema'] ?? null);
         $properties = $listing[self::unknown()]['inputSchema']['properties'] ?? [];
 
-        foreach (['const', 'exclusiveMinimum', 'format'] as $keyword) {
+        foreach (['const', 'required'] as $keyword) {
             self::assertStringNotContainsString(
                 '"' . $keyword . '"',
                 $published,
@@ -492,24 +511,24 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
         // AND THE ENFORCEABLE PART SURVIVED, or "strip" would just be "delete the schema". `minimum`
         // beside the stripped numeric flag still constrains, and every property is still declared.
         self::assertSame(
-            ['a', 'lone', 'numeric', 'mistyped'],
+            ['a', 'legacy'],
             array_keys($properties),
-            'Stripping removed a PROPERTY rather than a keyword: ' . $published
+            'The reduction removed a PROPERTY rather than a keyword: ' . $published
         );
         self::assertSame(
-            0,
-            $properties['numeric']['minimum'] ?? null,
-            'The inclusive bound beside the stripped numeric exclusive flag went with it, so a'
-            . ' constraint core DOES apply was thrown away: ' . $published
+            2,
+            $properties['a']['minLength'] ?? null,
+            'The enforced sibling of the unpublished keyword went with it, so the reduction removes'
+            . ' more than it reports: ' . $published
         );
         self::assertSame('string', $properties['a']['type'] ?? null, $published);
 
         // The tool still runs, which is the whole point of stripping rather than refusing.
         self::assertStringContainsString(
             self::RAN,
-            $this->textOf(self::unknown(), ['a' => 'x', 'numeric' => 5]),
-            'A tool whose schema was stripped is not callable, so stripping refused it by another'
-            . ' route.'
+            $this->textOf(self::unknown(), ['a' => 'xx', 'legacy' => 'y']),
+            'A tool whose published schema was reduced is not callable, so the reduction refused it'
+            . ' by another route.'
         );
 
         // AND THE ABSENCE IS EXPLICABLE. Inheriting core's behaviour is not inheriting its silence.
@@ -521,12 +540,7 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
             }
         }
 
-        foreach ([
-            '/properties/a/const',
-            '/properties/lone/exclusiveMinimum',
-            '/properties/numeric/exclusiveMinimum',
-            '/properties/mistyped/format',
-        ] as $path) {
+        foreach (['/properties/a/const', '/properties/legacy/required'] as $path) {
             self::assertStringContainsString(
                 $path,
                 $stripped,
@@ -593,74 +607,140 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     }
 
     /**
-     * `oneOf` ACCEPTS A VALUE LEGAL UNDER ANY BRANCH, one case per multi-branch combination.
+     * `oneOf` IS NEITHER ENFORCED NOR PUBLISHED, which is the only arrangement of the three that is
+     * honest.
      *
-     * REVIEW 85 S2, VERIFIED on a real site: `oneOf: [integer, boolean]` REFUSED the integer `1`,
-     * because `rest_is_boolean(1)` is true (rest-api.php:1556-1577) so core counted two matching
-     * branches and answered "matches more than one of the expected formats". The caller sent a value
-     * the schema permits and has no way to comply - a false refusal, which is worse than a missing
-     * constraint. `oneOf` is therefore asked of core as `anyOf`.
+     * THE TWO ALTERNATIVES WERE BOTH MEASURED ON A REAL SITE AND BOTH ARE WRONG. Asking core for
+     * `oneOf` enforces exactly-one over its COERCIVE per-branch type checks, so `[integer, boolean]`
+     * refuses the integer `1` (`rest_is_boolean(1)` is true) - a false refusal the caller cannot
+     * comply with (round 1 S2). Round 2 asked core for `anyOf` instead while still PUBLISHING
+     * `oneOf`, and review 85 R2-S1 measured the gap with no coercion in it at all: `5` against
+     * `[{integer,minimum:0},{integer,maximum:10}]` matches both branches, core's real `oneOf` refuses
+     * it, and round 2 accepted it. A schema that says one thing while the server does another is the
+     * defect this whole sprint exists to remove.
      *
-     * A CASE PER COMBINATION, because core's coercions conflate different PAIRS of types: an integer
-     * reads as a boolean, a numeric string as an integer, "true" as a boolean, and an empty array as
-     * both an object and an array. A single pair would have left the others unmeasured.
+     * So `oneOf` is declined: nothing enforces it, and nothing claims it either. Both halves are
+     * asserted, because the first alone is what round 1 shipped for thirteen keywords.
      *
-     * THIS FAILS ON `1adb96e` on the rows core's coercion double-matches.
-     *
-     * @dataProvider oneOfLegitimateValues
      * @group sprint-validator
      */
-    public function testOneOfAcceptsAValueLegalUnderAnyBranch(string $property, $value, string $branches): void
+    public function testOneOfIsNotEnforcedAndNotPublished(): void
     {
-        $body = $this->call([$property => $value]);
-
+        // NOT ENFORCED: `exactly` is oneOf [integer, boolean] and a string satisfies neither branch.
         self::assertStringContainsString(
             self::RAN,
-            $body,
-            "oneOf {$branches} refused " . var_export($value, true) . ', which is legal under one of'
-            . " its branches. A caller sending that value has done nothing wrong and cannot comply."
-            . ' Body: ' . $body
+            $this->call(['exactly' => 'twenty']),
+            'A value satisfying no `oneOf` branch was refused, so something enforces the keyword. If'
+            . ' that is deliberate it has to enforce EXACTLY ONE - the coercion artefact and R2-S1'
+            . ' both come back otherwise - and `oneOf` has to rejoin the dialect.'
         );
-    }
 
-    /** @return array<string, array{0: string, 1: mixed, 2: string}> */
-    public static function oneOfLegitimateValues(): array
-    {
-        return [
-            // THE MEASURED CASE. rest_is_boolean(1) and rest_is_boolean(0) are both true.
-            'integer 1 under [integer, boolean]'  => ['exactly', 1, '[integer, boolean]'],
-            'integer 0 under [integer, boolean]'  => ['exactly', 0, '[integer, boolean]'],
-            'boolean under [integer, boolean]'    => ['exactly', true, '[integer, boolean]'],
-            // rest_is_integer("20") is true, so a string branch and an integer branch both match.
-            'string "20" under [integer, string]' => ['oneIntStr', '20', '[integer, string]'],
-            'integer under [integer, string]'     => ['oneIntStr', 20, '[integer, string]'],
-            // rest_is_boolean("true") is true, so a string branch and a boolean branch both match.
-            'string "true" under [string, bool]'  => ['oneStrBool', 'true', '[string, boolean]'],
-            'string "x" under [string, bool]'     => ['oneStrBool', 'x', '[string, boolean]'],
-            // json_decode('{}') and json_decode('[]') are the same PHP value, so the empty one
-            // satisfies both branches at once.
-            'empty under [object, array]'         => ['oneObjArr', [], '[object, array]'],
-            'a map under [object, array]'         => ['oneObjArr', ['k' => 1], '[object, array]'],
-        ];
+        // AND NOT PUBLISHED: the client is never told a constraint is there.
+        $published = (string) json_encode($this->listing()[self::subject()]['inputSchema'] ?? null);
+
+        self::assertStringNotContainsString(
+            '"oneOf"',
+            $published,
+            'tools/list advertises `oneOf` on a tool where nothing enforces it - which is exactly the'
+            . ' round-2 defect, one keyword over. Published: ' . $published
+        );
+        // The property itself survives; only the unenforced keyword is left out.
+        self::assertStringContainsString('"exactly"', $published, $published);
     }
 
     /**
-     * And `oneOf` still REFUSES a value legal under NO branch, or the row above would be satisfied
-     * by a validator that stopped looking at `oneOf` altogether.
+     * PUBLICATION AND VALIDATION SEE DIFFERENT SCHEMAS, AND THAT IS THE POINT OF ROUND 3.
+     *
+     * Round 2 reduced the schema in `wpmcp_tools()`, whose output is also what `wpmcp_dispatch()`
+     * validates against, so leaving a keyword out of the listing also stopped it being enforced -
+     * and the tables it left keywords out by were wrong toward permissive, so nine arrangements went
+     * from refused to running (review 85 R2-B1). The reduction now happens in the `tools/list`
+     * emitter alone.
+     *
+     * The observable is a pair: `const` is ABSENT from the published schema, and the sibling
+     * `minLength` on the same property is still ENFORCED. If the reduction had been applied to the
+     * validated copy as well, the second assertion would still pass - `minLength` was never removed -
+     * which is why the case that proves it is `looseItems` in the refusal provider above, a keyword
+     * round 2 DID remove. This test is the publication half.
      *
      * @group sprint-validator
      */
-    public function testOneOfStillRefusesAValueLegalUnderNoBranch(): void
+    public function testWhatIsPublishedIsReducedAndWhatIsValidatedIsNot(): void
     {
-        $body = $this->call(['oneStrBool' => [1, 2]]);
+        $published = $this->listing()[self::unknown()]['inputSchema'] ?? [];
+
+        self::assertStringNotContainsString(
+            '"const"',
+            (string) json_encode($published),
+            'tools/list publishes a keyword nothing can read.'
+        );
+        self::assertSame(
+            2,
+            $published['properties']['a']['minLength'] ?? null,
+            'The sibling keyword went with it, so the reduction is removing more than it reports: '
+            . json_encode($published)
+        );
+
+        $body = $this->textOf(self::unknown(), ['a' => 'x']);
 
         self::assertStringNotContainsString(
             self::RAN,
             $body,
-            'A list was accepted for oneOf [string, boolean], so oneOf now constrains nothing at'
-            . ' all: ' . $body
+            'The `minLength: 2` beside the unpublished `const` is not enforced, so validation is'
+            . ' running against the reduced schema rather than the one the tool declared - which is'
+            . ' review 85 R2-B1. Got: ' . $body
         );
-        self::assertStringContainsString('/oneStrBool', $body, $body);
+        self::assertStringContainsString('/a', $body, $body);
+    }
+
+    /**
+     * A CONSTRAINT CORE READS DIFFERENTLY FROM WHAT IT SAYS REFUSES REGISTRATION - it is not dropped.
+     *
+     * The one schema shape that costs a tool its registration, and review 85 R2-B1 is why it cannot
+     * be handled like the others: with its partner present core IS enforcing something from a
+     * numeric `exclusiveMinimum` (`! empty()`, rest-api.php:2615, so `5` reads as the draft-04
+     * boolean and enforces `> minimum`), so dropping it would LOOSEN validation. And publishing it is
+     * a false claim, because JSON Schema 2020-12 says `exclusiveMinimum: 5` means `> 5`. Neither is
+     * honest, so the entry does not register and the reason names the spelling core does read.
+     *
+     * @group sprint-validator
+     */
+    public function testAToolWhoseBoundCoreCannotReadAsWrittenDoesNotRegister(): void
+    {
+        TestRecorder::reset();
+
+        $listing = $this->listing();
+
+        self::assertArrayHasKey(
+            self::subject(),
+            $listing,
+            'The subject tool is missing, so the filter never ran and this test proves nothing.'
+        );
+        self::assertArrayNotHasKey(
+            self::badBound(),
+            $listing,
+            'A tool declaring `minimum: 0, exclusiveMinimum: 5` registered. Core enforces `> 0` from'
+            . ' that and the schema claims `> 5`, so the tool advertises a bound this server does not'
+            . ' keep.'
+        );
+
+        $rejected = [];
+
+        foreach (TestRecorder::detailsOf(TestRecorder::AUTH . 'registry_reject') as $context) {
+            $rejected[(string) ($context['tool'] ?? '')] = (string) ($context['reason'] ?? '');
+        }
+
+        self::assertSame(
+            'schema_constraint_unreadable',
+            $rejected[self::badBound()] ?? null,
+            'No registry_reject event named the tool with the unreadable bound, so its author learns'
+            . ' nothing. Events: ' . json_encode($rejected)
+        );
+        self::assertStringContainsString(
+            'Unknown tool',
+            $this->rawCall(self::badBound(), []),
+            'A tool refused at registration was still callable by name.'
+        );
     }
 
     /**
@@ -767,6 +847,20 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
         return $byName;
     }
 
+    /** `tools/call` on $tool, returning the RAW body - for a call with no result to decode. */
+    private function rawCall(string $tool, array $arguments): string
+    {
+        $response = $this->mcp(self::$token)->post('tools/call', [
+            'name'      => $tool,
+            'arguments' => $arguments,
+        ]);
+        $body = (string) $response->getBody();
+
+        self::assertSame(200, $response->getStatusCode(), $body);
+
+        return $body;
+    }
+
     /** `tools/call` on the subject tool; the TEXT block of the result. */
     private function call(array $arguments): string
     {
@@ -813,7 +907,8 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     {
         $subject = self::subject();
         $unknown = self::unknown();
-        $badEnum = self::badEnum();
+        $badEnum  = self::badEnum();
+        $badBound = self::badBound();
         $ran     = self::RAN;
 
         return <<<PHP
@@ -855,12 +950,17 @@ add_filter('wpmcp_tools', static function (\$tools) {
                     ),
                     array('type' => 'boolean'),
                 )),
-                // REVIEW 85 S2: one property per multi-branch `oneOf` combination, because core's
-                // per-branch type checks are coercive and therefore conflate different pairs of
-                // types. `exactly` above is the [integer, boolean] pair that was measured refusing 1.
-                'oneIntStr' => array('oneOf' => array(array('type' => 'integer'), array('type' => 'string'))),
-                'oneStrBool' => array('oneOf' => array(array('type' => 'string'), array('type' => 'boolean'))),
-                'oneObjArr' => array('oneOf' => array(array('type' => 'object'), array('type' => 'array'))),
+                // REVIEW 85 R2-B1: THREE ARRANGEMENTS CORE ENFORCES AND ROUND 2 STRIPPED, so a call
+                // the validator refused on 1adb96e reached the tool body on 4a7c0f7. No declared
+                // `type` on the first two - typeName() answers `array` for a non-empty list, so
+                // core's array validator reads the bound; and a type-less branch INHERITS the
+                // parent's type in core (rest-api.php:1996-1998), which is the third.
+                'looseItems'  => array('minItems' => 2),
+                'looseUnique' => array('uniqueItems' => true),
+                'branchBound' => array(
+                    'type'  => 'array',
+                    'anyOf' => array(array('minItems' => 2), array('maxItems' => 0)),
+                ),
                 'meta'     => array(
                     'type'                 => 'object',
                     'patternProperties'    => array('^m_' => array('type' => 'integer')),
@@ -883,17 +983,28 @@ add_filter('wpmcp_tools', static function (\$tools) {
         'inputSchema' => array(
             'type'       => 'object',
             'properties' => array(
-                // (1) outside the dialect entirely.
-                'a'        => array('type' => 'string', 'const' => 'x'),
-                // (2) an exclusive bound flag with no inclusive partner - core reads it only when
-                //     `minimum` is set (rest-api.php:2614), so alone it constrains nothing.
-                'lone'     => array('type' => 'integer', 'exclusiveMinimum' => true),
-                // (3) the JSON Schema 2020-12 NUMERIC form. Core is draft-04: `! empty( 0 )` is
-                //     false, so it reads the bound as INCLUSIVE and accepts 0.
-                'numeric'  => array('type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 0),
-                // (4) a type-specific keyword core's type dispatch never reaches.
-                'mistyped' => array('type' => 'integer', 'format' => 'email'),
+                // (1) OUTSIDE THE DIALECT, beside a sibling that IS enforced - the pair is what
+                //     testWhatIsPublishedIsReducedAndWhatIsValidatedIsNot() reads.
+                'a'      => array('type' => 'string', 'const' => 'x', 'minLength' => 2),
+                // (2) DRAFT-03's PER-PROPERTY `required`, which core WOULD enforce
+                //     (rest-api.php:2432-2440) and this validator does not, because `required` is
+                //     ours and is never handed over. Review 85 R2-S2's third row.
+                'legacy' => array('type' => 'string', 'required' => true),
             ),
+        ),
+        'run'         => \$run,
+    );
+
+    // AND THE ONE SHAPE THAT REFUSES REGISTRATION RATHER THAN BEING LEFT OUT OF THE LISTING. Core
+    // reads a numeric flag through `! empty()` as the draft-04 boolean and enforces `> minimum`, so
+    // dropping it would loosen validation; 2020-12 says it means `> 5`, so publishing it is false.
+    \$tools['{$badBound}'] = array(
+        'write'       => false,
+        'annotations' => \$annotations,
+        'description' => 'wp-mcp test fixture: a bound core cannot read as written.',
+        'inputSchema' => array(
+            'type'       => 'object',
+            'properties' => array('n' => array('type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 5)),
         ),
         'run'         => \$run,
     );

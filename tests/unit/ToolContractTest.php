@@ -18,23 +18,32 @@
  * only when the bound is there - so the constraint was published and applied to nothing. Decoration,
  * in this test's own word, produced by the test that exists to forbid it.
  *
- * SO THIS NO LONGER CHECKS MEMBERSHIP. It asks `SchemaValidator::enforceable()` whether it would
- * remove anything from each schema, and requires the answer to be nothing. That is a strictly
- * stronger question: a keyword is kept only when it is in the dialect AND the node declares a `type`
- * core's dispatch will read it under AND, for the exclusive bound flags, its partner is present in
- * the form core reads.
+ * SO THIS NO LONGER CHECKS MEMBERSHIP. It asks the two questions the registry asks, with the two
+ * methods the registry uses: `publishable()` for "can anything here read this keyword at all", and
+ * `unreadableConstraint()` for "does core read this as something OTHER than what it says". A built-in
+ * must need neither leaving-out nor refusing.
  *
- * AND IT IS THE SAME WALK THE REGISTRY USES, which is the other half of the fix (review 85 S3). This
- * class used to carry a private `keywordsIn()` that descended into `properties` and `items` and
+ * ROUND 3 SPLIT THOSE TWO, and the split is a blocker's fix rather than tidying. Round 2 asked one
+ * method and let it REWRITE the schema, and because the rewritten copy was also what dispatch
+ * validated against, every disagreement between the rewrite's idea of what core reads and core's own
+ * became a LOOSENED verdict - nine measured arrangements, `{"minItems": 2}` with `[1]` among them
+ * (review 85 R2-B1). Nothing that could change a verdict is removed any more; it refuses instead.
+ * Review 85 R2-S2 also found this test green on an empty `enum` and on draft-03's per-property
+ * `required: true`, both of which core would enforce and this validator would not - the first now
+ * refuses, the second is left out of publication, and both go red here.
+ *
+ * AND THEY ARE THE SAME WALKS THE REGISTRY USES, which is the other half of the fix (review 85 S3).
+ * This class used to carry a private `keywordsIn()` that descended into `properties` and `items` and
  * nothing else, while the registry's walk covered six holders - so an unknown keyword in
  * `additionalProperties`, `patternProperties`, `anyOf` or `oneOf` was invisible HERE and caught
- * THERE. Two walks agree by luck. There is now one, and `wpmcp_tools()` strips with it while this
- * test forbids the catalog from needing it: every holder it reaches is proven by
- * tests/unit/SchemaValidatorTest::testEveryUnenforceableKeywordIsStrippedWhereverItSits().
+ * THERE. Two walks agree by luck. Both methods now share one `holders()` list, and every holder it
+ * reaches is proven by
+ * tests/unit/SchemaValidatorTest::testPublicationLeavesOutOnlyWhatNothingCanRead().
  *
- * A filter-added or module tool is held by the same method at RUNTIME instead: the keyword is
- * stripped from what `tools/list` publishes and a `registry_strip` event names it, which
- * tests/integration/SchemaKeywordsTest.php asserts against a real site.
+ * A filter-added or module tool is held by the same two methods at RUNTIME instead: the keyword is
+ * left out of what `tools/list` publishes with a `registry_strip` event naming it, or the entry does
+ * not register at all with reason `schema_constraint_unreadable`. Both are asserted against a real
+ * site by tests/integration/SchemaKeywordsTest.php.
  *
  * WHY THE ANNOTATIONS NEED ONE. `wpmcp_tools()` drops an entry whose annotations are
  * incomplete, so a built-in that forgot them would VANISH from the listing - loud, but
@@ -70,24 +79,27 @@ final class ToolContractTest extends TestCase
     public function testEveryBuiltInSchemaStaysInsideTheDialect(): void
     {
         foreach (WireSerializationTest::catalog() as $name => $tool) {
-            [$stripped, $removed] = SchemaValidator::enforceable($tool['inputSchema']);
+            [$published, $removed] = SchemaValidator::publishable($tool['inputSchema']);
 
             self::assertSame(
                 [],
                 $removed,
-                "The inputSchema of {$name} declares " . implode(', ', $removed) . ', which this'
-                . ' server publishes and applies to nothing - so that constraint is decoration.'
-                . ' Either write it somewhere core will read it (a keyword in the dialect, on a'
-                . ' node whose `type` it applies to, with an exclusive bound flag beside its'
-                . ' inclusive partner as a boolean) or stop using it. wpmcp_tools() would strip it'
-                . ' from a third party\'s tool; a built-in must not need stripping.'
+                "The inputSchema of {$name} declares " . implode(', ', $removed) . ', which nothing'
+                . ' here can read - so that constraint is decoration. tools/list would leave it out'
+                . " of a third party's tool; a built-in must not need leaving out."
             );
             self::assertSame(
                 $tool['inputSchema'],
-                $stripped,
-                "The inputSchema of {$name} does not survive enforceable() unchanged although"
-                . ' nothing was reported as removed, which means the walk is rewriting a schema it'
-                . ' had no complaint about - and wpmcp_tools() publishes what it returns.'
+                $published,
+                "The inputSchema of {$name} does not survive publishable() unchanged although nothing"
+                . ' was reported as removed, which means the walk edits a schema it had no complaint'
+                . ' about - and the tools/list emitter publishes what it returns.'
+            );
+            self::assertNull(
+                SchemaValidator::unreadableConstraint($tool['inputSchema']),
+                "The inputSchema of {$name} declares a constraint core reads differently from what it"
+                . ' says, at ' . (string) SchemaValidator::unreadableConstraint($tool['inputSchema'])
+                . ". A third party's tool carrying this does not register at all."
             );
 
             foreach (self::typesIn($tool['inputSchema']) as $pointer => $type) {

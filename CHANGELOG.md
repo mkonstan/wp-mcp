@@ -22,7 +22,7 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   comes back at once, each behind its own JSON Pointer, because core returns the first `WP_Error` and
   stops. And a refusal still carries only the TYPE of what arrived and the caller's key, truncated on
   a character boundary and capped. Core is asked with an empty parameter name so it cannot
-  interpolate a caller-supplied key into a message of its own - **and that alone was not enough**:
+  interpolate a caller-supplied key into a message of its own - and that alone was not enough:
   core builds `"<key>" is not a valid property of Object` from the caller's own property name when it
   validates an object branch of an `anyOf`/`oneOf`, independently of the parameter name, and relayed
   it out whole. A combinator failure now carries a fixed sentence of ours instead of core's text, and
@@ -33,26 +33,41 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   and pluralized by `_n()`. Core's ERROR CODES are dropped rather than relayed - a refusal is still
   an MCP tool error with no code field, so nothing in this plugin emits a code without the `wpmcp_`
   prefix.
-- **This server no longer publishes a constraint it does not apply.** A keyword in an `inputSchema`
-  that nothing enforces *as written* is STRIPPED from what `tools/list` sends, and a `registry_strip`
-  event names the tool and the keyword so its author can find out why the constraint never fired. The
-  tool itself survives. Three shapes go: a keyword outside core's twenty-five plus `required`
-  (`$schema`, `$ref`, `allOf`, `not`, `const`, typos); a type-specific keyword on a node whose `type`
-  it does not apply to, or with no `type` at all, because core dispatches on `type` first and never
-  reaches it (`format` beside `type: integer`, `minItems` beside `type: string`); and an
-  `exclusiveMinimum`/`exclusiveMaximum` without its inclusive partner, or written in JSON Schema
-  2020-12's numeric form, which core - being draft-04 here - reads as *inclusive* and so silently
-  inverts. Stripping changes no verdict: every keyword it removes is one core was already ignoring.
-  **Stripping rather than refusing is WordPress's own decision**, taken twice:
-  `rest_get_endpoint_args_for_schema()` copies only allowed keywords into a route's args, and WP 7.1's
-  `wp_prepare_json_schema_for_client()` strips them recursively "before exposing a schema outside of
-  WordPress's server-side validation" - which is exactly what `tools/list` is.
-- **`oneOf` accepts a value that is legal under any one of its branches.** Core decides "exactly one
-  branch matches" with its own coercive per-branch type checks, so `oneOf: [integer, boolean]`
-  refused the integer `1` - `rest_is_boolean(1)` is true, two branches matched, and a caller who had
-  sent a perfectly legal value was told it "matches more than one of the expected formats" with
-  nothing it could do about it. A false refusal is worse than a missing constraint, so `oneOf` is
-  asked of core as `anyOf`: branch membership is enforced, the exactly-one count is not.
+- **Validation always runs against the tool's schema exactly as written.** Nothing reduces, rewrites
+  or second-guesses it on the way to `rest_validate_value_from_schema()`. This is stated first because
+  it is the property that matters: core enforces more than any table here could predict - `minItems`
+  on any non-empty list whether or not the node declares `type: array`, an `exclusiveMinimum` of `5`
+  beside a present `minimum` (its gate is `! empty()`, so a number reads as the draft-04 boolean), and
+  a type-less `anyOf` branch that inherits the parent's `type` - so the schema is handed over whole and
+  core decides.
+- **`tools/list` publishes only what something can read.** A keyword outside the dialect (`$schema`,
+  `$ref`, `allOf`, `not`, `const`, a typo) or a `required` that is not an array - which is also
+  draft-03's per-property `required: true`, a form core enforces and this validator does not - is left
+  out of the published schema, and a `registry_strip` event names the tool and the keyword so its
+  author can find out why the constraint never fired. The tool registers and runs unchanged, and the
+  keyword is still there in the schema validation sees. **Leaving it out rather than refusing the tool
+  is WordPress's own decision**, taken twice: `rest_get_endpoint_args_for_schema()` copies only allowed
+  keywords into a route's args, and WP 7.1's `wp_prepare_json_schema_for_client()` strips them
+  recursively "before exposing a schema outside of WordPress's server-side validation" - which is what
+  `tools/list` is.
+- **A tool is refused when core reads one of its constraints as something other than what it says.**
+  Reason `schema_constraint_unreadable`, with a `registry_reject` event. Three arrangements: an
+  `exclusiveMinimum`/`exclusiveMaximum` with no `minimum`/`maximum` beside it, where nothing reads the
+  flag at all; one written as anything but a boolean, where core's `! empty()` gate turns
+  `exclusiveMinimum: 5` into "the bound in `minimum` is exclusive" and `exclusiveMinimum: 0` into
+  *inclusive* - the opposite of the 2020-12 spelling an `inputSchema` is written in; and `enum: []`,
+  which JSON Schema says admits no value and core skips entirely. These REFUSE rather than being left
+  out of the listing, because leaving them out would change a verdict core is already giving. The fix
+  in each case is core's own spelling.
+- **`oneOf` is not accepted.** It is the one keyword of core's twenty-five this server declines, and
+  the reason is that both ways of honouring it are wrong. Core enforces exactly-one over its coercive
+  per-branch type checks, so `oneOf: [integer, boolean]` refuses the integer `1` - `rest_is_boolean(1)`
+  is true - a false refusal the caller cannot comply with. Enforcing `anyOf` instead while publishing
+  `oneOf` tells a client "exactly one" and delivers "at least one": measured on
+  `[{integer,minimum:0},{integer,maximum:10}]`, where `5` matches both branches and core's real
+  `oneOf` refuses it. So nothing enforces `oneOf` and nothing claims it - it is left out of the
+  published schema like any other keyword nothing reads. Use `anyOf`, which is enforced and has no
+  exactly-one count to go wrong.
 - **`additionalProperties: false` is documented as core's default, not this plugin's.** Core ships
   `rest_default_additional_properties_to_false()` and applies it to every registered route; the
   behaviour is unchanged and the docblock that claimed it was corrected.

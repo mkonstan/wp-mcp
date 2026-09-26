@@ -420,18 +420,23 @@ final class SchemaValidatorTest extends TestCase
         }
 
         self::assertSame(
-            [],
-            array_values(array_diff(self::CORE_ALLOWED_KEYWORDS, SchemaValidator::dialect())),
-            'A keyword core validates is outside the dialect, so a schema using it is refused at'
-            . ' registration for no reason and no built-in may use it either.'
-        );
-        self::assertSame(
             ['required'],
             array_values(array_diff(SchemaValidator::dialect(), self::CORE_ALLOWED_KEYWORDS)),
             "The dialect is core's allowed keywords plus exactly one - `required`, which core"
             . ' handles outside rest_get_allowed_schema_keywords() and whose failure message names'
             . ' the object rather than the missing member. Anything else here is a keyword this'
             . ' class has started claiming on its own again.'
+        );
+        // AND ONE DELIBERATE OMISSION IN THE OTHER DIRECTION. `oneOf` is core's and is NOT accepted
+        // here - see testOneOfIsDeclinedRatherThanMisEnforced(). Asserted as an exact list so that
+        // dropping a second keyword has to come past this line and say why.
+        self::assertSame(
+            ['oneOf'],
+            array_values(array_diff(self::CORE_ALLOWED_KEYWORDS, SchemaValidator::dialect())),
+            'The set of core keywords this server declines has changed. `oneOf` is declined because'
+            . ' core enforces exactly-one over coercive branch matching, which refuses legal values;'
+            . ' any other omission is a keyword core validates and we silently ignore, which is the'
+            . ' defect this whole sprint removed.'
         );
     }
 
@@ -543,9 +548,6 @@ final class SchemaValidatorTest extends TestCase
             'maxItems'         => ['maxItems', ['type' => 'array', 'maxItems' => 1], [1, 2]],
             'uniqueItems'      => ['uniqueItems', ['type' => 'array', 'uniqueItems' => true], [1, 1]],
             'anyOf'            => ['anyOf', ['anyOf' => [['type' => 'integer'], ['type' => 'boolean']]], 'twenty'],
-            // ASKED AS `anyOf`, and the row says so rather than being quietly exempted. See
-            // testOneOfIsAskedOfCoreAsAnyOfSoALegitimateValueIsNotRefused() for the reason.
-            'oneOf'            => ['oneOf', ['oneOf' => [['type' => 'integer'], ['type' => 'boolean']]], 'twenty', 'anyOf'],
 
             // The five this class used to implement, now core's. Same assertions, because "it is
             // delegated" is the only thing that changed about them.
@@ -860,42 +862,54 @@ final class SchemaValidatorTest extends TestCase
     }
 
     /**
-     * EVERY KEYWORD THIS SERVER CANNOT ENFORCE AS WRITTEN IS REMOVED, at any depth and in every
-     * holder a sub-schema can sit in - and the rest of the schema survives untouched.
+     * WHAT IS PUBLISHED LEAVES OUT EVERY KEYWORD NOTHING CAN READ, at any depth and in every holder -
+     * and leaves everything else exactly where it was.
      *
-     * THIS IS THE INVARIANT ROUND 1 CLAIMED AND DID NOT HOLD (review 85 B1). A keyword in the
-     * dialect is not the same as a keyword core applies: `exclusiveMinimum` without `minimum` is
-     * read by nothing (rest-api.php:2614), and neither is `format` beside `type: integer`, because
-     * core dispatches on type first. Round 1 published both and enforced neither, which is the
-     * silent decoration this sprint exists to remove - one level out, in the schema rather than in
-     * the validator.
+     * TWO HALVES AND THE SECOND IS THE ONE ROUND 2 GOT WRONG. A strip test with only "this went"
+     * rows passes on a method that removes too much, and removing too much is how round 2 shipped a
+     * blocker: its tables took out `minItems` on a type-less node and a numeric `exclusiveMinimum`
+     * beside its partner, both of which core READS, and because the reduced schema was also what
+     * dispatch validated against, nine arrangements went from refused to running (review 85 R2-B1).
+     * So the LEFT ALONE rows below are not padding - each one is an arrangement round 2 removed, or
+     * one a future table would be tempted to remove, and the `[]` they expect is the assertion.
      *
-     * A HOLDER THIS WALK DOES NOT COVER IS A HOLE EXACTLY AS WIDE, which is why every holder gets a
-     * row: `wpmcp_tools()` and tests/unit/ToolContractTest.php both stand on this one method, so a
-     * missed holder is missed for the catalog AND for every third party at once.
+     * NOTHING TYPE-GATED AND NOTHING PARTNER-GATED IS IN HERE ANY MORE. `publishable()` removes a
+     * keyword outside the dialect, an empty `enum` and a non-array `required`, and nothing else -
+     * three rules whose answer does not depend on the value being validated, which is what makes them
+     * safe to apply where round 2's guesses about core's dispatch were not.
      *
-     * @dataProvider unenforceableCases
+     * @dataProvider publishableCases
      * @group sprint-validator
      */
-    public function testEveryUnenforceableKeywordIsStrippedWhereverItSits(string $where, array $schema, array $expected): void
+    public function testPublicationLeavesOutOnlyWhatNothingCanRead(string $where, array $schema, array $expected): void
     {
-        [$stripped, $removed] = SchemaValidator::enforceable($schema);
+        [$published, $removed] = SchemaValidator::publishable($schema);
 
         self::assertSame(
             $expected,
             $removed,
-            "In {$where}, enforceable() did not report what it cannot enforce. A keyword it does not"
-            . ' report is one tools/list publishes with nothing applying it.'
+            "In {$where}, publishable() did not report what it left out - so either tools/list"
+            . ' advertises a constraint nothing applies, or it drops one that core does apply.'
         );
+
+        if ($expected === []) {
+            self::assertSame(
+                $schema,
+                $published,
+                "In {$where}, the schema came back CHANGED although nothing was reported as removed."
+                . ' A silent edit to a published schema is the defect this test exists for.'
+            );
+
+            return;
+        }
 
         foreach ($expected as $path) {
             $keyword = substr($path, strrpos($path, '/') + 1);
 
             self::assertStringNotContainsString(
                 '"' . $keyword . '"',
-                (string) json_encode($stripped),
-                "In {$where}, '{$keyword}' was reported but is still in the schema, so tools/list"
-                . ' still publishes it.'
+                (string) json_encode($published),
+                "In {$where}, '{$keyword}' was reported but is still in the published schema."
             );
         }
     }
@@ -903,11 +917,11 @@ final class SchemaValidatorTest extends TestCase
     /**
      * @return array<string, array{0: string, 1: array<string, mixed>, 2: list<string>}>
      */
-    public static function unenforceableCases(): array
+    public static function publishableCases(): array
     {
         return [
-            // Nothing wrong: the whole dialect, correctly typed, survives.
-            'a schema that is entirely enforceable' => [
+            // ---- LEFT ALONE: the whole dialect, correctly written. ----
+            'a clean schema' => [
                 'a clean schema',
                 [
                     'type'                 => 'object',
@@ -924,167 +938,274 @@ final class SchemaValidatorTest extends TestCase
                 [],
             ],
 
-            // (1) OUTSIDE THE DIALECT, in each holder a sub-schema can sit in.
-            'unknown at the top level'    => ['the top level', ['type' => 'object', '$schema' => 'x'], ['/$schema']],
-            'unknown in a property'       => ['a property', ['type' => 'object', 'properties' => ['a' => ['$ref' => '#/x']]], ['/properties/a/$ref']],
-            'unknown in items'            => ['items', ['type' => 'array', 'items' => ['allOf' => []]], ['/items/allOf']],
-            'unknown in addlProperties'   => ['additionalProperties', ['type' => 'object', 'additionalProperties' => ['not' => []]], ['/additionalProperties/not']],
-            'unknown in patternProps'     => ['patternProperties', ['type' => 'object', 'patternProperties' => ['^m_' => ['const' => 1]]], ['/patternProperties/^m_/const']],
-            'unknown in an anyOf branch'  => ['an anyOf branch', ['type' => 'string', 'anyOf' => [['type' => 'string'], ['examples' => []]]], ['/anyOf/1/examples']],
-            'unknown in a oneOf branch'   => ['a oneOf branch', ['type' => 'string', 'oneOf' => [['deprecated' => true]]], ['/oneOf/0/deprecated']],
-            'unknown two levels down'     => ['two levels down', ['type' => 'object', 'properties' => ['a' => ['type' => 'object', 'properties' => ['b' => ['readOnly' => true]]]]], ['/properties/a/properties/b/readOnly']],
+            // ---- REMOVED (1): outside the dialect, in every holder a sub-schema can sit in. ----
+            'unknown at the top level'   => ['the top level', ['type' => 'object', '$schema' => 'x'], ['/$schema']],
+            'unknown in a property'      => ['a property', ['type' => 'object', 'properties' => ['a' => ['$ref' => '#/x']]], ['/properties/a/$ref']],
+            'unknown in items'           => ['items', ['type' => 'array', 'items' => ['allOf' => []]], ['/items/allOf']],
+            'unknown in addlProperties'  => ['additionalProperties', ['type' => 'object', 'additionalProperties' => ['not' => []]], ['/additionalProperties/not']],
+            'unknown in patternProps'    => ['patternProperties', ['type' => 'object', 'patternProperties' => ['^m_' => ['const' => 1]]], ['/patternProperties/^m_/const']],
+            'unknown in an anyOf branch' => ['an anyOf branch', ['type' => 'string', 'anyOf' => [['type' => 'string'], ['examples' => []]]], ['/anyOf/1/examples']],
+            'unknown two levels down'    => ['two levels down', ['type' => 'object', 'properties' => ['a' => ['type' => 'object', 'properties' => ['b' => ['readOnly' => true]]]]], ['/properties/a/properties/b/readOnly']],
 
-            // (2) THE EXCLUSIVE BOUND FLAGS - review 85 B1, VERIFIED over HTTPS on round 1's code.
-            'exclusiveMinimum with no minimum' => [
-                'a lone exclusiveMinimum',
-                ['type' => 'integer', 'exclusiveMinimum' => true],
-                ['/exclusiveMinimum'],
+            // `oneOf` is outside the dialect BY OUR OWN CHOICE - see SchemaValidator::DELEGATED - so a
+            // schema using it is not advertised as constraining anything. Its branches are still
+            // walked, which is what the second row proves.
+            'oneOf itself'               => ['a oneOf node', ['type' => 'string', 'oneOf' => [['type' => 'string']]], ['/oneOf']],
+            // Nothing UNDER a removed keyword is reported one by one - there is no holder left.
+            'inside a oneOf branch'      => ['a oneOf branch', ['type' => 'string', 'oneOf' => [['deprecated' => true]]], ['/oneOf']],
+
+            // ---- REMOVED (2): the keyword's own VALUE is not the shape the enforcing line reads. ----
+            // REVIEW 85 R2-S2: both of these stayed green in ToolContractTest and both are published
+            // while nothing applies them.
+            'required as a boolean'      => ['required: true on the object', ['type' => 'object', 'required' => true], ['/required']],
+            // DRAFT-03's PER-PROPERTY SPELLING, which is the interesting one: core WOULD enforce it
+            // (rest-api.php:2432-2440) and this validator does not, because `required` is OURS and is
+            // never handed over. So it is published-and-unenforced, exactly like the other two.
+            'draft-03 per-property'      => [
+                'draft-03 per-property required',
+                ['type' => 'object', 'properties' => ['a' => ['type' => 'string', 'required' => true]]],
+                ['/properties/a/required'],
             ],
-            'exclusiveMaximum with no maximum' => [
-                'a lone exclusiveMaximum',
-                ['type' => 'integer', 'exclusiveMaximum' => true],
-                ['/exclusiveMaximum'],
-            ],
-            // The 2020-12 NUMERIC form. Core is draft-04 and reads `exclusiveMinimum: 0` through
-            // `! empty( 0 )`, which is false - so it treats the bound as INCLUSIVE and accepts 0.
-            // Worse than unenforced: silently the opposite of what the schema says.
-            'the numeric 2020-12 form'         => [
-                'the numeric exclusiveMinimum form',
-                ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 0],
-                ['/exclusiveMinimum'],
-            ],
-            'a numeric form with no bound'     => [
-                'a numeric exclusiveMaximum with no maximum',
-                ['type' => 'integer', 'exclusiveMaximum' => 5],
-                ['/exclusiveMaximum'],
-            ],
-            // And the flag survives when it is written the way core reads it.
-            'the pair core actually reads'      => [
-                'a correctly paired exclusiveMinimum',
-                ['type' => 'integer', 'minimum' => 5, 'exclusiveMinimum' => true],
+
+            // ---- LEFT ALONE, AND EVERY ROW HERE IS ONE ROUND 2 REMOVED. ----
+            // `{minItems: 2}` with `[1]`: typeName() answers `array`, askCore() sends `type: array`,
+            // core's array validator reads minItems (rest-api.php:2541-2568). Round 2 stripped it and
+            // the call went from REFUSED to RUN over HTTPS.
+            'minItems with no type'      => ['minItems with no type', ['minItems' => 2], []],
+            'uniqueItems with no type'   => ['uniqueItems with no type', ['uniqueItems' => true], []],
+            // A type-less branch INHERITS the parent's type in core (rest-api.php:1996-1998), so this
+            // is a fully-typed constraint there. Round 2's walk never inherited and stripped it.
+            'a bound in a typed branch'  => [
+                'minItems in a type-less anyOf branch under a typed parent',
+                ['type' => 'array', 'anyOf' => [['minItems' => 2], ['maxItems' => 0]]],
                 [],
             ],
+            // `format` beside `type: integer` IS unread by core - round 2's one correct table row -
+            // but it is still left alone now, because the rule that removed it was the same rule that
+            // removed the three above and a table that is wrong toward permissive is worse than none.
+            'format on an integer'       => ['format on an integer', ['type' => 'integer', 'format' => 'email'], []],
+            'minItems on a string'       => ['minItems on a string', ['type' => 'string', 'minItems' => 2], []],
+            // A NON-BOOLEAN FLAG BESIDE ITS PARTNER: core reads it through `! empty()` and enforces
+            // `> minimum`. Removing it loosened validation; it refuses at REGISTRATION instead. See
+            // testAConstraintCoreReadsDifferentlyFromWhatItSaysRefusesRegistration().
+            'a numeric flag with bound'  => ['a numeric exclusiveMinimum beside its bound', ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 5], []],
+            'a lone exclusive flag'      => ['a lone exclusiveMinimum', ['type' => 'integer', 'exclusiveMinimum' => true], []],
 
-            // (3) A TYPE-SPECIFIC KEYWORD CORE'S TYPE DISPATCH NEVER REACHES.
-            'format beside a non-string type' => [
-                'format on an integer',
-                ['type' => 'integer', 'format' => 'email'],
-                ['/format'],
-            ],
-            'minItems beside a string type'  => [
-                'minItems on a string',
-                ['type' => 'string', 'minItems' => 2],
-                ['/minItems'],
-            ],
-            'minProperties on an array'      => [
-                'minProperties on an array',
-                ['type' => 'array', 'minProperties' => 1],
-                ['/minProperties'],
-            ],
-            // AN ARRAY KEYWORD WITH NO `type` AT ALL, which review 85 S5 measured: askCore() sends
-            // the VALUE's type, `typeName([])` is `object` because json_decode('{}') and
-            // json_decode('[]') are the same PHP value, so `{minItems: 1}` with `[]` reaches core's
-            // OBJECT validator and the empty list - the one value it exists to refuse - is accepted.
-            'minItems with no type'          => ['minItems with no type', ['minItems' => 1], ['/minItems']],
-            'uniqueItems with no type'       => ['uniqueItems with no type', ['uniqueItems' => true], ['/uniqueItems']],
-
-            // BUT A MISSING `type` IS NOT A DEFECT FOR THE OTHER GROUPS, and these rows are what
-            // stops the rule above from being widened into one. typeName() is exact for a string and
-            // a number, so `{pattern: ...}` is enforced for a string and skipped for an integer -
-            // which is what JSON Schema says `pattern` does. Nothing to strip.
-            'pattern needs no type'          => ['pattern with no type', ['pattern' => '^x$'], []],
-            'minimum needs no type'          => ['minimum with no type', ['minimum' => 1], []],
-            'minProperties needs no type'    => ['minProperties with no type', ['minProperties' => 1], []],
-
-            // AND THE KEYWORDS THIS CLASS ENFORCES ITSELF NEED NO `type` EITHER, because checkObject()
-            // and check() work from the SHAPE OF THE VALUE and never read the declared type. An
-            // earlier draft of this round had them in APPLIES_TO, which would have stripped
-            // `properties` off any third-party schema that omits `type: object` - and
-            // validateArguments() closes the top level by default, so every argument the tool has
-            // would then have been refused as undeclared. No built-in omits it, so the catalog would
-            // not have shown it. These rows are that near-miss, held.
-            'properties need no type'        => [
-                'properties on a node with no type',
-                ['properties' => ['a' => ['type' => 'string']], 'required' => ['a']],
-                [],
-            ],
-            'items need no type'             => ['items with no type', ['items' => ['type' => 'integer']], []],
-            'additionalProperties no type'   => ['additionalProperties with no type', ['additionalProperties' => false], []],
-            'patternProperties no type'      => [
-                'patternProperties on a node with no type',
-                ['patternProperties' => ['^m_' => ['type' => 'integer']]],
-                [],
-            ],
-
-            // A type-INDEPENDENT keyword is never touched by any of it.
-            'enum needs no type'             => ['enum with no type', ['enum' => [1, 2]], []],
-            'anyOf needs no type'            => ['anyOf with no type', ['anyOf' => [['type' => 'string']]], []],
+            // ---- LEFT ALONE: what this class enforces itself, which never needs a `type`. ----
+            'properties need no type'    => ['properties with no type', ['properties' => ['a' => ['type' => 'string']], 'required' => ['a']], []],
+            'items need no type'         => ['items with no type', ['items' => ['type' => 'integer']], []],
+            'additionalProperties false' => ['additionalProperties: false', ['additionalProperties' => false], []],
+            'patternProperties no type'  => ['patternProperties with no type', ['patternProperties' => ['^m_' => ['type' => 'integer']]], []],
+            'enum needs no type'         => ['enum with no type', ['enum' => [1, 2]], []],
+            'anyOf needs no type'        => ['anyOf with no type', ['anyOf' => [['type' => 'string']]], []],
         ];
     }
 
     /**
-     * A non-map stops the descent rather than erroring, and a clean schema comes back IDENTICAL.
+     * THE PROPERTY ROUND 2 BROKE, ASSERTED DIRECTLY: publication never changes what core is asked.
      *
-     * The identity half is what `wpmcp_tools()` leans on to stay cheap - it publishes the returned
-     * array, so a walk that rebuilt every schema into an equal-but-different one would still be
-     * correct and would still be worth knowing about.
+     * This is the guard, not the rows above. Round 2's blocker was not "the wrong keyword was
+     * stripped" - it was that a REDUCED schema reached the validator at all, so any disagreement
+     * between the strip's idea of what core reads and core's own became a loosened verdict. The
+     * strip is publication-only now, and the way to hold that in this tier is to validate the same
+     * value against the schema AS WRITTEN and against `publishable()`'s output and require core to
+     * receive IDENTICAL calls. If the calls are identical the verdict is identical, whatever core
+     * would have answered.
      *
+     * THE ROWS ARE THE REVIEWER'S NINE MEASURED ARRANGEMENTS (review 85 R2-B1), which is the point:
+     * every one of them was a permissive flip on `4a7c0f7`, and each is now held by the
+     * strongest statement available here rather than by a table that agrees with core today.
+     *
+     * @dataProvider verdictNeutralCases
      * @group sprint-validator
      */
-    public function testEnforceableLeavesACleanSchemaAloneAndSurvivesANonMap(): void
+    public function testPublicationNeverChangesWhatCoreIsAsked(array $schema, $value): void
     {
-        $clean = [
-            'type'                 => 'object',
-            'additionalProperties' => false,
-            'properties'           => ['a' => ['type' => 'string']],
-        ];
+        $asWritten = self::delegatedCallsFor($schema, $value);
+        $published = self::delegatedCallsFor(SchemaValidator::publishable($schema)[0], $value);
 
-        self::assertSame([$clean, []], SchemaValidator::enforceable($clean));
-
-        // `additionalProperties: false` is a BOOLEAN in a holder that usually carries a schema.
         self::assertSame(
-            [['type' => 'object', 'additionalProperties' => false], []],
-            SchemaValidator::enforceable(['type' => 'object', 'additionalProperties' => false])
+            $asWritten,
+            $published,
+            'Validating against the published schema asks core something different from validating'
+            . ' against the schema as written, so publication can change a verdict. That is review 85'
+            . " R2-B1: on 4a7c0f7 this made nine arrangements permissive.
+as written: "
+            . json_encode($asWritten) . "
+published:  " . json_encode($published)
         );
-        self::assertSame([['type' => 'object'], []], SchemaValidator::enforceable(['type' => 'object']));
-        self::assertSame(['not a schema at all', []], SchemaValidator::enforceable('not a schema at all'));
+    }
+
+    /** The delegated calls one validation makes, with the recorder reset around it. */
+    private static function delegatedCallsFor(array $schema, $value): array
+    {
+        WordPressRuntime::install();
+        SchemaValidator::validate($value, $schema);
+
+        return array_map(
+            static fn (array $call): array => ['args' => $call['args'], 'value' => $call['value']],
+            WordPressRuntime::schemaCalls()
+        );
     }
 
     /**
-     * `oneOf` IS ASKED OF CORE AS `anyOf`, so a value legal under one branch is not refused.
+     * The nine arrangements review 85 R2-B1 measured going from REFUSED to RUN, plus the shapes the
+     * strip does remove - because "identical calls" has to hold for those too.
      *
-     * REVIEW 85 S2, VERIFIED on a real site: `oneOf: [integer, boolean]` refused the integer `1`.
-     * `rest_is_boolean(1)` is true (rest-api.php:1556-1577), so core counted two matching branches
-     * and answered "matches more than one of the expected formats" to a caller who had done nothing
-     * wrong and had no way to comply. A false refusal is worse than a missing constraint. Under a
-     * COERCIVE branch matcher the exactly-one count is a property of core's coercions rather than of
-     * the value, so branch membership is the part worth enforcing.
-     *
-     * The observable form is what core is ASKED, which is the only thing this tier can see; the
-     * consequence - `1` accepted on a real site - is
-     * tests/integration/SchemaKeywordsTest::testOneOfAcceptsAValueLegalUnderAnyBranch().
+     * @return array<string, array{0: array<string, mixed>, 1: mixed}>
+     */
+    public static function verdictNeutralCases(): array
+    {
+        return [
+            'minItems, no type'            => [['minItems' => 2], [1]],
+            'uniqueItems, no type'         => [['uniqueItems' => true], [1, 1]],
+            'maxItems, no type'            => [['maxItems' => 1], [1, 2]],
+            'minItems in a branch'         => [['anyOf' => [['minItems' => 2], ['type' => 'boolean']]], [1]],
+            'bounds in typed branches'     => [['type' => 'array', 'anyOf' => [['minItems' => 2], ['maxItems' => 0]]], [1]],
+            'numeric flag, bound present'  => [['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 5], 0],
+            'numeric flag of 1'            => [['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 1], 0],
+            'exclusiveMaximum numeric'     => [['type' => 'integer', 'maximum' => 10, 'exclusiveMaximum' => 10], 10],
+            'a string flag'                => [['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 'true'], 0],
+
+            // And the shapes publication DOES reduce: core is asked the same either way, because
+            // nothing reads them.
+            'an unknown keyword'           => [['type' => 'string', 'const' => 'x', 'minLength' => 2], 'a'],
+            'required as a boolean'        => [['type' => 'object', 'required' => true, 'minProperties' => 2], ['a' => 1]],
+            'oneOf'                        => [['type' => 'string', 'oneOf' => [['type' => 'string']]], 'a'],
+        ];
+    }
+
+    /**
+     * `publishable()` survives a non-map in a holder, and answers about a non-schema at all.
      *
      * @group sprint-validator
      */
-    public function testOneOfIsAskedOfCoreAsAnyOfSoALegitimateValueIsNotRefused(): void
+    public function testPublishableSurvivesANonMap(): void
     {
-        $branches = [['type' => 'integer'], ['type' => 'boolean']];
+        self::assertSame([['type' => 'object'], []], SchemaValidator::publishable(['type' => 'object']));
+        self::assertSame(['not a schema at all', []], SchemaValidator::publishable('not a schema at all'));
+        // ONE INSTANCE, because assertSame compares objects by IDENTITY - two `new stdClass()` are
+        // not the same object, and the first draft of this assertion failed on that rather than on
+        // anything publishable() did.
+        $empty = new \stdClass();
 
-        SchemaValidator::validate(1, ['oneOf' => $branches]);
+        self::assertSame(
+            [['type' => 'object', 'properties' => $empty], []],
+            SchemaValidator::publishable(['type' => 'object', 'properties' => $empty]),
+            'An empty `properties` written as a stdClass - which site-info used to be and a'
+            . ' filter-added tool still may - did not survive publication untouched.'
+        );
+    }
 
-        $calls = WordPressRuntime::schemaCalls();
+    /**
+     * AN EXCLUSIVE BOUND FLAG CORE CANNOT READ AS WRITTEN REFUSES REGISTRATION - it is not stripped.
+     *
+     * THE ONLY SCHEMA SHAPE THAT REFUSES, and the reason it cannot be handled like the others is
+     * review 85 R2-B1. With its partner present core IS enforcing something from a non-boolean flag -
+     * `! empty( $args['exclusiveMinimum'] )` (rest-api.php:2615) reads `5` and even the string
+     * `"true"` as the draft-04 boolean and enforces `> minimum` - so removing it LOOSENS validation,
+     * which is exactly what round 2 did. And leaving it published is a false claim, because 2020-12
+     * says `exclusiveMinimum: 5` means `> 5`. Neither is honest, so the entry does not register.
+     *
+     * @dataProvider boundCases
+     * @group sprint-validator
+     */
+    public function testAConstraintCoreReadsDifferentlyFromWhatItSaysRefusesRegistration(string $where, array $schema, ?string $expected): void
+    {
+        self::assertSame(
+            $expected,
+            SchemaValidator::unreadableConstraint($schema),
+            $expected === null
+                ? "In {$where}, a bound core reads exactly as written was refused anyway."
+                : "In {$where}, a bound core cannot read as written was accepted, so the tool either"
+                . ' publishes a constraint that does nothing or enforces one it does not claim.'
+        );
+    }
 
-        self::assertCount(1, $calls, 'The combinator was not handed to core in one piece.');
-        self::assertArrayNotHasKey(
+    /** @return array<string, array{0: string, 1: array<string, mixed>, 2: ?string}> */
+    public static function boundCases(): array
+    {
+        return [
+            // NO PARTNER: `isset($args['minimum'])` gates every branch, so nothing reads the flag.
+            'a lone boolean flag'       => ['a lone exclusiveMinimum', ['type' => 'integer', 'exclusiveMinimum' => true], '/exclusiveMinimum'],
+            'a lone maximum flag'      => ['a lone exclusiveMaximum', ['type' => 'integer', 'exclusiveMaximum' => true], '/exclusiveMaximum'],
+            'a lone numeric flag'      => ['a lone numeric flag', ['type' => 'integer', 'exclusiveMinimum' => 5], '/exclusiveMinimum'],
+
+            // NON-BOOLEAN WITH A PARTNER: core reads it, as something other than what it says.
+            'the 2020-12 numeric form' => ['the numeric form', ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 5], '/exclusiveMinimum'],
+            'the numeric zero'         => ['exclusiveMinimum: 0', ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 0], '/exclusiveMinimum'],
+            'a string flag'            => ['exclusiveMinimum: "true"', ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => 'true'], '/exclusiveMinimum'],
+            'a null flag'              => ['exclusiveMinimum: null', ['type' => 'integer', 'minimum' => 0, 'exclusiveMinimum' => null], '/exclusiveMinimum'],
+
+            // AN EMPTY `enum`, which is the same disagreement in a different keyword: JSON Schema says
+            // it admits no value, core's `! empty()` says it admits every value. Review 85 R2-S2
+            // measured ToolContractTest staying green on it.
+            'an empty enum'            => ['an empty enum', ['type' => 'string', 'enum' => []], '/enum'],
+            'an enum that is a string' => ['enum as a string', ['type' => 'string', 'enum' => 'x'], '/enum'],
+            'an enum in a property'    => ['an empty enum at depth', ['type' => 'object', 'properties' => ['a' => ['enum' => []]]], '/properties/a/enum'],
+            'a real enum'              => ['a non-empty enum', ['type' => 'string', 'enum' => ['x']], null],
+
+            // CORE'S OWN SPELLING, at depth, in each holder - accepted, because what is written and
+            // what is enforced agree.
+            'the pair core reads'      => ['a boolean flag beside its bound', ['type' => 'integer', 'minimum' => 5, 'exclusiveMinimum' => true], null],
+            'the maximum pair'         => ['a boolean flag beside maximum', ['type' => 'integer', 'maximum' => 5, 'exclusiveMaximum' => true], null],
+            'no flag at all'           => ['a plain minimum', ['type' => 'integer', 'minimum' => 5], null],
+
+            // AND IT IS FOUND AT DEPTH, or a third party would only have to nest it one level.
+            'in a property'            => ['a property', ['type' => 'object', 'properties' => ['a' => ['type' => 'integer', 'exclusiveMinimum' => 1]]], '/properties/a/exclusiveMinimum'],
+            'in items'                 => ['items', ['type' => 'array', 'items' => ['type' => 'integer', 'exclusiveMaximum' => 2]], '/items/exclusiveMaximum'],
+            'in an anyOf branch'       => ['an anyOf branch', ['anyOf' => [['type' => 'integer', 'exclusiveMinimum' => 0]]], '/anyOf/0/exclusiveMinimum'],
+        ];
+    }
+
+    /**
+     * `oneOf` IS NOT IN THE DIALECT: core is not asked about it, and it is not published either.
+     *
+     * BOTH AVAILABLE BEHAVIOURS WERE MEASURED AND BOTH ARE BAD, which is why the third option is to
+     * decline the keyword. Asking core for `oneOf` enforces exactly-one over its COERCIVE per-branch
+     * type checks, so `[integer, boolean]` refuses the integer `1` (`rest_is_boolean(1)` is true) -
+     * a false refusal a caller cannot comply with, verified on a real site in round 1. Asking core
+     * for `anyOf` instead - which round 2 shipped - enforces at-least-one while the published schema
+     * still says `oneOf`: review 85 R2-S1 measured `5` against
+     * `[{integer,minimum:0},{integer,maximum:10}]` being accepted where core's real `oneOf` refuses
+     * it, with no coercion involved at all. A schema that says one thing while the server does
+     * another is the defect this sprint exists to remove.
+     *
+     * SO IT IS DECLINED, LOUDLY RATHER THAN QUIETLY: nothing is enforced, nothing is claimed, and
+     * `publishable()` reports the removal so a `registry_strip` event names it. Twelve of core's
+     * thirteen newly-enforced keywords are delivered; this is the thirteenth and it is a documented
+     * non-delivery. `anyOf` has no exactly-one count and therefore no coercion artefact - it is the
+     * keyword to reach for, and it is enforced.
+     *
+     * @group sprint-validator
+     */
+    public function testOneOfIsDeclinedRatherThanMisEnforced(): void
+    {
+        self::assertNotContains(
             'oneOf',
-            $calls[0]['args'],
-            'Core was asked about `oneOf`, so it will count matching branches with its own coercive'
-            . ' type checks and refuse the integer 1 for a schema that permits integers.'
+            SchemaValidator::dialect(),
+            'oneOf is back in the dialect, so tools/list advertises it. Whatever now enforces it has'
+            . ' to enforce EXACTLY ONE, or the claim is false - see this test\'s docblock.'
+        );
+
+        $schema = ['oneOf' => [['type' => 'integer', 'minimum' => 0], ['type' => 'integer', 'maximum' => 10]]];
+
+        self::assertSame(
+            [],
+            SchemaValidator::validate(5, $schema),
+            'A value was refused for a keyword this server does not enforce.'
         );
         self::assertSame(
-            $branches,
-            $calls[0]['args']['anyOf'] ?? null,
-            'The oneOf branches did not reach core as anyOf, unchanged.'
+            [],
+            WordPressRuntime::schemaCalls(),
+            'Core was asked about a oneOf schema. If that is deliberate it must be asked for oneOf'
+            . ' and not anyOf, and the dialect has to accept the keyword again: '
+            . json_encode(WordPressRuntime::schemaCalls())
+        );
+        self::assertSame(
+            ['/oneOf'],
+            SchemaValidator::publishable($schema)[1],
+            'oneOf is not enforced and is still published, which is the round-2 defect exactly.'
         );
     }
 

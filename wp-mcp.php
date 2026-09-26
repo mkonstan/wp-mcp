@@ -1633,6 +1633,13 @@ function wpmcp_client_ip() {
  *   content_type_deny the POST was not application/json (content_type)
  *   body_too_large    CONTENT_LENGTH over the cap      (length)
  *   registry_reject   a filter-added tool was refused  (tool, reason)
+ *   registry_strip    a tool was LISTED with a schema keyword left out, because nothing
+ *                     on this server can read it - one outside the validator's dialect,
+ *                     or a non-array `required`. The tool registered and
+ *                     runs; only the PUBLISHED schema is shorter, so it never advertises
+ *                     a constraint this server does not keep. Fires per tools/list, not
+ *                     per call, and the keyword paths it names are sanitised and capped
+ *                     (tool, keywords)
  *   stale_backup_sweep a schema upgrade collected what an older version left beside
  *                     theme files                   (found, moved, skipped_*, *_paths)
  *   sql_select        sql-select ran a statement     (token_id, user_id, row_count,

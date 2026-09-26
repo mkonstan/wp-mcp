@@ -256,21 +256,24 @@ final class ModuleApiFaceTest extends TestCase
         // THE RESIDUAL LIMIT, HELD BY AN ASSERTION RATHER THAN DESCRIBED. A method name cannot say whose object
         // it is on, so "declared by one of our own classes" is the best excuse rule available - and
         // it means every name below is a name a module could call on a FOREIGN object with no
-        // declaration. Fourteen names is a limit a reviewer can hold in their head; the five hundred
+        // declaration. Sixteen names is a limit a reviewer can hold in their head; the five hundred
         // free-function names it used to be were not. Adding a method to a plugin class WIDENS this
         // gate, so it goes red here and the author has to notice.
         //
-        // SPRINT VALIDATOR MOVED IT BY TWO, AND THE AUTHOR NOTICED HERE - twice, because round 2
-        // moved it again. `aslist` and `length` went when SchemaValidator stopped implementing `enum`
-        // and the length keywords; `askcore`, `dialect`, `enforceable` and `relay` arrived with the
-        // delegation, the schema strip and the message boundary (`unknownkeyword` was round 1's name
-        // for `enforceable`, which now returns a stripped schema rather than refusing a tool). Net
-        // +2, and every new name is distinctive enough that a module calling it on a foreign object
-        // is improbable - which is the only thing this list is trading away.
+        // SPRINT VALIDATOR MOVED IT THREE TIMES AND THE AUTHOR NOTICED HERE EACH TIME. `aslist` and
+        // `length` went when SchemaValidator stopped implementing `enum` and the length keywords;
+        // `askcore`, `dialect` and `relay` arrived with the delegation and the message boundary; and
+        // round 3 split round 2's single `enforceable` into `publishable` (what tools/list may send)
+        // and `unreadableconstraint` (what refuses registration), because conflating the two was the
+        // round-2 blocker - a reduced schema reached the VALIDATOR and loosened it. `holders` is the
+        // one holder list both walks share, so there is no second walker to drift. Net +4 over
+        // pre-sprint, and every new name is distinctive enough that a module calling it on a foreign
+        // object is improbable - which is the only thing this list is trading away.
         self::assertSame(
             [
-                'askcore', 'asmap', 'check', 'checkobject', 'dialect', 'enforceable', 'escape',
-                'failure', 'matches', 'relay', 'start_el', 'typename', 'validate', 'validatearguments',
+                'askcore', 'asmap', 'check', 'checkobject', 'dialect', 'escape', 'failure',
+                'holders', 'matches', 'publishable', 'relay', 'start_el', 'typename',
+                'unreadableconstraint', 'validate', 'validatearguments',
             ],
             self::sorted(array_keys(self::pluginDeclarations()['methods'])),
             'The set of method names the face gate excuses has changed. Every name in it is one a'
