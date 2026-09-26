@@ -104,6 +104,16 @@
  *   tests/unit/SchemaValidatorTest::testPublicationNeverChangesWhatCoreIsAsked() holds the second
  *   directly, over the nine arrangements that broke.
  *
+ * WHAT IS PUBLISHED AND VACUOUS, IN ONE SENTENCE, because the trade was accepted on condition it is
+ * stated rather than implied: a keyword written beside a `type` it does not apply to - `format` or
+ * `minLength` on an integer, `minItems` on a string, `minProperties` on an array - is published
+ * unchanged and constrains nothing, and this file no longer guesses which of those core reads. That is
+ * not the false claim round 1's B1 was: JSON Schema itself defines each keyword for one type and says
+ * it has no effect on others, so a conforming client reading `{"type":"integer","format":"email"}`
+ * already knows `format` does nothing there - and core publishes it the same way
+ * (`rest_get_endpoint_args_for_schema()` copies it, rest-api.php:3423-3426). The tables that tried to
+ * remove this class were wrong toward permissive twice; see item 4.
+ *
  * WHERE CORE'S COERCION SURVIVES is inside `anyOf`: core validates each branch itself
  * (rest-api.php:1993-2010) with its own coercive type checks, so a branch declaring
  * `{"type":"integer"}` accepts `"20"` where a top-level `"type":"integer"` refuses it. Handling the
@@ -378,13 +388,40 @@ final class SchemaValidator
                 $sub,
                 $pointer . '/' . $holder . ($key === null ? '' : '/' . $key)
             );
+
+            // NOTHING REMOVED BELOW, NOTHING TO WRITE BACK. Two things depend on this: a schema with
+            // no complaint against it comes back assertSame-identical, which
+            // tests/unit/ToolContractTest.php requires of the catalog; and the write-back below - the
+            // only line here that can fail - is never reached on a schema it had no business editing.
+            if ($found === array()) {
+                continue;
+            }
+
             $report = array_merge($report, $found);
 
             if ($key === null) {
                 $map[$holder] = $reduced;
-            } else {
-                $map[$holder][$key] = $reduced;
+                continue;
             }
+
+            // AN OBJECT HOLDER IS NORMALISED BEFORE THE KEYED WRITE, and review 85 R3-B1 is the whole
+            // reason: `properties` may legally be a `stdClass` - asMap()'s docblock says a filter-added
+            // tool "still may" write it that way, and site-info used to - so holders() hands one over
+            // and `$map[$holder][$key] =` threw "Cannot use object of type stdClass as array". Because
+            // this runs in the tools/list emitter, ONE such third-party tool turned the whole site's
+            // tools/list into -32603 for every client while tools/call kept working: a client that
+            // already knew a tool's name was fine and every client that discovers tools on connect saw
+            // none. VERIFIED over HTTPS by the reviewer. The validator itself never had the bug -
+            // checkObject() casts - so it is purely this publication path, added in round 2 and moved
+            // here in round 3 without being fixed either time.
+            //
+            // The cast is wire-safe: a non-empty `properties` with string keys encodes as a JSON object
+            // either way, and wpmcp_objectify_schema() is what restores the EMPTY one on the way out.
+            if (is_object($map[$holder])) {
+                $map[$holder] = (array) $map[$holder];
+            }
+
+            $map[$holder][$key] = $reduced;
         }
 
         return array($map, $report);
@@ -533,7 +570,21 @@ final class SchemaValidator
             ));
         }
 
-        $failures = self::askCore($value, $map, $declared ?? self::typeName($value), $pointer);
+        // THE EMPTY ARRAY IS ASKED UNDER BOTH READINGS, and that closes review 85's S5 by delegating
+        // harder rather than by implementing anything. `json_decode('{}', true)` and
+        // `json_decode('[]', true)` are the same PHP value, so a node with no declared `type` had to
+        // pick one for askCore() and typeName() picks `object` - which meant `{"minItems": 1}` accepted
+        // `[]`, the one value that keyword exists to refuse. MEASURED: core refuses it perfectly well
+        // when told `type: array` (`p must contain at least 1 item.`) and ignores `minItems` entirely
+        // under `type: object`, so nothing was missing from core - only from what we told it. `[]`
+        // satisfies both types by matches()'s own doctrine, so both are asked and a failure under
+        // either is a failure. askCore() drops a duplicate line, because a keyword that fails under
+        // both readings - `enum` does, measured - must still report once.
+        $types = $declared !== null
+            ? array($declared)
+            : ($value === array() ? array('object', 'array') : array(self::typeName($value)));
+
+        $failures = self::askCore($value, $map, $types, $pointer);
 
         if (isset($map['items']) && is_array($value) && self::matches($value, 'array')) {
             foreach ($value as $index => $element) {
@@ -554,12 +605,16 @@ final class SchemaValidator
     /**
      * Every delegated keyword group present at this node, asked of core one call each.
      *
-     * $type IS ALWAYS SET AND IS ALWAYS ONE OF TYPES, which is not a nicety: core reads
+     * A TYPE IS ALWAYS SENT AND IS ALWAYS ONE OF TYPES, which is not a nicety: core reads
      * `$args['type']` unconditionally three lines after warning about its absence
      * (rest-api.php:2245-2251), so a schema without one produces an "Undefined array key"
      * warning AND a `_doing_it_wrong()` notice - and this suite fails on either. When the node
      * declares no usable type the value's OWN type is sent, which makes core's type check a
      * tautology and leaves the group's keyword as the only thing being asked.
+     *
+     * $types HOLDS MORE THAN ONE ONLY FOR THE EMPTY ARRAY, which is both an object and an array in
+     * PHP - see check(), where the list is built, for what that cost before. Each group is then asked
+     * once per reading and a line repeated across readings is reported once.
      *
      * THE `$param` IS EMPTY ON PURPOSE - see addition 3 in the file docblock. Core interpolates
      * it into every message, and the only name we have for this node is a pointer built from
@@ -571,7 +626,7 @@ final class SchemaValidator
      * @param array<string, mixed> $map
      * @return list<string>
      */
-    private static function askCore($value, array $map, string $type, string $pointer): array
+    private static function askCore($value, array $map, array $types, string $pointer): array
     {
         $failures = array();
 
@@ -582,10 +637,20 @@ final class SchemaValidator
                 continue;
             }
 
-            $verdict = rest_validate_value_from_schema($value, array('type' => $type) + $present, '');
+            $lines = array();
 
-            if (is_wp_error($verdict)) {
-                $failures[] = self::failure($pointer, self::relay($verdict, $group));
+            foreach ($types as $type) {
+                $verdict = rest_validate_value_from_schema($value, array('type' => $type) + $present, '');
+
+                if (is_wp_error($verdict)) {
+                    $lines[] = self::failure($pointer, self::relay($verdict, $group));
+                }
+            }
+
+            // UNIQUE WITHIN THE GROUP AND NOT ACROSS THE NODE: two readings of one keyword must not
+            // report twice, and two different groups that happened to word a failure identically must.
+            foreach (array_unique($lines) as $line) {
+                $failures[] = $line;
             }
         }
 

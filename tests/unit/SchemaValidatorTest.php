@@ -998,6 +998,39 @@ final class SchemaValidatorTest extends TestCase
             'patternProperties no type'  => ['patternProperties with no type', ['patternProperties' => ['^m_' => ['type' => 'integer']]], []],
             'enum needs no type'         => ['enum with no type', ['enum' => [1, 2]], []],
             'anyOf needs no type'        => ['anyOf with no type', ['anyOf' => [['type' => 'string']]], []],
+
+            // ---- A HOLDER WRITTEN AS AN OBJECT, AND NON-EMPTY - review 85 R3-B1. ----
+            // `properties` may legally be a stdClass: asMap()'s docblock says a filter-added tool
+            // "still may" write it that way and site-info used to. holders() accepts one, and the
+            // keyed write-back then threw `Cannot use object of type stdClass as array` - which, in the
+            // tools/list emitter, turned the WHOLE site's tools/list into -32603 for every client while
+            // tools/call kept working. VERIFIED over HTTPS by the reviewer.
+            //
+            // THE ROW THAT EXISTED USED AN EMPTY OBJECT, whose loop body never runs, so it could not
+            // fail - the second time this sprint a row was too weak to see its own subject. These are
+            // non-empty, and each one has something to remove so the write-back is actually reached.
+            'object properties'          => [
+                'a non-empty object-form properties',
+                ['type' => 'object', 'properties' => (object) ['a' => ['type' => 'string', 'const' => 'x']]],
+                ['/properties/a/const'],
+            ],
+            'object patternProperties'   => [
+                'a non-empty object-form patternProperties',
+                ['type' => 'object', 'patternProperties' => (object) ['^m_' => ['type' => 'integer', '$ref' => '#/x']]],
+                ['/patternProperties/^m_/$ref'],
+            ],
+            'object properties, deep'    => [
+                'an object-form properties two levels down',
+                ['type' => 'object', 'properties' => (object) ['a' => ['type' => 'object', 'properties' => (object) ['b' => ['allOf' => []]]]]],
+                ['/properties/a/properties/b/allOf'],
+            ],
+            // AND A CLEAN ONE IS NOT TOUCHED, which is what stops the fix from being "cast everything":
+            // the write-back is skipped when nothing was removed below, so the stdClass survives.
+            'a clean object properties'  => [
+                'a clean object-form properties',
+                ['type' => 'object', 'properties' => (object) ['a' => ['type' => 'string']]],
+                [],
+            ],
         ];
     }
 
@@ -1015,6 +1048,14 @@ final class SchemaValidatorTest extends TestCase
      * THE ROWS ARE THE REVIEWER'S NINE MEASURED ARRANGEMENTS (review 85 R2-B1), which is the point:
      * every one of them was a permissive flip on `4a7c0f7`, and each is now held by the
      * strongest statement available here rather than by a table that agrees with core today.
+     *
+     * AND ITS BLIND SPOT, STATED SO NOBODY OVER-TRUSTS IT (review 85, round 3 item 3): this sees only
+     * DELEGATED calls, so a publication that dropped `required`, `type`, `properties` or `items` -
+     * SchemaValidator::OURS, which never reach core - would keep it GREEN while changing a verdict.
+     * The belt against that is structural rather than a test: `wpmcp_tools()` hands `wpmcp_dispatch()`
+     * the schema as written and publishable() is called only from the `tools/list` emitter, so a
+     * reduction cannot reach the validator at all. This test is the braces. Do not read it as covering
+     * more than the delegated half.
      *
      * @dataProvider verdictNeutralCases
      * @group sprint-validator
@@ -1076,6 +1117,93 @@ published:  " . json_encode($published)
     }
 
     /**
+     * THE EMPTY ARRAY IS CHECKED AS AN ARRAY AS WELL AS AN OBJECT, so a type-less `minItems` refuses it.
+     *
+     * REVIEW 85's S5, carried from round 1 and closed here. `json_decode('{}', true)` and
+     * `json_decode('[]', true)` are the same PHP value, so a node with no declared `type` had to pick
+     * one to tell core and typeName() picks `object` - which meant `{"minItems": 1}` ACCEPTED `[]`, the
+     * single value that keyword exists to forbid. A constraint that admits exactly what it forbids is
+     * worth more than its line count.
+     *
+     * MEASURED BEFORE FIXING, against real core on WP 7.1.2: `[]` against
+     * `{type: array, minItems: 1}` is REFUSED (`p must contain at least 1 item.`) and against
+     * `{type: object, minItems: 1}` is accepted. So core was never missing the constraint - we were
+     * telling it the wrong type. This is therefore delegated harder rather than implemented here: `[]`
+     * satisfies both types by matches()'s own doctrine, so both readings are asked.
+     *
+     * WHAT THIS TIER CAN SEE is the pair of calls, which is the fix; that core then refuses is
+     * tests/integration/SchemaKeywordsTest::testATypeLessArrayBoundStillRefusesTheEmptyList().
+     *
+     * @group sprint-validator
+     */
+    public function testTheEmptyArrayIsAskedAboutUnderBothOfItsReadings(): void
+    {
+        SchemaValidator::validate([], ['minItems' => 1]);
+
+        $asked = array_map(
+            static fn (array $call): string => (string) $call['args']['type'],
+            WordPressRuntime::schemaCalls()
+        );
+
+        self::assertSame(
+            ['object', 'array'],
+            $asked,
+            'A type-less node holding the empty array was asked about under one reading only, so'
+            . ' whichever keyword belongs to the other reading is unenforced. Asked: '
+            . implode(', ', $asked)
+        );
+
+        // A NON-EMPTY LIST IS NOT AMBIGUOUS and must still be one call, or every list-valued argument
+        // on every tool doubles its delegated calls for nothing.
+        WordPressRuntime::install();
+        SchemaValidator::validate([1], ['minItems' => 1]);
+
+        self::assertCount(
+            1,
+            WordPressRuntime::schemaCalls(),
+            'A non-empty list was asked about twice. Only the EMPTY array is both types.'
+        );
+
+        // AND A DECLARED TYPE IS OBEYED, ambiguous value or not.
+        WordPressRuntime::install();
+        SchemaValidator::validate([], ['type' => 'object', 'minProperties' => 1]);
+
+        self::assertSame(
+            ['object'],
+            array_map(
+                static fn (array $call): string => (string) $call['args']['type'],
+                WordPressRuntime::schemaCalls()
+            ),
+            'A node that declared its type was asked about under another one as well.'
+        );
+    }
+
+    /**
+     * A KEYWORD THAT FAILS UNDER BOTH READINGS REPORTS ONCE.
+     *
+     * `enum` is the measured case: `[]` against `{enum: [[1]]}` is refused under `type: object` AND
+     * under `type: array`, with the same sentence. Two identical failure lines for one keyword would be
+     * a worse message than one, and the caller has one thing to fix.
+     *
+     * @group sprint-validator
+     */
+    public function testAKeywordFailingUnderBothReadingsIsReportedOnce(): void
+    {
+        WordPressRuntime::answerSchemaWith(
+            static fn () => new \WP_Error('rest_not_in_enum', 'is not [1]')
+        );
+
+        $failures = SchemaValidator::validate([], ['enum' => [[1]]]);
+
+        self::assertCount(
+            2,
+            WordPressRuntime::schemaCalls(),
+            'The empty array was not asked about under both readings, so this proves nothing.'
+        );
+        self::assertSame(['(root): is not [1]'], $failures, implode(' | ', $failures));
+    }
+
+    /**
      * `publishable()` survives a non-map in a holder, and answers about a non-schema at all.
      *
      * @group sprint-validator
@@ -1087,6 +1215,11 @@ published:  " . json_encode($published)
         // ONE INSTANCE, because assertSame compares objects by IDENTITY - two `new stdClass()` are
         // not the same object, and the first draft of this assertion failed on that rather than on
         // anything publishable() did.
+        //
+        // AND THIS ROW CANNOT CATCH THE BUG AN OBJECT HOLDER ACTUALLY HAD (review 85 R3-B1): the
+        // holder is EMPTY, so publishable()'s descent loop never runs and the write-back that threw is
+        // never reached. The non-empty rows in publishableCases() are what covers it. Kept, because
+        // "an empty properties survives untouched" is its own claim - site-info used to write one.
         $empty = new \stdClass();
 
         self::assertSame(

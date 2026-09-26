@@ -59,6 +59,20 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
   which JSON Schema says admits no value and core skips entirely. These REFUSE rather than being left
   out of the listing, because leaving them out would change a verdict core is already giving. The fix
   in each case is core's own spelling.
+- **One documented limitation, stated rather than implied.** A keyword written beside a `type` it does
+  not apply to - `format` or `minLength` on an integer, `minItems` on a string, `minProperties` on an
+  array - is published unchanged and constrains nothing, and this plugin no longer guesses which of
+  those core reads. That is not a false claim: JSON Schema itself defines each keyword for one type and
+  says it has no effect on others, so a client reading `{"type":"integer","format":"email"}` already
+  knows `format` does nothing there, and core publishes it the same way. Two earlier attempts to remove
+  this class by table were both wrong in the permissive direction and disabled real constraints, which
+  is why there is no table now.
+- **`{"minItems": 1}` refuses `[]` again, on a node that declares no `type`.** `json_decode('{}')` and
+  `json_decode('[]')` are the same PHP value, so a type-less node had to pick one type to tell core and
+  picked `object`, under which core ignores the item bounds - so the empty list, the one value
+  `minItems: 1` exists to forbid, was accepted. Core refuses it perfectly well when told
+  `type: array` (measured), so both readings of the empty value are now asked and a keyword that fails
+  under both is reported once.
 - **`oneOf` is not accepted.** It is the one keyword of core's twenty-five this server declines, and
   the reason is that both ways of honouring it are wrong. Core enforces exactly-one over its coercive
   per-branch type checks, so `oneOf: [integer, boolean]` refuses the integer `1` - `rest_is_boolean(1)`

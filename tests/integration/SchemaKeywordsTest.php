@@ -64,6 +64,9 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     /** A tool whose exclusive bound core cannot read as the schema means it. */
     private static function badBound(): string { return Fixtures::name('tool-bad-bound'); }
 
+    /** A tool whose `properties` is a non-empty stdClass - the shape that broke tools/list. */
+    private static function objectProps(): string { return Fixtures::name('tool-object-props'); }
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -744,6 +747,94 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
     }
 
     /**
+     * ONE TOOL WITH AN OBJECT-FORM `properties` DOES NOT TAKE `tools/list` DOWN FOR THE SITE.
+     *
+     * REVIEW 85 R3-B1, VERIFIED OVER HTTPS THERE AND HERE. `properties` may legally be a `stdClass`;
+     * the publication walk accepted one through asMap() and then wrote the reduced child back with an
+     * array subscript, which throws. Because the walk runs in the `tools/list` emitter, the error
+     * boundary turned the entire listing into `-32603 Internal error` - for every client of the site,
+     * from one third-party tool - while `tools/call` kept working. So a client that already knew a
+     * tool's name was fine and every client that discovers tools on connect saw nothing at all.
+     *
+     * THE ASSERTION IS THE LISTING ITSELF, not the one tool: `listing()` already fails on a non-200 or
+     * an undecodable body, so any test here that calls it would have gone red - which is the point.
+     * What this adds is the SHAPE, named, so the reason is legible instead of being a mystery -32603.
+     *
+     * @group sprint-validator
+     */
+    public function testAnObjectFormPropertiesDoesNotBreakTheListingForEveryone(): void
+    {
+        $listing = $this->listing();
+
+        self::assertArrayHasKey(
+            self::objectProps(),
+            $listing,
+            'The tool whose `properties` is a non-empty object is missing from the listing.'
+        );
+        self::assertArrayHasKey(
+            self::subject(),
+            $listing,
+            'The subject tool is missing too, so the listing is broken rather than this one entry.'
+        );
+
+        $properties = $listing[self::objectProps()]['inputSchema']['properties'] ?? null;
+
+        self::assertIsArray($properties, 'The published properties are not readable: ' . json_encode($listing[self::objectProps()]['inputSchema'] ?? null));
+        self::assertArrayNotHasKey(
+            'const',
+            (array) ($properties['a'] ?? []),
+            'The unenforceable keyword survived inside an object-form holder, so the walk descended'
+            . ' into it and then failed to write the reduction back.'
+        );
+        self::assertSame(
+            2,
+            ($properties['a']['minLength'] ?? null),
+            'The enforced sibling went with it: ' . json_encode($properties)
+        );
+
+        // And the tool still validates against the schema AS WRITTEN, object holder and all.
+        self::assertStringContainsString(
+            '/a',
+            $this->textOf(self::objectProps(), ['a' => 'x']),
+            'The `minLength: 2` inside an object-form `properties` is not enforced.'
+        );
+    }
+
+    /**
+     * A TYPE-LESS ARRAY BOUND STILL REFUSES THE EMPTY LIST.
+     *
+     * REVIEW 85's S5, carried from round 1 and the last real residual. `{"minItems": 2}` with no
+     * declared `type` accepted `[]` - the value the keyword exists to forbid - because
+     * `json_decode('{}')` and `json_decode('[]')` are the same PHP value and the validator had to pick
+     * one type to tell core, picking `object`. MEASURED against real core before fixing: `[]` against
+     * `{type: array, minItems: 1}` is REFUSED and against `{type: object, minItems: 1}` is accepted, so
+     * core had the constraint all along and we were telling it the wrong type. Both readings are now
+     * asked.
+     *
+     * @group sprint-validator
+     */
+    public function testATypeLessArrayBoundStillRefusesTheEmptyList(): void
+    {
+        $body = $this->call(['looseItems' => []]);
+
+        self::assertStringNotContainsString(
+            self::RAN,
+            $body,
+            'The empty list was accepted for `{"minItems": 2}`, which is the one value that keyword'
+            . ' exists to refuse. Body: ' . $body
+        );
+        self::assertStringContainsString('/looseItems', $body, $body);
+
+        // AND THE EMPTY OBJECT READING IS NOT LOST, or the fix would have traded one for the other:
+        // `pair` is `{type: object, minProperties: 2}` and `{}` arrives as the same PHP value.
+        self::assertStringNotContainsString(
+            self::RAN,
+            $this->call(['pair' => []]),
+            'The empty value stopped being checked as an OBJECT, so minProperties no longer refuses it.'
+        );
+    }
+
+    /**
      * THE LIVE CHECK ON A TRANSCRIPTION: this site's `rest_get_allowed_schema_keywords()` is
      * exactly the list the unit tier holds.
      *
@@ -909,6 +1000,7 @@ final class SchemaKeywordsTest extends FixtureIntegrationTestCase
         $unknown = self::unknown();
         $badEnum  = self::badEnum();
         $badBound = self::badBound();
+        $objectProps = self::objectProps();
         $ran     = self::RAN;
 
         return <<<PHP
@@ -991,6 +1083,21 @@ add_filter('wpmcp_tools', static function (\$tools) {
                 //     ours and is never handed over. Review 85 R2-S2's third row.
                 'legacy' => array('type' => 'string', 'required' => true),
             ),
+        ),
+        'run'         => \$run,
+    );
+
+    // `properties` AS A NON-EMPTY stdClass, which is legal and which asMap()'s docblock says a
+    // filter-added tool "still may" write. Review 85 R3-B1: the publication walk wrote the reduced
+    // child back with an array subscript into the object and threw, so tools/list answered -32603 for
+    // the WHOLE SITE. The `const` gives the walk something to remove, which is what reaches the write.
+    \$tools['{$objectProps}'] = array(
+        'write'       => false,
+        'annotations' => \$annotations,
+        'description' => 'wp-mcp test fixture: properties written as a non-empty object.',
+        'inputSchema' => array(
+            'type'       => 'object',
+            'properties' => (object) array('a' => array('type' => 'string', 'const' => 'x', 'minLength' => 2)),
         ),
         'run'         => \$run,
     );
