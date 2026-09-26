@@ -23,7 +23,13 @@
  * would change a response does not belong in this list; it belongs behind a branch.
  *
  * The modern era (`2026-07-28`) is deliberately absent - see the build plan's decisions
- * log, 2026-09-12. It arrives as ONE MORE CASE at the top when a client speaks it.
+ * log, 2026-09-12. It arrives as A SPRINT, not as one more case at the top, because
+ * `2026-07-28` removed sessions, resumable SSE and server-initiated requests and replaced
+ * the `initialize` handshake with per-request version negotiation plus a mandatory
+ * `server/discover` - so it is a TRANSPORT change, not a version string. This docblock
+ * claimed "ONE MORE CASE" until 2026-09-26; that claim has been known false since
+ * 2026-09-22, when the revision was measured against the spec (`analysis/BACKLOG.md`,
+ * "The modern era is a SPRINT, not 'one more enum case'").
  */
 
 declare(strict_types=1);
