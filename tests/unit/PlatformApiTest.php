@@ -388,8 +388,13 @@ final class PlatformApiTest extends TestCase
         // Present for everything the installer requires, empty for the two it must not gate on.
         $wpdb->defaultCol = ['a-column'];
         $wpdb->cols       = [
-            "LIKE 'client_name'"    => [],
-            "LIKE 'client_version'" => [],
+            // THE UNDERSCORE IS ESCAPED (sprint CORE-FIX): wpmcp_token_column_exists() now asks
+            // `LIKE 'client\_name'`, because `_` is a LIKE wildcard and a non-empty answer is this
+            // probe's whole assertion - so an unescaped pattern could report a column that is not
+            // there. FakeWpdb matches get_col() by SUBSTRING, so these keys have to be the string
+            // the plugin now sends.
+            "LIKE 'client\_name'"    => [],
+            "LIKE 'client\_version'" => [],
         ];
         // wpmcp_versions_table_exists() compares get_var() with the table name it asked for.
         $wpdb->defaultVar = $wpdb->prefix . 'wpmcp_file_versions';

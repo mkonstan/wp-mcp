@@ -44,6 +44,56 @@
 #             only way to prove that a built zip carries its commit without installing one.
 #             actions/checkout leaves a usable .git behind and the runner has git on PATH;
 #             the test FAILS rather than skips if it does not.
+#   sprint-acf-read is the first group whose subject is ANOTHER PLUGIN'S API SURFACE, and it is
+#             therefore the first that must pass with that plugin ABSENT: every test in it runs on a
+#             site with no ACF at all, and the tests that need real ACF data carry `acf-data` and sit
+#             in NO gate group on purpose. A red sprint-acf-read on a green everything-else is most
+#             likely tests/unit/ModuleApiFaceTest.php, which tokenises each module and fails when a
+#             module calls a foreign symbol it did not declare - that is the gate working, not a
+#             flake, and the fix is to declare the symbol rather than to widen the test.
+#   sprint-core-fix is the first group whose subject is THE PLATFORM LEDGER (D32): seven places
+#             where this plugin restated a decision WordPress or ACF already makes, and the
+#             restatement drifted. Four of its assertions are SWEEPS over every shipped PHP file
+#             rather than checks of one call site, so a red one names the file and line it found -
+#             that is the class coming back, not the instance.
+#             The code-tool listing no longer copies core's `edit_themes` deny branches at all: it
+#             asks `map_meta_cap()`, and the tier proves that by FORCING that function's answer
+#             through core's own `map_meta_cap` filter to something the branches would not produce.
+#             So a red there is the gate reading a copy again, not WordPress changing. The multisite
+#             states are still driven against stubs, because this project has no network install.
+#   sprint-validator is the first group whose subject is a PLATFORM DELEGATION rather than a
+#             behaviour: SchemaValidator stopped implementing JSON Schema and now hands every keyword
+#             core owns to `rest_validate_value_from_schema()`. The group is split across the two
+#             tiers ON PURPOSE and neither half is optional. tests/unit/SchemaValidatorTest.php
+#             drives a RECORDING DOUBLE of core's validator, because the unit tier has no WordPress,
+#             so it can prove only the half that is ours - the hand-over, the strict type check
+#             running first, the pointers, the cap. tests/integration/SchemaKeywordsTest.php calls a
+#             real tool on a real site once per keyword, which is the only place "core enforces it"
+#             can be said. So a red sprint-validator in the unit tier is a wiring change and a red
+#             one in the integration tier is a CORE change - most likely
+#             testCoresOwnAllowedKeywordListIsWhatTheUnitTierTranscribed(), which compares the live
+#             `rest_get_allowed_schema_keywords()` against the list the unit tier holds by hand. If
+#             that one is red, WordPress added or dropped a keyword and the dialect has to follow.
+#   sprint-deletions is the first group whose subject is a pair of BEHAVIOUR-PRESERVING swaps, so
+#             red-before-green was impossible by construction and every assertion in it was proved
+#             falsifiable by mutating the new code instead. Its 4 tests cover four things: that
+#             list-comments' search still covers comment_content and comment_author and still does
+#             NOT cover comment_author_email now that the clause is core's own
+#             `WP_Comment_Query::get_search_sql()`, that a LIKE wildcard is still escaped, that a
+#             clause which VANISHED is refused rather than answered with every comment, and that
+#             `wp_get_admin_notice()` interpolates its message RAW. So a red sprint-deletions is
+#             most likely one of three things, in this order: core changed get_search_sql()'s
+#             signature or visibility - which the guard in tools.php now refuses loudly, with a
+#             trace id, rather than silently searching nothing; core changed how
+#             wp_admin_notice() interpolates or escapes its message, in which case the test says
+#             to delete our esc_html(); or the escape-once pattern in CoreFixTest was loosened
+#             again, which round 2 of that sprint had to fix once already.
+#             FOUR TESTS IS THE WHOLE GROUP AND THAT IS ON PURPOSE. The sprint's deliverable was
+#             mostly REFUSALS with checked reasons - four of five rows ended "leave it" - and a
+#             refusal is not testable, so a low count here is expected and is NOT evidence the
+#             group stopped running. It must stay above zero: bin/ci-group-counts.php reds any
+#             listed group that no test carries, which is what would catch the group being
+#             renamed away rather than merely being small.
 sprint-0
 sprint-1
 sprint-2
@@ -63,3 +113,7 @@ sprint-14b
 sprint-14c
 sprint-14d
 sprint-seam
+sprint-acf-read
+sprint-core-fix
+sprint-validator
+sprint-deletions

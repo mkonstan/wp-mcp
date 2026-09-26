@@ -2,6 +2,284 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.2.0
+
+**Released 2026-09-26.** Four sprints. **Every `tools/call` argument is now validated by
+WordPress's own `rest_validate_value_from_schema()`** instead of by a hand-written subset, so twelve
+schema keywords that tools were already declaring and this server silently ignored are enforced for
+the first time. **ACF field values are readable**, through a new module that goes through ACF's own
+REST value path and so inherits ACF's permission-checked reduction of the references it returns.
+Seven live defects are fixed, and the one an operator is most likely to have hit is on multisite:
+a Site Administrator was shown all six code tools in `tools/list` and refused every one of them at
+call time. There is no database migration and no schema upgrade - the plugin files change and
+nothing else does.
+
+**The stricter validation is a behaviour change, and it is the point.** A call that used to be
+accepted may now be refused. Until this release, a client that sent a value violating a constraint
+the tool's own `inputSchema` declared - a `pattern`, a `format`, a `minItems`, an
+`exclusiveMaximum`, any of the twelve below - was let through to the tool body unchecked, because
+the validator did not know the keyword and treated not knowing it as nothing to do. It is refused
+now, with every failure reported at once behind its own JSON Pointer. No built-in tool's schema
+changed shape in this release, so the calls this affects are the ones that were already wrong about
+a schema this server has been publishing all along; if you drive this server from a script, that is
+the thing to re-test first. Strict types are unchanged: `"20"` is still refused for an integer
+argument. Five refusal MESSAGES are now core's wording rather than this plugin's.
+
+### Changed: the input validator delegates to WordPress, and twelve more schema keywords start being enforced
+
+- **`SchemaValidator` no longer implements JSON Schema.** It was a hand-written subset enforcing ten
+  constraining keywords. `rest_get_allowed_schema_keywords()` lists twenty-five, so core validated
+  **thirteen that this plugin silently ignored**: `format`, `pattern`, `patternProperties`,
+  `minProperties`, `maxProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+  `minItems`, `maxItems`, `uniqueItems`, `anyOf`, `oneOf`. A keyword the validator did not know was
+  not an error and not a log line - the argument reached the tool body unchecked. **Twelve of the
+  thirteen now go to `rest_validate_value_from_schema()`; the thirteenth, `oneOf`, is a documented
+  non-delivery** - the one keyword of core's twenty-five this server declines, for the reason set out
+  below.
+- **Three things stayed, because core cannot be filtered into doing them** - its validator body
+  contains no `apply_filters` at all. `"20"` is still REFUSED for an integer argument, and the
+  strict check runs before core so `rest_is_integer("20")` never gets a say. Every failure still
+  comes back at once, each behind its own JSON Pointer, because core returns the first `WP_Error` and
+  stops. And a refusal still carries only the TYPE of what arrived and the caller's key, truncated on
+  a character boundary and capped. Core is asked with an empty parameter name so it cannot
+  interpolate a caller-supplied key into a message of its own - and that alone was not enough:
+  core builds `"<key>" is not a valid property of Object` from the caller's own property name when it
+  validates an object branch of an `anyOf`/`oneOf`, independently of the parameter name, and relayed
+  it out whole. A combinator failure now carries a fixed sentence of ours instead of core's text, and
+  every other relayed message is collapsed to a single line - a newline would otherwise forge an
+  extra failure line in the refusal - and capped at 200 bytes on a character boundary.
+- **What a client sees differently.** Five messages are now core's wording rather than this
+  plugin's: `enum`, `minimum`, `maximum`, `minLength` and `maxLength`. They are longer, localized,
+  and pluralized by `_n()`. Core's ERROR CODES are dropped rather than relayed - a refusal is still
+  an MCP tool error with no code field, so nothing in this plugin emits a code without the `wpmcp_`
+  prefix.
+- **Validation always runs against the tool's schema exactly as written.** Nothing reduces, rewrites
+  or second-guesses it on the way to `rest_validate_value_from_schema()`. This is stated first because
+  it is the property that matters: core enforces more than any table here could predict - `minItems`
+  on any non-empty list whether or not the node declares `type: array`, an `exclusiveMinimum` of `5`
+  beside a present `minimum` (its gate is `! empty()`, so a number reads as the draft-04 boolean), and
+  a type-less `anyOf` branch that inherits the parent's `type` - so the schema is handed over whole and
+  core decides.
+- **`tools/list` publishes only what something can read.** A keyword outside the dialect (`$schema`,
+  `$ref`, `allOf`, `not`, `const`, a typo) or a `required` that is not an array - which is also
+  draft-03's per-property `required: true`, a form core enforces and this validator does not - is left
+  out of the published schema, and a `registry_strip` event names the tool and the keyword so its
+  author can find out why the constraint never fired. The tool registers and runs unchanged, and the
+  keyword is still there in the schema validation sees. **Leaving it out rather than refusing the tool
+  is WordPress's own decision**, taken twice: `rest_get_endpoint_args_for_schema()` copies only allowed
+  keywords into a route's args, and WP 7.1's `wp_prepare_json_schema_for_client()` strips them
+  recursively "before exposing a schema outside of WordPress's server-side validation" - which is what
+  `tools/list` is.
+- **A tool is refused when core reads one of its constraints as something other than what it says.**
+  Reason `schema_constraint_unreadable`, with a `registry_reject` event. Three arrangements: an
+  `exclusiveMinimum`/`exclusiveMaximum` with no `minimum`/`maximum` beside it, where nothing reads the
+  flag at all; one written as anything but a boolean, where core's `! empty()` gate turns
+  `exclusiveMinimum: 5` into "the bound in `minimum` is exclusive" and `exclusiveMinimum: 0` into
+  *inclusive* - the opposite of the 2020-12 spelling an `inputSchema` is written in; and `enum: []`,
+  which JSON Schema says admits no value and core skips entirely. These REFUSE rather than being left
+  out of the listing, because leaving them out would change a verdict core is already giving. The fix
+  in each case is core's own spelling.
+- **One documented limitation, stated rather than implied.** A keyword written beside a `type` it does
+  not apply to - `format` or `minLength` on an integer, `minItems` on a string, `minProperties` on an
+  array - is published unchanged and constrains nothing, and this plugin no longer guesses which of
+  those core reads. That is not a false claim: JSON Schema itself defines each keyword for one type and
+  says it has no effect on others, so a client reading `{"type":"integer","format":"email"}` already
+  knows `format` does nothing there, and core publishes it the same way. Two earlier attempts to remove
+  this class by table were both wrong in the permissive direction and disabled real constraints, which
+  is why there is no table now.
+- **`{"minItems": 1}` refuses `[]` again, on a node that declares no `type`.** `json_decode('{}')` and
+  `json_decode('[]')` are the same PHP value, so a type-less node had to pick one type to tell core and
+  picked `object`, under which core ignores the item bounds - so the empty list, the one value
+  `minItems: 1` exists to forbid, was accepted. Core refuses it perfectly well when told
+  `type: array` (measured), so both readings of the empty value are now asked and a keyword that fails
+  under **either** reading refuses - which is what makes the change safe: the set of refusals is a
+  strict superset of what it was, never smaller. Where the two readings word the same complaint
+  identically, as `enum` does, it is reported once. **The cost, which is the one behaviour anybody can
+  hit:** `{}` meant as an empty OBJECT is now refused by a **type-less** `minItems: 1`, because PHP
+  cannot tell it from `[]`. Declaring `type: object` on that node removes it, and that is the fix.
+- **`oneOf` is not accepted.** It is the one keyword of core's twenty-five this server declines, and
+  the reason is that both ways of honouring it are wrong. Core enforces exactly-one over its coercive
+  per-branch type checks, so `oneOf: [integer, boolean]` refuses the integer `1` - `rest_is_boolean(1)`
+  is true - a false refusal the caller cannot comply with. Enforcing `anyOf` instead while publishing
+  `oneOf` tells a client "exactly one" and delivers "at least one": measured on
+  `[{integer,minimum:0},{integer,maximum:10}]`, where `5` matches both branches and core's real
+  `oneOf` refuses it. So nothing enforces `oneOf` and nothing claims it - it is left out of the
+  published schema like any other keyword nothing reads. Use `anyOf`, which is enforced and has no
+  exactly-one count to go wrong.
+- **`additionalProperties: false` is documented as core's default, not this plugin's.** Core ships
+  `rest_default_additional_properties_to_false()` and applies it to every registered route; the
+  behaviour is unchanged and the docblock that claimed it was corrected.
+- **Strict types do not reach inside `anyOf`/`oneOf`,** which is stated in the file and held by a
+  test. Core validates each branch with its own coercive checks, so `"20"` satisfies a branch
+  declaring `{"type":"integer"}`. Walking the branches here would mean re-implementing the
+  combinators. No built-in schema uses either, and a third-party tool that does now gets branch
+  validation where it previously got none.
+
+### Added: `get-acf-values`, and it reads through ACF's own permission-checked path
+
+- **New read tool, `get-acf-values`.** One tool, values only. It takes `object_type` (`post`,
+  `term`, `user` or `options`), an `id`, and an optional `fields` list, and returns `object`, `acf`
+  (which of ACF's two guarantees this site provides) and `fields` - each with `key`, `name`, `type`,
+  `label` and `value`. A `flexible_content` field also returns `rows`: one entry per layout ROW with
+  its `index`, `layout`, the `label` the editor sees, `renamed`, and `disabled`.
+- **The values come from `acf_format_value_for_rest($raw, $id, $field, 'standard')`, not from
+  `get_field()`, and that is the whole security story.** ACF checks no capability on its value path.
+  Since 6.8.7 and 6.8.10 it reduces User, Relationship, Post Object, Image, Gallery, File and Icon
+  Picker values to bare IDs when the caller cannot read the referenced object - but only in its REST
+  path, which is exactly what ACF's own Security Principles page says: `get_field()` is a
+  trusted-context accessor and REST is the permission-checked surface. So a Post Object pointing at
+  somebody else's draft comes back as a bare ID for a token that may not read it and expanded for
+  one that may, and that answer is ACF's rather than ours. Measured on genuine ACF Pro 6.8.10 before
+  any of it was written.
+- **An expanded reference is a named subset, and never a database row.** ACF's
+  `return_format: object` hands back a live `WP_Post` or `WP_User`, and JSON-encoding one of those
+  serialises every public property: `post_password` in plaintext for a post, `user_pass` and
+  `user_activation_key` for a user. Measured, and neither is stopped by ACF's own reduction - a
+  password-protected post is `publish`, so core's `check_read_permission()` says yes to anybody, and
+  ACF's user sanitiser short-circuits for a caller with `list_users`. So a post comes back as a
+  named subset with no password and with `content` withheld - and `password_protected: true`
+  reported - whenever core's own `post_password_required()` says so, and a user comes back with
+  exactly the fields `get-user` gives the same caller. `wp/v2` serves none of the rest, and neither
+  does `get-post` or `get-user`.
+- **A Flexible Content layout an editor SWITCHED OFF is returned and MARKED, never silently
+  dropped.** ACF 6.5 added that toggle and implemented it in `load_value`, keeping the row only when
+  `is_admin()` - which is never true for a REST request. So wp-admin shows four blocks and ACF hands
+  a REST caller three, with nothing saying a fourth exists. A read feeds a write, so a silently
+  dropped block becomes a silently deleted one. The row now comes back with `disabled: true` and its
+  own values, and a RENAMED layout reports the label the editor sees rather than the original. The
+  state comes from ACF's own public `get_disabled_layouts()` and `get_renamed_layouts()`, and the
+  row's own values from `acf_get_value()` - the same call ACF's own row loader makes, so a sub-field
+  that is a group, a clone, a repeater or another Flexible Content field is expanded by its own
+  type's loader rather than read as the marker its meta row holds. A disabled row is reported even
+  when something else on the site has already read the field in the same request, which is the one
+  way it could still have disappeared silently.
+- **The capability gate is ours, because ACF has none, and it is the capability that opens the
+  wp-admin screen these fields are rendered on:** `edit_post`, `edit_term`, `edit_user` or
+  `manage_options`. A post you may not read answers byte-identically to a post that is not there, as
+  `get-post` and `get-post-meta` already do.
+- **Only fields the object has actually saved are listed**, which is `get_field_objects()`'s own
+  rule: it resolves a field by name through a hidden reference row, and a field never saved has
+  none.
+- **No ACF schema tools.** Field structure reaches a caller as metadata on a values read, not as a
+  catalogue of what a site could hold.
+- **The catalog is 40 tools on a site with ACF, and 39 without.**
+
+### Added: a module's availability guard is now a gate rather than a convention
+
+- **A module that depends on another plugin DECLARES the API face it needs, as data**, through
+  `wpmcp_register_module_face()`, and registers only when every required symbol is present.
+  `function_exists('acf')` is not sufficient - it proves the other plugin is there, not that the
+  face the module needs is there, and it stays green forever while the module starts calling
+  something that plugin added two releases later.
+- **A test keeps the declaration honest.** `tests/unit/ModuleApiFaceTest.php` tokenises every module
+  file, sorts every name into this plugin's / PHP's / WordPress's / the declared face, and asserts
+  the leftover set is empty. It walks the manifest rather than knowing about ACF, so a module added
+  without a declaration fails on the day it is added.
+- **The same check runs at CALL time.** Clients cache tool lists at connect time, and
+  `wpmcp_acf_tools()` is a public function anything on the site can publish through the
+  `wpmcp_tools` filter, so a call can arrive with the face incomplete. It produces the ordinary
+  generic refusal with a trace id, with the missing symbols in the private trace table - never a
+  PHP fatal, and never a sentence telling a caller which plugins this site has.
+- **A face has an OPTIONAL half**, so a site whose ACF cannot report disabled Flexible Content
+  layouts is served values with that capability reported as off, rather than refused everything.
+  Values work down to a detected ACF 5.11; layout metadata needs ACF Pro 6.5, below which the
+  feature does not exist and "none" is the right answer rather than a degraded one.
+- **Settings > WP MCP now prints a Feature modules table**: per module, serving or not, and which
+  symbols are missing. Without it, "no ACF tools" and "wp-mcp is broken" look identical to the one
+  person who can fix either.
+
+### Changed: the module-boundary gate sees the position that used to fall through
+
+- **A name a module uses in NEITHER call nor class position was silent.** The detector decides by
+  position, so a `WPMCP_*` constant read, or a flat `WpMcp_*` class in a type-hint, a return type or
+  a `catch`, was seen by neither half and round 3's unresolved-call assertion did not cover it - it
+  only reports unresolved names followed by `(`. Both were empty, which is the argument for closing
+  them before the first module that could use one.
+- **The assertion is now the positive one:** the set of this plugin's names a module uses that
+  NEITHER detector claimed is empty.
+- **And a constant read is held to the same boundary as a call** - it must be defined in a file a
+  module may call into - because no rule can tell `WPMCP_DB_VER` from `WPMCP_TRACE_TEXT_BYTES` by
+  name.
+- **Position is decided in one place now**, `tests/Support/PhpSymbols.php`, because two gates ask
+  the same question of the same source and two token scanners would be two sets of these holes to
+  find twice.
+
+### Fixed: seven places where this plugin restated a decision the platform already makes
+
+An enumeration of all 14,745 shipped lines against the WordPress and ACF functions behind them found
+115 duplications of platform machinery; seven of them were live defects. What they have in common is
+the finding, and it is the reason the audit was commissioned: a copy of somebody else's decision
+drifts, and theirs cannot drift from itself. Each fix was swept for its whole class rather than its
+one call site.
+
+- **The code tools were advertised and refused on every multisite install, and the listing no longer
+  has an opinion of its own about when.** WordPress denies `edit_themes` on THREE conditions -
+  `DISALLOW_FILE_EDIT`, the `file_mod_allowed` filter, and a network plus a caller who is not a super
+  admin - and this plugin's copy of that decision had the first two. So a Site Administrator on a
+  network, who holds `edit_themes` in their role, saw all six code tools in `tools/list` and was
+  refused every one of them at call time: the exact state the listing gate was written to prevent.
+  Completing the copy would have left a copy, so the copy is gone - the gate asks
+  `map_meta_cap('edit_themes', ...)`, which answers that question and only that question, and a
+  hardening plugin that denies the capability on WordPress's own `map_meta_cap` filter now switches
+  the listing off too. Which of the reasons it was is still named in the refusal, because an operator
+  who set a constant deliberately and one whose host set another need different sentences.
+  The same missing branch was in `list-plugins`, where `auto_update` answered true or false for a
+  caller WordPress says cannot update plugins at all; it is `null` for them now, and the tool's
+  description says why. That one still reads the constant rather than asking WordPress, because
+  asking runs a filter the tool promises not to run.
+- **A mint failure on Settings > WP MCP was escaped twice**, so an operator whose token was refused
+  read `&amp;` for an ampersand and `&#039;` for an apostrophe at the one moment the message
+  mattered. The notice is escaped where it is printed, once.
+- **Three schema probes built a LIKE pattern without escaping its wildcards.** `_` matches any one
+  character and is in every table and column name this plugin has, so a same-shaped neighbour table
+  could make the file-versions probe conclude the table was missing - which would have run `dbDelta`
+  on every request, for ever, on a site where nothing was wrong.
+- **Deactivation left cron behind.** It removed the NEXT scheduled event by timestamp where uninstall
+  removed all of them; both now clear one declared list of hooks, so a second scheduled job cannot be
+  added without being removed.
+- **`get-acf-values` reported a Flexible Content layout's label from the field group** instead of
+  calling ACF's own public `get_layout_title()`, which runs the documented
+  `acf/fields/flexible_content/layout_title` filter family. On any site using those filters, wp-admin
+  and this tool disagreed about the label the editor sees. An editor's rename still wins over it -
+  ACF applies that at render time and its public method cannot return one. The filter is given the
+  row ACF's own renderer gives it, so a filter that builds a title out of the row's content with
+  `get_sub_field()` - the one example ACF's documentation gives - sees the row; and a row ACF dropped
+  is rebuilt for it rather than passed empty, so its label comes from its own values.
+  The `acf` object in every read now reports `layout_title` as a capability of its own, because
+  `get_layout_title()` and its filters are older than the 6.5 disable/rename feature: an ACF Pro
+  between 5.11 and 6.4 filters its layout titles and has no disabled rows, and reporting the two as
+  one had left the label wrong across that whole version range.
+- **And `get-acf-values` built the ACF object id by hand**, where `acf_get_valid_post_id()` appends a
+  language suffix to `options` on a multilingual site. `acf_get_value()` is the one ACF reader that
+  does not normalise its own argument, and it is the call this module makes for a row ACF dropped -
+  so a dropped row's values came out of the DEFAULT-language options store while every surviving row
+  came out of the current one.
+- **`list-plugins` keys its scan the way `get_plugins()` keys its own**, through `plugin_basename()`.
+  Nothing was observably wrong: on the paths `readdir()` can produce, that call is a no-op for core
+  too. The two key sets are now identical by construction rather than by coincidence, because one of
+  them is compared against `active_plugins`, which `activate_plugin()` writes through that function.
+- **Four false sentences in shipped prose went with them**, each of which was the JUSTIFICATION for
+  one of the defects above.
+
+### Changed: two more statements of a platform decision are the platform's, and one of them is guarded
+
+Nothing a caller sends or reads changes here. Both are the same audit as the section above, taken to
+the rows that were left.
+
+- **`list-comments`' search clause is built by `WP_Comment_Query::get_search_sql()`** instead of by
+  hand. The column list stays ours - the search runs over `comment_content` and `comment_author` and
+  never over the email and IP columns core's own `search` query var includes - but the `esc_like()`
+  wildcarding and the `OR` assembly are core's now, reached through the `__call()` proxy core added
+  in 4.0 for exactly this. The SQL is byte-identical to what it replaced, so a search returns the
+  same comments it did.
+- **And that call is GUARDED, because the failure mode was silence.** `__call()` answers `false` for
+  any name it does not proxy, and `false` concatenates to the empty string - so a rename, a
+  visibility change or the proxy's removal in a future WordPress would make the search clause VANISH
+  and `list-comments` would answer with every comment the caller may read while looking like a search
+  that matched all of them. A non-string now refuses the call: one opaque error and a trace id an
+  operator can look up, rather than a wrong answer nobody questions.
+- **One admin notice is printed by `wp_admin_notice()`** rather than by this plugin's own markup.
+
 ## 1.1.2
 
 **Released 2026-09-25.** The private trace log stops being a file, and the tool surface starts

@@ -528,6 +528,28 @@ function wpmcp_authorize_now(WP_REST_Request $req) {
  *                         nothing says so. Refusing the tool is the loud version of a
  *                         failure that is otherwise silent and model-side. Measured on
  *                         characters rather than bytes, which is what a client counts.
+ *   schema_constraint_unreadable
+ *                         the `inputSchema`, at any depth, declares `exclusiveMinimum` or
+ *                         `exclusiveMaximum` in a form core cannot read as the schema means
+ *                         it: with no `minimum`/`maximum` beside it, where nothing reads the
+ *                         flag at all; or as anything but a boolean, where core's
+ *                         `! empty()` gate makes `exclusiveMinimum: 5` mean "the bound in
+ *                         `minimum` is exclusive" and `exclusiveMinimum: 0` mean INCLUSIVE -
+ *                         the opposite of the 2020-12 spelling an `inputSchema` is written
+ *                         in. This one refuses rather than being dropped from the listing,
+ *                         because dropping it would change a verdict core is already giving.
+ *                         The fix is core's own spelling: `minimum` plus a boolean flag.
+ *                         `enum: []` is the same shape of disagreement - JSON Schema says an
+ *                         empty enum admits no value, core's `! empty()` says it admits every
+ *                         value - and refuses for the same reason: dropping it would change
+ *                         what core is asked, and dropping it cannot say "nothing is valid".
+ *
+ * AND ONE THING THAT IS NOT A REFUSAL AT ALL. An `inputSchema` keyword nothing can read - one
+ * outside SchemaValidator::dialect(), or a non-array `required` - is left out of
+ * what `tools/list` publishes rather than costing the tool its registration, and a
+ * `registry_strip` event names it. It is NOT left out of what validation sees: see
+ * wpmcp_publishable_schema(), and review 85 R2-B1 for what happened when it was.
+ *
  *   name_reserved         a filter entry using a BUILT-IN tool's name. The built-in
  *                         wins and the filter entry is dropped. A same-name entry is
  *                         how the fail-closed rule gets walked around one level up:
@@ -642,6 +664,13 @@ function wpmcp_tools() {
             continue;
         }
 
+        // THE SCHEMA IS KEPT AS WRITTEN, and round 2's blocker is why this line is a plain assignment
+        // again. It used to assign a REDUCED copy, and this array is what wpmcp_dispatch() validates
+        // against (see the SchemaValidator::validateArguments() call below), so the reduction silently
+        // loosened validation: nine measured arrangements where a call the validator refused before
+        // reached the tool body after, `{"minItems": 2}` with `[1]` among them (review 85 R2-B1). The
+        // reduction now happens at the ONE place it is safe - the tools/list emitter, where the output
+        // is serialised and nothing else. See WpMcp\SchemaValidator::publishable().
         $kept[$name] = $tool;
     }
 
@@ -698,8 +727,75 @@ function wpmcp_registry_reject_reason($tool) {
     if (!wpmcp_descriptions_within_limit($tool)) {
         return 'description_too_long';
     }
+    // NEWEST CHECK, SO IT IS LAST - see the order rule above.
+    //
+    // A KEYWORD OUTSIDE THE DIALECT DOES NOT REFUSE THE TOOL: it is dropped from what tools/list
+    // publishes and a registry_strip event names it, which is what core does with a keyword it cannot
+    // validate (twice - `rest_get_endpoint_args_for_schema()` at the floor,
+    // `wp_prepare_json_schema_for_client()` on 7.1). See wpmcp_publishable_schema().
+    //
+    // AN EXCLUSIVE BOUND FLAG CORE CANNOT READ AS WRITTEN IS DIFFERENT, and it is the one schema
+    // shape that refuses. It cannot be dropped, because with its partner present core IS enforcing
+    // something from it (`! empty()`, rest-api.php:2615) and dropping it would loosen validation -
+    // that is exactly what round 2 did. And it cannot be published, because JSON Schema 2020-12 says
+    // `exclusiveMinimum: 5` means `> 5` while core reads it as "the bound in `minimum` is exclusive".
+    // Neither honest, so the entry does not register. See SchemaValidator::unreadableBound().
+    if (SchemaValidator::unreadableConstraint($tool['inputSchema']) !== null) {
+        return 'schema_constraint_unreadable';
+    }
 
     return '';
+}
+
+/**
+ * One tool's `inputSchema` as it may be PUBLISHED, announcing anything it had to leave out.
+ *
+ * CALLED FROM THE `tools/list` EMITTER AND NOWHERE ELSE, which is the correction round 3 makes. Round
+ * 2 called the strip from `wpmcp_tools()`, whose output is also what `wpmcp_dispatch()` validates
+ * against, so a keyword removed for being unenforceable stopped being enforced - and the tables it
+ * removed by were wrong toward permissive, so nine arrangements went from refused to running (review
+ * 85 R2-B1). Validation now always sees the schema as written; this is publication only.
+ *
+ * WHAT IT REMOVES is only what provably nothing reads: a keyword outside
+ * `WpMcp\SchemaValidator::dialect()`, and a `required` that is not an array. Nothing type-gated and
+ * nothing partner-gated - those were round 2's mistake - and nothing whose removal would change what
+ * core is asked, which tests/unit/SchemaValidatorTest::testPublicationNeverChangesWhatCoreIsAsked()
+ * holds directly. Stripping from publication cannot change a verdict anyway, because the verdict is
+ * taken against the unreduced schema a few lines further down; both belts are deliberate.
+ *
+ * WHY ANNOUNCE IT AT ALL. Core strips silently, and inheriting core's behaviour is not the same as
+ * inheriting core's silence: the author of a tool whose `const` never fires should read the reason in
+ * the log rather than guess. ONE EVENT PER TOOL, not per keyword, because this runs per `tools/list`
+ * and the `registry_reject` beside it fires at most once per entry.
+ *
+ * THE PATHS ARE SANITISED BEFORE THEY ARE LOGGED. They carry a third party's own property names, and a
+ * log row this plugin writes is read in wp-admin: only the characters a JSON Schema keyword or
+ * property name can legitimately use survive, and the joined list is cut at 200 - the same bound
+ * wpmcp_redact_for_log() applies to `origin` and `tool`.
+ *
+ * @param string $name   the tool's name, for the event
+ * @param array  $schema the tool's inputSchema, as written
+ * @return array the schema to publish
+ */
+function wpmcp_publishable_schema($name, $schema) {
+    list($publishable, $removed) = SchemaValidator::publishable($schema);
+
+    if ($removed === array()) {
+        return $schema;
+    }
+
+    wpmcp_auth_event('registry_strip', array(
+        'tool'     => (string) $name,
+        'keywords' => substr(implode(
+            ' ',
+            array_map(
+                function ($path) { return preg_replace('/[^A-Za-z0-9$_\/-]/', '', (string) $path); },
+                $removed
+            )
+        ), 0, 200),
+    ));
+
+    return $publishable;
 }
 
 /**
@@ -1244,8 +1340,15 @@ function wpmcp_dispatch(WP_REST_Request $req, $raw, $body, $id, $method) {
                 $entry = array(
                     'name'        => $name,
                     'description' => $t['description'],
-                    // The guard, on the way out. See wpmcp_objectify_schema().
-                    'inputSchema' => wpmcp_objectify_schema($t['inputSchema']),
+                    // TWO GUARDS ON THE WAY OUT, and only on the way out. wpmcp_objectify_schema()
+                    // undoes PHP's empty-array ambiguity; wpmcp_publishable_schema() drops any
+                    // keyword nothing can read, so this server never advertises a constraint it does
+                    // not keep. Neither touches $t['inputSchema'], which is what
+                    // wpmcp_dispatch() validates against - review 85 R2-B1 is what happens when the
+                    // published copy and the validated one are the same reduced array.
+                    'inputSchema' => wpmcp_objectify_schema(
+                        wpmcp_publishable_schema($name, $t['inputSchema'])
+                    ),
                     'annotations' => $t['annotations'],
                 );
 

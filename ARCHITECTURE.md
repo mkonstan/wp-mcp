@@ -20,10 +20,11 @@ who checks that pass on every knock and then does the work as that user.
 | `modules.php` | The module seam: the manifest, the loader, `wpmcp_register_module()`, and the gate that checks what comes through it. Defines no tools. |
 | `modules/menus.php` | Module: the five classic menu tools. |
 | `modules/discovery.php` | Module: `list-content-types`. |
+| `modules/acf.php` | Module: `get-acf-values`. Registers only when the ACF API face it declares is present. |
 | `admin.php` | The Settings > WP MCP screen: mint, list, revoke, and the three opt-in surfaces (code editing, SQL reads, the post-meta allow-list) in one form. |
 | `trace.php` | The private side of the error boundary: one row per traced failure, the lookup by id, the retention sweep, and the `error_log()` fallback. |
 | `src/ProtocolVersion.php` | The MCP revisions this server speaks, as an enum, newest first. |
-| `src/SchemaValidator.php` | The JSON Schema subset every `tools/call` argument is checked against. |
+| `src/SchemaValidator.php` | Every `tools/call` argument, checked against the tool's `inputSchema` by core's own `rest_validate_value_from_schema()`. Adds three things core cannot be asked for: strict types (`"20"` is not 20), every failure at once behind a JSON Pointer, and a bound on what a refusal echoes back. |
 | `uninstall.php` | Deleting the plugin: all three tables, the options, the cron hook, and whatever 1.1.1 left in `wp-content/wpmcp/`. |
 | `build.txt` | Three git placeholders. The only `export-subst` file: `git archive` writes the commit into it when a zip is cut. |
 
@@ -70,14 +71,16 @@ function; `wpmcp_register_module()` records which function to ask, not what it a
 ## The module seam
 
 **The core is what is left when every module is gone.** A module is one file that adds tools
-and can be deleted without the core noticing. Two exist: `modules/menus.php` (the five classic
-menu tools) and `modules/discovery.php` (`list-content-types`).
+and can be deleted without the core noticing. Three exist: `modules/menus.php` (the five classic
+menu tools), `modules/discovery.php` (`list-content-types`) and `modules/acf.php`
+(`get-acf-values`).
 
 **Why, and it is not tidiness.** `tools.php` was 6,987 lines of a 12,266-line plugin - one file
-with a small core beside it. The next feature in the queue writes ACF values, which is the
-highest blast radius anything here has proposed, and a feature in its own file behind its own
-guard costs a site without ACF nothing and can break nothing there. **What the seam does NOT
-buy is a lighter review.** Scrutiny follows blast radius, not file boundaries: five of the six
+with a small core beside it. The feature the seam was built for is ACF field values - read in
+1.2.0, written later - which is the highest blast radius anything here has proposed, and a
+feature in its own file behind its own guard costs a site without ACF nothing and can break
+nothing there. **What the seam does NOT buy is a lighter review.** Scrutiny follows blast
+radius, not file boundaries: five of the six
 reviewed sprints in this project failed their first review with a green test suite and not one
 of those defects was in the dispatch path. A locked core makes a diff smaller. It does not make
 new code safer.
@@ -110,14 +113,20 @@ unresolved call rather than skipping it, refuses any reference to one of this pl
 from a module (both the namespaced `src/` shape and the flat `WpMcp_*` one, case-insensitively and
 with or without a leading backslash), and holds the five helpers above to being exactly the five,
 because an unenforced sentence in the seam's own contract is the ACF `permission_callback` mistake
-in our own words.
+in our own words. **And since 1.2.0 it asserts that the set of this plugin's names a module uses
+in NEITHER position is empty** - a `WPMCP_*` constant read, or a flat `WpMcp_*` class in a
+type-hint, a return type or a `catch`, each of which fell between the detector and silence until
+the ACF sprint. A constant read is held to the same boundary as a call: it must be defined in a
+file a module may call into, because no rule can tell `WPMCP_DB_VER` from
+`WPMCP_TRACE_TEXT_BYTES` by name.
 
 **And what that gate cannot see, because a mechanism that does not state its limit invites the
 trust this is here to remove: an INDIRECT call.** It resolves names that are written, so a variable
 function, a string handed to `call_user_func`, `add_action` or `add_filter`, or a callable array
-reaches a core symbol without being a token the test can attribute. No module uses one today - the
-only string callable under `modules/` is a module's own provider name, handed to
-`wpmcp_register_module()`, which is the front door. **So one thing stays a hand check in review of
+reaches a core symbol without being a token the test can attribute. No module reaches the core
+through one today: the string callables under `modules/` are each a module naming ITS OWN function -
+a provider, a face, a filter callback, a registration callback, and a method probe named inside a
+face, five of them in `modules/acf.php` - and every one resolves inside the module that wrote it. **So one thing stays a hand check in review of
 any module diff:** read every string literal that looks like a symbol name, and every `$variable(`
 call, and ask what it resolves to. The gate exists so that this is a short bounded reading rather
 than the whole file. Nothing in the core calls
@@ -127,11 +136,38 @@ process, and asserts the registry comes back as exactly the 24 core tools. A cor
 needed a module would fatal there and name the symbol.
 
 **A module's own availability guard goes at the top of its own file**, before the registration
-call - `function_exists('acf')` and the like - so a module that cannot work does not register
-and its tools do not exist. Not "exist but refuse": absent, so `tools/call` answers the same
-`-32602 Unknown tool` a name nobody registered gets. That is the same rule the code tools,
-`sql-select` and the post-meta pair already obey, for the same reason: a distinct "it exists
-but is off" tells an unauthorised caller a fact about this site's configuration for free.
+call, so a module that cannot work does not register and its tools do not exist. Not "exist but
+refuse": absent, so `tools/call` answers the same `-32602 Unknown tool` a name nobody registered
+gets. That is the same rule the code tools, `sql-select` and the post-meta pair already obey, for
+the same reason: a distinct "it exists but is off" tells an unauthorised caller a fact about this
+site's configuration for free.
+
+**Since 1.2.0 that guard is a GATE too, and `function_exists('acf')` is not sufficient** (D30):
+it proves the other plugin is there, not that the FACE the module needs is there. A module that
+depends on another plugin declares that face as DATA -
+
+```php
+wpmcp_register_module_face('acf', 'wpmcp_acf_api_face');
+```
+
+- returning `required` symbols (functions, classes, constants, and methods reached through a
+probe the module supplies) and, separately, `optional` capabilities the module can do without.
+`wpmcp_module_face_missing($slug)` is the single check, asked at registration AND again inside
+the tool's own `run` - because clients cache tool lists, so a client that listed a tool while the
+other plugin was active can call it after that plugin is deactivated, and that call must be a
+refusal with a trace id rather than a PHP fatal on somebody's site.
+
+**`tests/unit/ModuleApiFaceTest.php` is what keeps the declaration honest:** it tokenises every
+module file, sorts every name it finds into this plugin's / PHP's / WordPress's / the declared
+face, and asserts the leftover set is `[]`. A guard that can fall behind the code it guards is
+the same defect as a check that reports nothing when it sees nothing, so the assertion is the
+positive one. It walks `wpmcp_module_manifest()` rather than knowing about ACF, so a module added
+without a declaration fails on the day it is added.
+
+**And the absence is explicable.** `wpmcp_module_status()` reports, per manifest entry, whether
+the file is there, whether it registered, what its face is missing and which optional
+capabilities this site provides; Settings > WP MCP prints it. Without that, "no ACF tools" and
+"wp-mcp is broken" look identical to an administrator.
 
 **And nothing a module returns is trusted.** Registration records a callable and checks nothing;
 the gate is on the way OUT, in `wpmcp_module_tools()`, and it is the same function a

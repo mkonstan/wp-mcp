@@ -511,12 +511,15 @@ final class CapabilityScopedReadsTest extends FixtureIntegrationTestCase
     /**
      * `search` matches comment text and author name, and nothing else.
      *
-     * WP_Comment_Query hard-codes its search columns to include
-     * comment_author_email and comment_author_IP, with no filter to narrow them. A
-     * tool that advertises "emails omitted" while letting a caller confirm an address
-     * one prefix at a time does not omit them, so list-comments builds its own
-     * clause. The email here is on the comment the Author CAN read, so nothing but
-     * the column list can be what hides it.
+     * WP_Comment_Query's `search` QUERY VAR hard-codes its columns to include
+     * comment_author_email and comment_author_IP, and there is no filter on that
+     * choice. A tool that advertises "emails omitted" while letting a caller confirm
+     * an address one prefix at a time does not omit them, so list-comments passes its
+     * own two columns to `get_search_sql($search, $columns)` instead - the SQL builder
+     * IS reachable even though the query var's column list is not configurable, which
+     * an earlier version of this docblock ran together into "no filter to narrow
+     * them". The email here is on the comment the Author CAN read, so nothing but the
+     * column list can be what hides it.
      *
      * @group sprint-1
      */

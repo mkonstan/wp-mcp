@@ -292,7 +292,13 @@ function wpmcp_render_admin() {
         $owner = isset($_POST['wpmcp_user_id']) ? (int) $_POST['wpmcp_user_id'] : 0;
         $res   = wpmcp_mint($scope, $label, $window, $lifetime, $owner);
         if (is_wp_error($res)) {
-            $notice = 'Error: ' . esc_html($res->get_error_message());
+            // ESCAPED ONCE, AT OUTPUT, AND THAT IS NOT HERE (sprint CORE-FIX). $notice is
+            // printed through esc_html() where the notice is rendered, so escaping it again
+            // here turned every `&`, `<` and `'` in a mint refusal into a visible `&amp;`,
+            // `&lt;` and `&#039;` - the operator read entity garbage at the one moment they
+            // needed the message. The other three writers of $notice already pass raw text,
+            // including the renew failure ten lines down; this was the only one that did not.
+            $notice = 'Error: ' . $res->get_error_message();
         } else {
             $owner_user = get_userdata($owner ? $owner : get_current_user_id());
             $minted = array(
@@ -387,7 +393,10 @@ function wpmcp_render_admin() {
       // operator who needs to be told the log is public.
       ?>
 
-      <?php if ($notice): ?><div class="notice notice-info is-dismissible"><p><?php echo esc_html($notice); ?></p></div><?php endif; ?>
+      <?php // wp_admin_notice() assembles the classes and the <p>, and runs wp_admin_notice_args
+            // / _markup so a site that restyles notices reaches ours. IT DOES NOT ESCAPE - the
+            // message is interpolated raw (functions.php:9271) - so esc_html() stays, once. ?>
+      <?php if ($notice) { wp_admin_notice(esc_html($notice), array('type' => 'info', 'dismissible' => true)); } ?>
 
       <h2>Generate a token</h2>
       <form method="post">
@@ -642,6 +651,67 @@ function wpmcp_render_admin() {
         <?php endforeach; ?>
         <?php endif; ?>
       <?php endif; ?>
+
+      <?php
+      // WHY THIS SECTION EXISTS, AND IT IS THE CHEAPEST HONEST PLACE (D30, point 4). A module
+      // that cannot work registers nothing, so its tools do not exist - which is the bare-site
+      // rule and is deliberately silent. The cost of that silence is that "no ACF tools" and
+      // "wp-mcp is broken" look identical to the one person who can fix either, and this plugin
+      // keeps catching that exact failure under the name vacuous silence. This screen is where an
+      // operator already comes to see which surfaces are on, so it is where the answer belongs -
+      // not in a tool, because a tool that explains why another tool is missing is a tool the
+      // model must first be told to call.
+      //
+      // IT ASKS THE SEAM AND NEVER A MODULE. wpmcp_module_status() reads modules.php's own
+      // registries of faces and providers, so this screen keeps working with a module file
+      // deleted - which is the same rule ModuleBoundaryTest enforces in the other direction.
+      $wpmcp_modules = wpmcp_module_status();
+      ?>
+      <h2>Feature modules</h2>
+      <p>Each of these adds tools of its own, and only if what it needs is present on this site.
+         A module that needs a plugin you do not have serves nothing and its tools are absent
+         from <code>tools/list</code> entirely &mdash; a call to one answers
+         <code>Unknown tool</code>, exactly as a name nobody registered does.</p>
+      <table class="widefat striped" style="max-width:900px">
+        <thead><tr><th scope="col">Module</th><th scope="col">Tools</th><th scope="col">Why</th></tr></thead>
+        <tbody>
+        <?php foreach ($wpmcp_modules as $wpmcp_slug => $wpmcp_module): ?>
+          <tr>
+            <td><code><?php echo esc_html((string) $wpmcp_slug); ?></code></td>
+            <td><?php echo $wpmcp_module['registered'] ? 'Serving' : '<strong>Not serving</strong>'; ?></td>
+            <td>
+              <?php if (!$wpmcp_module['present']): ?>
+                <?php // A manifest entry with no file is a PACKAGING bug - the release zip dropped
+                      // a file - and it is worth saying so here rather than leaving the row blank. ?>
+                <code><?php echo esc_html((string) $wpmcp_module['file']); ?></code> is missing from
+                this install. Re-install the plugin.
+              <?php elseif ($wpmcp_module['missing'] !== array()): ?>
+                Needs these, and this site does not have them:
+                <?php foreach ($wpmcp_module['missing'] as $wpmcp_symbol): ?>
+                  <code><?php echo esc_html((string) $wpmcp_symbol); ?></code>
+                <?php endforeach; ?>
+                <?php // The symbols, not a plugin name. The module declares symbols and the
+                      // operator can look one up; guessing which plugin owns it would be us
+                      // inventing a fact the declaration does not carry. ?>
+              <?php elseif (!$wpmcp_module['registered']): ?>
+                Everything it declared is present and it still did not register. That is a bug in
+                wp-mcp, not a missing dependency.
+              <?php elseif ($wpmcp_module['capabilities'] !== array()): ?>
+                <?php foreach ($wpmcp_module['capabilities'] as $wpmcp_capability => $wpmcp_on): ?>
+                  <code><?php echo esc_html((string) $wpmcp_capability); ?></code>:
+                  <?php echo $wpmcp_on ? 'yes' : 'no'; ?><br>
+                <?php endforeach; ?>
+                <?php // The OPTIONAL half of a face: a guarantee the module can do without and
+                      // reports instead of demanding. The tool's own output says the same thing,
+                      // so a caller and an operator read one answer. ?>
+              <?php else: ?>
+                &mdash;
+              <?php endif; ?>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+        </tbody>
+      </table>
 
       <h2>Code editing, SQL reads and post meta</h2>
       <?php

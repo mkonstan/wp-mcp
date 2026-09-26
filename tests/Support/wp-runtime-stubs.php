@@ -301,15 +301,318 @@ if (!function_exists('do_action')) {
     }
 }
 
+if (!function_exists('wpmcp_test_json_sanity')) {
+    /**
+     * `_wp_json_sanity_check()` reduced to the half that has an observable effect here: every
+     * string in the structure is put through UTF-8 conversion, which DROPS the bytes that are not
+     * valid UTF-8 (wp-includes/functions.php, `_wp_json_convert_string()`).
+     *
+     * Core's other half - the depth counter that throws, so wp_json_encode() can return false on
+     * a structure nested past $depth - is left out because nothing in this plugin builds one, and
+     * a stub that pretended to implement it would be a stub asserting its own behaviour.
+     */
+    function wpmcp_test_json_sanity($value)
+    {
+        if (is_string($value)) {
+            return function_exists('mb_convert_encoding')
+                ? (string) mb_convert_encoding($value, 'UTF-8', 'UTF-8')
+                : (string) iconv('UTF-8', 'UTF-8//IGNORE', $value);
+        }
+
+        if (is_array($value)) {
+            $out = array();
+            foreach ($value as $k => $v) {
+                $out[is_string($k) ? wpmcp_test_json_sanity($k) : $k] = wpmcp_test_json_sanity($v);
+            }
+
+            return $out;
+        }
+
+        return $value;
+    }
+}
+
 if (!function_exists('wp_json_encode')) {
     /**
-     * Core's wrapper adds depth checking and invalid-UTF-8 handling; for the one place
-     * the plugin calls it on a unit path - formatting a non-scalar auth-event value -
-     * json_encode is the same answer.
+     * CORE'S OWN SHAPE (wp-includes/functions.php): try json_encode, and on failure sanity-check
+     * the value and try again.
+     *
+     * THIS USED TO BE A BARE json_encode, with a docblock saying the two were "the same answer"
+     * for the one place the plugin called it. Sprint CORE-FIX made that FALSE: `SchemaValidator`
+     * now renders a non-scalar enum value through this function, and the whole reason it does is
+     * that bare json_encode returns FALSE on a value that is not valid UTF-8 - which concatenates
+     * into the message as the empty string, so a permitted value vanishes from the list of
+     * permitted values. A stub that returned false here would let the pre-fix code pass.
      */
     function wp_json_encode($data, $options = 0, $depth = 512)
     {
-        return json_encode($data, $options, $depth);
+        $json = json_encode($data, $options, $depth);
+
+        if ($json !== false) {
+            return $json;
+        }
+
+        return json_encode(wpmcp_test_json_sanity($data), $options, $depth);
+    }
+}
+
+if (!function_exists('is_multisite')) {
+    /**
+     * ADDED FOR SPRINT CORE-FIX. Core's `map_meta_cap` denies `edit_themes` and `update_plugins`
+     * on `is_multisite() && ! is_super_admin( $user_id )`, and this plugin reproduces both
+     * decisions - so the unit tier has to be able to stand on both sides of that line. Real
+     * WordPress answers from a constant fixed at load; this one reads the global each time, which
+     * is what lets one loaded plugin be tested on a network and on a single site.
+     */
+    function is_multisite()
+    {
+        return (bool) ($GLOBALS['wpmcp_test_wp']['multisite'] ?? false);
+    }
+}
+
+if (!function_exists('is_super_admin')) {
+    /**
+     * ADDED FOR SPRINT CORE-FIX, beside is_multisite() and for the same gate.
+     *
+     * CORE'S TWO ARMS, NOT ONE (review 81, S5). Round 1 answered from a list of ids on any site,
+     * and the report called that "core's own one-line body" - it is neither core's nor one line.
+     * Core (`wp-includes/capabilities.php:1177-1198`) answers from `get_super_admins()` on a
+     * NETWORK and from `has_cap('delete_users')` on a SINGLE SITE, and both arms are here because
+     * the second is reachable: a caller with no `is_multisite()` guard in front of it would
+     * otherwise be tested against a stub that says false where core says true.
+     *
+     * BY ID RATHER THAN BY LOGIN on the network arm, and that IS a divergence: core matches
+     * `$user->user_login` against `get_super_admins()`. The unit tier's users are an id and a login
+     * string with no object behind them, so membership of a set is the closest honest model; the
+     * DECISION - is this user in the network's admin set - is the same, and nothing in this plugin
+     * reads the login.
+     */
+    function is_super_admin($user_id = false)
+    {
+        $id = $user_id ? (int) $user_id : (int) ($GLOBALS['wpmcp_test_wp']['current_user_id'] ?? 0);
+
+        if (!$id) {
+            return false;
+        }
+
+        if (is_multisite()) {
+            return in_array($id, (array) ($GLOBALS['wpmcp_test_wp']['super_admins'] ?? []), true);
+        }
+
+        // Core's single-site arm, verbatim in substance: `$user->has_cap('delete_users')`.
+        return (bool) current_user_can('delete_users');
+    }
+}
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * THE FIVE BELOW EXIST FOR ONE REASON: tests/unit/AcfResolveGateTest.php.
+ *
+ * `wpmcp_acf_resolve()` is the capability boundary the ACF module's whole disclosure argument rests
+ * on - the layout-title filter can put an un-reduced sub-value on the wire, and what stops that
+ * reaching a reader wp-admin would not show it to is those four `current_user_can()` calls and
+ * nothing else (review 81, pressure point 1). A boundary described in a review file is not enforced;
+ * one EXECUTED by a test is. Executing it needs the object lookups the function makes on its way to
+ * each check, so they are here - each one core's answer in a line, driven by the test globals, and
+ * not one of them speculative.
+ * ------------------------------------------------------------------------------------------------
+ */
+
+if (!function_exists('get_post')) {
+    /**
+     * A post, or null. The test says which ids exist and what post_type each one has; anything else
+     * is "no such post", which is the first refusal wpmcp_acf_resolve() makes.
+     */
+    function get_post($post = null, $output = 'OBJECT', $filter = 'raw')
+    {
+        $posts = (array) ($GLOBALS['wpmcp_test_wp']['posts'] ?? array());
+        $id    = (int) (is_object($post) ? ($post->ID ?? 0) : $post);
+
+        if (!isset($posts[$id])) {
+            return null;
+        }
+
+        return (object) array('ID' => $id, 'post_type' => (string) $posts[$id]);
+    }
+}
+
+if (!function_exists('get_term')) {
+    /** A term, or null. Same shape of arrangement as get_post() above. */
+    function get_term($term, $taxonomy = '', $output = 'OBJECT', $filter = 'raw')
+    {
+        $terms = (array) ($GLOBALS['wpmcp_test_wp']['terms'] ?? array());
+        $id    = (int) (is_object($term) ? ($term->term_id ?? 0) : $term);
+
+        if (!in_array($id, array_map('intval', $terms), true)) {
+            return null;
+        }
+
+        return (object) array('term_id' => $id, 'taxonomy' => 'category');
+    }
+}
+
+if (!function_exists('post_type_exists')) {
+    /** True for the post types the test registered. */
+    function post_type_exists($post_type)
+    {
+        return in_array((string) $post_type, (array) ($GLOBALS['wpmcp_test_wp']['post_types'] ?? array()), true);
+    }
+}
+
+if (!function_exists('is_post_type_viewable')) {
+    /**
+     * Every post type the test registered is viewable. The distinction between registered and
+     * viewable is `wpmcp_post_type_ok()`'s business and has its own tests; this file only has to get
+     * the ACF gate as far as its capability checks.
+     */
+    function is_post_type_viewable($post_type)
+    {
+        return post_type_exists(is_object($post_type) ? ($post_type->name ?? '') : $post_type);
+    }
+}
+
+if (!function_exists('sanitize_key')) {
+    /** Core's body (wp-includes/formatting.php): lowercase, and only [a-z0-9_-] survive. */
+    function sanitize_key($key)
+    {
+        return preg_replace('/[^a-z0-9_\-]/', '', strtolower((string) $key));
+    }
+}
+
+if (!function_exists('map_meta_cap')) {
+    /**
+     * CORE'S `edit_themes` CASE, AND ONLY THAT CASE (sprint CORE-FIX round 2, review 81 S2).
+     *
+     * `wpmcp_code_constants_forbid()` no longer copies core's three site-level deny branches - it
+     * asks `map_meta_cap('edit_themes', $user_id)` whether any of them denies. So the unit tier has
+     * to answer that question, and the only honest way to do it is with core's own body for the one
+     * capability the plugin asks about (`wp-includes/capabilities.php:607-618`).
+     *
+     * A STUB OF A DELEGATION IS A WEAKER PROOF THAN A STUB OF A BRANCH, AND THAT IS THE POINT.
+     * The branch set now lives in ONE place - core's - so what the unit tier can still prove is
+     * that the plugin asks, and that it converts `do_not_allow` into a refusal and anything else
+     * into null. The four states the test drives exercise all three of core's branches THROUGH this
+     * function, so a plugin that stopped asking, or that inverted the answer, goes red.
+     *
+     * EVERY OTHER CAPABILITY ANSWERS `array($cap)` rather than guessing. Core's real function maps
+     * dozens of meta capabilities and reproducing them here would be this file inventing WordPress;
+     * nothing in the plugin passes anything else to it, and a future caller that did would get a
+     * permissive answer and should add its arm here deliberately.
+     */
+    function map_meta_cap($cap, $user_id, ...$args)
+    {
+        // CORE ENDS WITH `apply_filters( 'map_meta_cap', $caps, $cap, $user_id, $args )`, and this
+        // is that filter - the one hook a hardening plugin uses to deny a capability outright. It
+        // is here rather than left out because it is the only way the unit tier can make this
+        // function's answer DIVERGE from the three branches below: with core's own body on both
+        // sides, a gate that asks and a gate that hand-copies are indistinguishable. Forcing the
+        // answer is what proves the plugin asks.
+        if (isset($GLOBALS['wpmcp_test_wp']['map_meta_cap'][$cap])) {
+            return (array) $GLOBALS['wpmcp_test_wp']['map_meta_cap'][$cap];
+        }
+
+        if ($cap !== 'edit_themes' && $cap !== 'edit_files' && $cap !== 'edit_plugins') {
+            return array($cap);
+        }
+
+        if (defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT) {
+            return array('do_not_allow');
+        }
+
+        if (!wp_is_file_mod_allowed('capability_edit_themes')) {
+            return array('do_not_allow');
+        }
+
+        if (is_multisite() && !is_super_admin($user_id)) {
+            return array('do_not_allow');
+        }
+
+        return array($cap);
+    }
+}
+
+if (!function_exists('wp_normalize_path')) {
+    /**
+     * CORE'S OWN BODY (wp-includes/functions.php): backslashes become slashes, repeated slashes
+     * collapse, and a Windows drive letter is upper-cased. Needed only because plugin_basename()
+     * below is core's body too, and this is what core's body calls.
+     */
+    function wp_normalize_path($path)
+    {
+        $wrapper = '';
+        $path    = str_replace('\\', '/', (string) $path);
+        $path    = preg_replace('|(?<=.)/+|', '/', $path);
+
+        if (substr($path, 1, 1) === ':') {
+            $path = ucfirst($path);
+        }
+
+        return $wrapper . $path;
+    }
+}
+
+if (!function_exists('plugin_basename')) {
+    /**
+     * CORE'S OWN BODY (wp-admin/includes/plugin.php), minus the mu-plugins arm it has no
+     * WPMU_PLUGIN_DIR to take. ADDED FOR SPRINT CORE-FIX: wpmcp_scan_plugins() now keys its
+     * array through this function, because get_plugins() keys through it and the two key sets are
+     * compared with each other.
+     *
+     * WRITTEN OUT RATHER THAN RETURNING $file, for the reason FakeWpdb::esc_like() gives: a stub
+     * that was the identity function would make "keyed through plugin_basename" and "keyed by a
+     * raw readdir path" the same assertion.
+     */
+    function plugin_basename($file)
+    {
+        $paths = isset($GLOBALS['wp_plugin_paths']) ? (array) $GLOBALS['wp_plugin_paths'] : array();
+        $file  = wp_normalize_path($file);
+
+        arsort($paths);
+
+        foreach ($paths as $dir => $realdir) {
+            if (str_starts_with($file, (string) $realdir)) {
+                $file = $dir . substr($file, strlen((string) $realdir));
+            }
+        }
+
+        $plugin_dir = wp_normalize_path(WP_PLUGIN_DIR);
+        $file       = preg_replace('#^' . preg_quote($plugin_dir, '#') . '/#', '', $file);
+
+        return trim($file, '/');
+    }
+}
+
+if (!function_exists('get_file_data')) {
+    /**
+     * CORE'S OWN SHAPE (wp-includes/functions.php): read the first 8 KB, then one regex per
+     * requested header over that text, with the value stripped of a trailing comment. The
+     * `$context` arm - which is where the `extra_{$context}_headers` filter lives - is absent
+     * because wpmcp_scan_plugins() deliberately passes no context (see its docblock), so a stub
+     * that had one could not be exercised.
+     */
+    function get_file_data($file, $default_headers, $context = '')
+    {
+        $fp = @fopen($file, 'r');
+
+        if (!$fp) {
+            return array_fill_keys(array_keys((array) $default_headers), '');
+        }
+
+        $data = fread($fp, 8 * 1024);
+        fclose($fp);
+        $data = str_replace("\r", "\n", (string) $data);
+
+        $out = array();
+
+        foreach ((array) $default_headers as $field => $regex) {
+            if (preg_match('/^(?:[ \t]*<\?php)?[ \t\/*#@]*' . preg_quote($regex, '/') . ':(.*)$/mi', $data, $m) && $m[1]) {
+                $out[$field] = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $m[1]));
+            } else {
+                $out[$field] = '';
+            }
+        }
+
+        return $out;
     }
 }
 
@@ -391,5 +694,81 @@ if (!class_exists('WP_REST_Request')) {
         {
             return '';
         }
+    }
+}
+
+/**
+ * ADDED FOR SPRINT VALIDATOR. `WpMcp\SchemaValidator` no longer implements JSON Schema: it hands
+ * every keyword core owns to `rest_validate_value_from_schema()`. That function lives in
+ * wp-includes/rest-api.php and pulls in WP_Error, the whole `rest_*` helper family, `__()`,
+ * `_n()`, `number_format_i18n()`, `_doing_it_wrong()` and `wp_sprintf()` behind it - a WordPress
+ * install, which is the one thing this tier by definition does not have (phpunit.xml.dist: "pure
+ * PHP, no WordPress, no Docker").
+ *
+ * SO THE TWO HALVES OF THE CLAIM ARE PROVEN IN TWO TIERS, AND THIS FILE IS HONEST ABOUT WHICH IT
+ * IS. What is below is a RECORDING DOUBLE, not core: it answers what the test told it to answer
+ * and remembers what it was asked. That makes the unit tier able to prove exactly the half that
+ * is OURS - that the strict type check runs first and a type failure never reaches core at all,
+ * that each keyword group is handed over in its own call with a usable `type` and an EMPTY
+ * `$param`, that a WP_Error answer comes back as one failure at the right pointer, and that two
+ * groups produce two failures. It cannot prove that core enforces `pattern`, and it does not
+ * pretend to: tests/integration/SchemaKeywordsTest.php calls a real tool on a real WordPress over
+ * HTTP for each of the thirteen, which is the only place that claim can be made.
+ *
+ * A DOUBLE THAT REIMPLEMENTED THE KEYWORDS WOULD BE THE WHOLE DEFECT BACK AGAIN, one layer out -
+ * the tier would then assert that our copy of core agrees with our copy of core. Hence answers,
+ * not logic.
+ *
+ * Driven by $GLOBALS['wpmcp_test_wp']['schema']:
+ *   calls     list<array{value: mixed, args: array, param: string}>  every delegated call, in order
+ *   answer    null|callable(mixed $value, array $args, string $param): true|WP_Error
+ *   patterns  array<string, mixed>  property name => the schema
+ *                                   rest_find_matching_pattern_property_schema() should return
+ *   pattern_calls list<array{property: string, args: mixed}>  every call to that function, so a
+ *                                   test can assert WHICH map was handed over (review 85 S7)
+ */
+if (!function_exists('rest_validate_value_from_schema')) {
+    function rest_validate_value_from_schema($value, $args, $param = '')
+    {
+        $GLOBALS['wpmcp_test_wp']['schema']['calls'][] = array(
+            'value' => $value,
+            'args'  => $args,
+            'param' => $param,
+        );
+
+        $answer = $GLOBALS['wpmcp_test_wp']['schema']['answer'] ?? null;
+
+        return is_callable($answer) ? $answer($value, $args, $param) : true;
+    }
+}
+
+if (!function_exists('rest_find_matching_pattern_property_schema')) {
+    /**
+     * Core's is a loop over `patternProperties` running each pattern against the property name.
+     * The double does not run patterns - see above - so a test says which name matches what.
+     *
+     * IT DOES HONOUR `$args`, AND REVIEW 85 S7 IS WHY. The first version ignored the argument
+     * entirely and answered from the name alone, so the unit tier would have stayed green if
+     * `checkObject()` had handed core the wrong array - the instrument grading itself. Core reads
+     * `$args['patternProperties']` and nothing else (rest-api.php:1870-1880), so the double answers
+     * null unless that key is there, and records every call so a test can assert WHICH map was
+     * handed over. What it now guarantees: the production code passes an array carrying this node's
+     * own `patternProperties`. What it still cannot guarantee is that the PATTERNS match what core
+     * would match - that is tests/integration/SchemaKeywordsTest.php's row.
+     */
+    function rest_find_matching_pattern_property_schema($property, $args)
+    {
+        $GLOBALS['wpmcp_test_wp']['schema']['pattern_calls'][] = array(
+            'property' => (string) $property,
+            'args'     => $args,
+        );
+
+        if (!is_array($args) || !isset($args['patternProperties'])) {
+            return null;
+        }
+
+        $patterns = $GLOBALS['wpmcp_test_wp']['schema']['patterns'] ?? array();
+
+        return array_key_exists((string) $property, $patterns) ? $patterns[(string) $property] : null;
     }
 }

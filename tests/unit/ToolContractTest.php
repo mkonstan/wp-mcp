@@ -3,14 +3,47 @@
  * The catalog's own contract: every schema stays inside the validator's dialect, and
  * every tool carries four boolean annotations.
  *
- * WHY THE DIALECT NEEDS A TEST AT ALL. An unsupported keyword is not enforced - the
- * validator walks past `oneOf` without a word, because refusing a legal input over a
- * schema it cannot read would be a decision for the schema's author, not for the caller.
- * That silence is a hole, and the only place it can be closed is here: this plugin's own
- * schemas are held to SchemaValidator::KEYWORDS and ::TYPES, so a tool author who
+ * WHY THE DIALECT NEEDS A TEST AT ALL. An unsupported keyword is not enforced - nothing
+ * looks at it, so the argument reaches the tool body unchecked, with no error and no log
+ * line. That silence is a hole, and this is where it is closed for the catalog: every
+ * built-in schema is held to SchemaValidator::dialect() and ::TYPES, so a tool author who
  * reaches for `$ref` finds out from a red test instead of from an input that was never
- * checked. A filter-added tool is still free to use anything; its unsupported keywords
- * simply do not constrain, and that is said out loud in SchemaValidator's docblock.
+ * checked.
+ *
+ * WHAT SPRINT VALIDATOR CHANGED, BECAUSE IT WOULD OTHERWISE HAVE WEAKENED THIS TEST. The dialect
+ * went from ten constraining keywords to core's own twenty-five plus `required`, so a test that
+ * only checked MEMBERSHIP of that set would now permit far more than it did - a weaker test, not a
+ * stronger one. Round 1 made exactly that mistake and review 85 B1 found it: `exclusiveMinimum`
+ * without `minimum` is in the dialect, so a membership check accepted it, and core reads the flag
+ * only when the bound is there - so the constraint was published and applied to nothing. Decoration,
+ * in this test's own word, produced by the test that exists to forbid it.
+ *
+ * SO THIS NO LONGER CHECKS MEMBERSHIP. It asks the two questions the registry asks, with the two
+ * methods the registry uses: `publishable()` for "can anything here read this keyword at all", and
+ * `unreadableConstraint()` for "does core read this as something OTHER than what it says". A built-in
+ * must need neither leaving-out nor refusing.
+ *
+ * ROUND 3 SPLIT THOSE TWO, and the split is a blocker's fix rather than tidying. Round 2 asked one
+ * method and let it REWRITE the schema, and because the rewritten copy was also what dispatch
+ * validated against, every disagreement between the rewrite's idea of what core reads and core's own
+ * became a LOOSENED verdict - nine measured arrangements, `{"minItems": 2}` with `[1]` among them
+ * (review 85 R2-B1). Nothing that could change a verdict is removed any more; it refuses instead.
+ * Review 85 R2-S2 also found this test green on an empty `enum` and on draft-03's per-property
+ * `required: true`, both of which core would enforce and this validator would not - the first now
+ * refuses, the second is left out of publication, and both go red here.
+ *
+ * AND THEY ARE THE SAME WALKS THE REGISTRY USES, which is the other half of the fix (review 85 S3).
+ * This class used to carry a private `keywordsIn()` that descended into `properties` and `items` and
+ * nothing else, while the registry's walk covered six holders - so an unknown keyword in
+ * `additionalProperties`, `patternProperties`, `anyOf` or `oneOf` was invisible HERE and caught
+ * THERE. Two walks agree by luck. Both methods now share one `holders()` list, and every holder it
+ * reaches is proven by
+ * tests/unit/SchemaValidatorTest::testPublicationLeavesOutOnlyWhatNothingCanRead().
+ *
+ * A filter-added or module tool is held by the same two methods at RUNTIME instead: the keyword is
+ * left out of what `tools/list` publishes with a `registry_strip` event naming it, or the entry does
+ * not register at all with reason `schema_constraint_unreadable`. Both are asserted against a real
+ * site by tests/integration/SchemaKeywordsTest.php.
  *
  * WHY THE ANNOTATIONS NEED ONE. `wpmcp_tools()` drops an entry whose annotations are
  * incomplete, so a built-in that forgot them would VANISH from the listing - loud, but
@@ -46,15 +79,28 @@ final class ToolContractTest extends TestCase
     public function testEveryBuiltInSchemaStaysInsideTheDialect(): void
     {
         foreach (WireSerializationTest::catalog() as $name => $tool) {
-            foreach (self::keywordsIn($tool['inputSchema']) as $pointer => $keyword) {
-                self::assertContains(
-                    $keyword,
-                    SchemaValidator::KEYWORDS,
-                    "The inputSchema of {$name} uses '{$keyword}' at {$pointer}, which"
-                    . ' SchemaValidator does not enforce - so that constraint is'
-                    . ' decoration. Either implement the keyword or stop using it.'
-                );
-            }
+            [$published, $removed] = SchemaValidator::publishable($tool['inputSchema']);
+
+            self::assertSame(
+                [],
+                $removed,
+                "The inputSchema of {$name} declares " . implode(', ', $removed) . ', which nothing'
+                . ' here can read - so that constraint is decoration. tools/list would leave it out'
+                . " of a third party's tool; a built-in must not need leaving out."
+            );
+            self::assertSame(
+                $tool['inputSchema'],
+                $published,
+                "The inputSchema of {$name} does not survive publishable() unchanged although nothing"
+                . ' was reported as removed, which means the walk edits a schema it had no complaint'
+                . ' about - and the tools/list emitter publishes what it returns.'
+            );
+            self::assertNull(
+                SchemaValidator::unreadableConstraint($tool['inputSchema']),
+                "The inputSchema of {$name} declares a constraint core reads differently from what it"
+                . ' says, at ' . (string) SchemaValidator::unreadableConstraint($tool['inputSchema'])
+                . ". A third party's tool carrying this does not register at all."
+            );
 
             foreach (self::typesIn($tool['inputSchema']) as $pointer => $type) {
                 self::assertContains(
@@ -224,6 +270,11 @@ final class ToolContractTest extends TestCase
             // counts rows. Nothing destroyed, the same answer twice for the same site, and no
             // other server reached.
             'list-content-types' => [false, true,  false],
+            // Sprint ACF-READ. get-acf-values reads ACF field values through ACF's own REST
+            // formatter and writes nothing. Nothing destroyed, the same answer twice for the same
+            // object and the same caller, and no other server reached - the reduction asks core's
+            // own REST controller in-process.
+            'get-acf-values'     => [false, true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();
@@ -563,43 +614,6 @@ final class ToolContractTest extends TestCase
             ]),
             'A stdClass properties map must not trip the check.'
         );
-    }
-
-    /**
-     * Every keyword used anywhere in a schema, pointer => keyword.
-     *
-     * Recurses through `properties` and `items` only, because those are the two positions
-     * that hold sub-schemas in this dialect. A keyword hiding under something else would
-     * not be enforced either, and would be flagged at its own level.
-     *
-     * @return array<string, string>
-     */
-    private static function keywordsIn($schema, string $pointer = ''): array
-    {
-        $map = self::asMap($schema);
-
-        if ($map === null) {
-            return [];
-        }
-
-        $found = [];
-
-        foreach ($map as $keyword => $value) {
-            $found[$pointer . '/' . $keyword] = (string) $keyword;
-        }
-
-        foreach ((array) self::asMap($map['properties'] ?? null) as $name => $sub) {
-            $found = array_merge(
-                $found,
-                self::keywordsIn($sub, $pointer . '/properties/' . $name)
-            );
-        }
-
-        if (isset($map['items'])) {
-            $found = array_merge($found, self::keywordsIn($map['items'], $pointer . '/items'));
-        }
-
-        return $found;
     }
 
     /**

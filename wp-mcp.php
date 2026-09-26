@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP MCP
  * Description: Self-hosted MCP server for WordPress with admin-minted, hashed-at-rest session tokens. Read tools by default; admin-scope adds content/media/comment writes and (opt-in) jailed theme code editing. Endpoint: /wp-json/wpmcp/mcp, credential: Authorization: Bearer <token>
- * Version: 1.1.2
+ * Version: 1.2.0
  * Requires at least: 6.9
  * Requires PHP: 8.1
  * Author: Max Konstantinovski
@@ -50,7 +50,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('WPMCP_VER', '1.1.2');
+define('WPMCP_VER', '1.2.0');
 define('WPMCP_TABLE', 'wpmcp_tokens');
 
 /**
@@ -445,12 +445,37 @@ define('WPMCP_TRACE_FILE_OPTION', 'wpmcp_trace_file_left');
 /* ============================================================
  * Activation / upgrade: create the tokens table, migrate data
  * ========================================================== */
+/**
+ * EVERY CRON HOOK THIS PLUGIN SCHEDULES, AS ONE LIST (sprint CORE-FIX).
+ *
+ * THE DEFECT THIS CLOSES was an asymmetry, not a missing call: activation scheduled through
+ * one literal, deactivation hand-rolled `wp_next_scheduled()` + `wp_unschedule_event()` -
+ * which removes exactly ONE event - and uninstall.php used `wp_clear_scheduled_hook()`, which
+ * removes ALL of them. So a site that had somehow accumulated two events for the hook (a
+ * double activation with a hijacked `pre_schedule_event` filter, a restored database, a
+ * migration that copied the cron array) was left with a scheduled job after deactivation,
+ * firing against a plugin that is not loaded. Three sites, three spellings of "the same job".
+ *
+ * ONE LIST, AND REGISTRATION AND REMOVAL BOTH WALK IT, so a second hook added in 2027 is
+ * scheduled and cleared by the same enumeration rather than by whoever remembers.
+ * uninstall.php cannot call this - WordPress includes that file in a request where this one
+ * has not run - so it repeats the names as literals and tests/unit/CronHooksTest.php holds its
+ * list against this one, exactly as UninstallTest does for the option names.
+ *
+ * @return list<string>
+ */
+function wpmcp_cron_hooks() {
+    return array('wpmcp_flush_expired');
+}
+
 register_activation_hook(__FILE__, 'wpmcp_activate');
 function wpmcp_activate() {
     wpmcp_install();
 
-    if (!wp_next_scheduled('wpmcp_flush_expired')) {
-        wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'wpmcp_flush_expired');
+    foreach (wpmcp_cron_hooks() as $wpmcp_hook) {
+        if (!wp_next_scheduled($wpmcp_hook)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', $wpmcp_hook);
+        }
     }
 
     // NOTHING HERE FOR THE TRACE LOG SINCE 1.1.2, and its absence is the point: it is a
@@ -794,11 +819,24 @@ function wpmcp_client_columns_notice() {
         . ' privilege: grant it, then deactivate and reactivate this plugin to add them.</p></div>';
 }
 
-/** Is the file-versions table really there? The upgrade gate, not decoration. */
+/**
+ * Is the file-versions table really there? The upgrade gate, not decoration.
+ *
+ * esc_like() ON THE PATTERN, AND IT IS NOT DECORATION EITHER (sprint CORE-FIX). `_` is a LIKE
+ * wildcard matching ANY ONE CHARACTER, and every table name this plugin has contains three of
+ * them (`wp_wpmcp_file_versions`). `get_var()` returns the FIRST row, so on a database that
+ * holds a same-shaped neighbour - `wp_wpmcpXfile_versions`, or another site's prefix that
+ * differs by one character - the unescaped pattern could match it first, `$found === $table`
+ * would be false, this gate would report the table missing, and wpmcp_install() would run
+ * dbDelta on EVERY REQUEST for ever on a site where nothing is wrong. Needs an oddly named
+ * neighbour to trigger, which is why it had never been seen; the fix is one call, so the
+ * likelihood does not matter. $wpdb->esc_like() is core's own (wp-db.php), and prepare() then
+ * quotes the result - the two are complementary and neither substitutes for the other.
+ */
 function wpmcp_versions_table_exists() {
     global $wpdb;
     $table = wpmcp_versions_table();
-    $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+    $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
     return $found === $table;
 }
 
@@ -808,12 +846,19 @@ function wpmcp_versions_table_exists() {
  * A SECOND FUNCTION RATHER THAN A TABLE ARGUMENT on the token one, because the two
  * tables are checked for different reasons at different points and the token version's
  * name says which table it means at every call site.
+ *
+ * esc_like() FOR THE SAME REASON AS THE TABLE PROBE ABOVE, and here it is sharper: every
+ * column name these two are ever called with contains `_` - window_secs, active_until,
+ * last_used_at, client_name, client_version - and unlike the table probe this
+ * one does NOT compare the answer with what it asked for. A non-empty result is the whole
+ * assertion, so `LIKE 'client_name'` matching a column called `clientXname` would report a
+ * column that is not there, and the installer would skip an ALTER the table needs.
  */
 function wpmcp_versions_column_exists($column) {
     global $wpdb;
     $found = $wpdb->get_col($wpdb->prepare(
         'SHOW COLUMNS FROM ' . wpmcp_versions_table() . ' LIKE %s',
-        $column
+        $wpdb->esc_like($column)
     ));
     return is_array($found) && $found !== array();
 }
@@ -823,7 +868,7 @@ function wpmcp_token_column_exists($column) {
     global $wpdb;
     $found = $wpdb->get_col($wpdb->prepare(
         'SHOW COLUMNS FROM ' . wpmcp_table() . ' LIKE %s',
-        $column
+        $wpdb->esc_like($column)
     ));
     return is_array($found) && $found !== array();
 }
@@ -1347,9 +1392,16 @@ function wpmcp_migrate_token_lifetimes() {
     );
 }
 
+/**
+ * Deactivation removes every event of every hook wpmcp_cron_hooks() names.
+ *
+ * wp_clear_scheduled_hook() AND NOT wp_next_scheduled() + wp_unschedule_event(): the pair
+ * removes the NEXT event and leaves any others, and core's own remover already loops
+ * (wp-includes/cron.php). It is also what uninstall.php has always called, so the two paths
+ * now do the same thing to the same list.
+ */
 register_deactivation_hook(__FILE__, function () {
-    $ts = wp_next_scheduled('wpmcp_flush_expired');
-    if ($ts) { wp_unschedule_event($ts, 'wpmcp_flush_expired'); }
+    foreach (wpmcp_cron_hooks() as $hook) { wp_clear_scheduled_hook($hook); }
 });
 
 /* ============================================================
@@ -1549,6 +1601,32 @@ function wpmcp_file_versions_for($rel, $limit = 50) {
     return is_array($rows) ? $rows : array();
 }
 
+/**
+ * The stored form of a token. sha256, and it STAYS sha256.
+ *
+ * NOT `wp_fast_hash()`, AND THE REASON IS COST AND NOT IMPOSSIBILITY (sprint DELETIONS, corrected
+ * in round 2 - the first version of this note said the migration could not be done, and that was
+ * false in both of its halves). Core's is deterministic and would work in the
+ * `WHERE token_hash = %s` lookup: `'$generic$' . base64url(sodium_crypto_generichash($m,
+ * 'wp_fast_hash_6.8+', 30))`, fixed key, no random salt, 49 characters, fits `char(64)`.
+ *
+ * THE MIGRATION IS POSSIBLE AND IT ENDS BY ITSELF. The two formats are distinguishable at rest -
+ * 64 hex digits against a 49-character string starting `$generic$` - so a dual read can tell which
+ * a row holds without guessing, and a lazy rehash on a successful old match is safe. And it has a
+ * definite end: `wpmcp_mint()` clamps `expires_at` to WPMCP_MAX_LIFETIME (365 days, :1854) and the
+ * hourly cron deletes every row past it (`wpmcp_flush_expired_cb`), so every sha256 row on any
+ * site is gone within a year of the last mint that wrote one. The fallback could be deleted then.
+ *
+ * WHAT IT IS NOT WORTH. There is no defect being fixed: core's own docblock names exactly our
+ * input class ("security keys and application passwords which are generated with high entropy"),
+ * and sha256 over 256 bits from `random_bytes` needs no salt and no stretching. Against that, the
+ * swap adds a second hash and a second lookup to every authentication for up to a year, leaves
+ * this function in place for the whole of that year, and puts every live token behind a fallback
+ * branch whose one mistake is a site-wide lockout. A year of dual-read machinery to change a
+ * correct hash for another correct hash is not a trade worth making. Leave it - but if a future
+ * sprint decides otherwise, the shape above is the one to build, not a one-shot rehash: only the
+ * hash is at rest, so there is nothing to rehash from without the plaintext.
+ */
 function wpmcp_hash($raw) {
     // High-entropy token (256-bit) -> a fast cryptographic hash is appropriate.
     return hash('sha256', $raw);
@@ -1581,6 +1659,13 @@ function wpmcp_client_ip() {
  *   content_type_deny the POST was not application/json (content_type)
  *   body_too_large    CONTENT_LENGTH over the cap      (length)
  *   registry_reject   a filter-added tool was refused  (tool, reason)
+ *   registry_strip    a tool was LISTED with a schema keyword left out, because nothing
+ *                     on this server can read it - one outside the validator's dialect,
+ *                     or a non-array `required`. The tool registered and
+ *                     runs; only the PUBLISHED schema is shorter, so it never advertises
+ *                     a constraint this server does not keep. Fires per tools/list, not
+ *                     per call, and the keyword paths it names are sanitised and capped
+ *                     (tool, keywords)
  *   stale_backup_sweep a schema upgrade collected what an older version left beside
  *                     theme files                   (found, moved, skipped_*, *_paths)
  *   sql_select        sql-select ran a statement     (token_id, user_id, row_count,

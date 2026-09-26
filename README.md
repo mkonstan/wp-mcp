@@ -236,8 +236,9 @@ table of log lines to check when a client will not connect.
 
 ## The tools
 
-Thirty-nine tools. Each declares the four MCP annotation hints, so a client can tell a
-listing from a deletion before it asks you to approve anything.
+Thirty-nine tools, and a fortieth - `get-acf-values` - on a site that has Advanced Custom
+Fields. Each declares the four MCP annotation hints, so a client can tell a listing from a
+deletion before it asks you to approve anything.
 
 | Tool | Scope | readOnly | destructive | idempotent | openWorld |
 |---|---|:--:|:--:|:--:|:--:|
@@ -256,6 +257,7 @@ listing from a deletion before it asks you to approve anything.
 | `get-user` | read | yes | no | yes | no |
 | `get-option` | read | yes | no | yes | no |
 | `list-content-types` | read | yes | no | yes | no |
+| `get-acf-values` (needs ACF) | read | yes | no | yes | no |
 | `create-post` | admin | no | no | no | no |
 | `update-post` | admin | no | yes | yes | no |
 | `delete-post` | admin | no | yes | yes | no |
@@ -310,8 +312,13 @@ with the trash switched off (`EMPTY_TRASH_DAYS` 0) deletes it outright. `delete-
 different because WordPress is: unless the site defines `MEDIA_TRASH`, an attachment is
 deleted permanently, file and all, whatever `force` says. Both answer `deleted` and
 `trashed` as read back after the call, never as assumed. Every argument is validated
-against the tool's schema before the tool runs: a wrong type or an unknown key comes back
-as an error naming the field, and the tool never executes.
+against the tool's schema before the tool runs, by WordPress's own
+`rest_validate_value_from_schema()`: a wrong type, an unknown key, or a value that violates
+any constraint the schema declares - a `pattern`, a `format`, a `minItems`, a number bound -
+comes back as an error naming the field, and the tool never executes. Since 1.2.0 the
+enforced set is every keyword WordPress itself validates but one - `oneOf`, which this server
+declines rather than half-honour - where before it was a hand-written subset of ten. That is
+a behaviour change: a call that violated a declared constraint used to be let through.
 
 Every description says what the tool returns - field names and their formats - so a
 client does not have to call a tool to learn its shape.
@@ -808,8 +815,90 @@ a site running ACF Pro:
   would normally build.
 
 So: set a field once in wp-admin before handing it to an agent, or keep the tools to
-simple field types. There is no ACF-specific code in this plugin, deliberately - it is one
-vendor's convention, and a plugin that special-cased it would be wrong for the next one.
+simple field types. **And prefer `get-acf-values` for reading them** - it asks ACF rather
+than the meta table, so it gets the formatted value, the permission reduction and the
+layout metadata that a raw meta read cannot have. The section below is the whole of it.
+
+### ACF field values (`get-acf-values`)
+
+Present only on a site that has Advanced Custom Fields, and only if the three functions the
+module declares are there - `acf_format_value_for_rest`, `get_field_object` and
+`get_field_objects`, which is a detected ACF **5.11** or newer. On any other site the tool is
+absent from `tools/list` entirely, and **Settings > WP MCP** says which symbols were missing.
+
+```json
+{ "object_type": "post", "id": 42 }
+```
+
+`object_type` is `post`, `term`, `user` or `options` (default `post`); `id` is required for the
+first three; an optional `fields` list narrows the read to named fields. It returns `object`, an
+`acf` object saying which guarantees this site provides, and `fields` - each with `key`, `name`,
+`type`, `label` and `value`.
+
+**It needs permission to EDIT the object**, not just to read it: `edit_post`, `edit_term`,
+`edit_user` or `manage_options`. These fields are rendered on the editor screen, and a read that
+mirrors that screen is gated by what opens it. A post you may not read answers exactly as a post
+that does not exist does.
+
+**Values come from ACF's own REST path, not from `get_field()`.** ACF checks no capability on its
+value path, and since 6.8.7 and 6.8.10 it reduces User, Relationship, Post Object, Image, Gallery,
+File and Icon Picker values to bare IDs for a caller who cannot read the referenced object - but
+only in its REST path. ACF's own Security Principles page draws that line: `get_field()` is a
+trusted-context accessor, REST is the permission-checked surface. So a Post Object pointing at
+somebody else's draft comes back as `1234` for a token that may not read it and expanded for one
+that may, and that decision is ACF's, delegated to the target post type's own REST controller.
+
+**An expanded reference is a NAMED SUBSET, never the database row.** ACF's `return_format: object`
+hands back a live `WP_Post` or `WP_User`, and JSON-encoding one of those serialises every public
+property - which for a `WP_Post` includes `post_password` in plaintext and for a `WP_User` includes
+`user_pass`. Neither reaches a caller here. A post arrives as `id`, `type`, `status`, `title`,
+`slug`, `author`, `parent`, `menu_order`, `date`, `date_gmt`, `modified`, `mime_type`,
+`password_protected`, and `excerpt` and `content` only when the post is not password-protected -
+core's own `post_password_required()` decides, the same function `wp/v2` reasons with, and the
+withholding is reported rather than silent. A user arrives as `id` and `name`, plus `login`,
+`email`, `roles` and `registered` for a caller with `list_users` or `edit_user` on that user, which
+is exactly what `get-user` gives the same caller. A term arrives as `id`, `taxonomy`, `name`,
+`slug`, `parent`, `count`. Any other object is replaced by its class name and its id rather than
+serialised.
+
+**Only fields the object has already saved are listed.** ACF resolves a field by name through a
+hidden reference row, and a field never saved has none - the same fact the post-meta note above
+describes from the other side.
+
+**A Flexible Content layout an editor switched OFF comes back marked rather than missing.** ACF
+6.5 added that toggle and implemented it in `load_value`, keeping the row only when `is_admin()` -
+never true for a REST request. So wp-admin shows four blocks and ACF hands a REST caller three,
+with nothing saying a fourth exists. A `flexible_content` field therefore also returns `rows`:
+
+```json
+"rows": [
+  { "index": 0, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false },
+  { "index": 1, "layout": "gallery", "label": "Autumn set", "renamed": true,  "disabled": true,
+    "values": { "blocks_1_heading": "...", "blocks_1_target": 1234,
+                "blocks_1_meta": { "caption": "..." } } },
+  { "index": 2, "layout": "hero",    "label": "Hero",      "renamed": false, "disabled": false }
+]
+```
+
+`label` is the label the editor sees: the rename when a layout has one, and otherwise the title
+ACF's own `get_layout_title()` returns, so a site that filters its layout titles through
+`acf/fields/flexible_content/layout_title` gets the same label here as in wp-admin. A disabled row
+carries its own `values`, formatted and permission-reduced like everything else - including a
+sub-field that is itself a group, a clone, a repeater or another Flexible Content field, because
+those values are loaded with `acf_get_value()`, the same call ACF's own row loader makes.
+
+The `acf` object in every read says which guarantees the site provides. Disabled and renamed rows
+are reported only on ACF **Pro 6.5** or newer, where the feature exists at all; below that
+`layout_metadata` is `false` and there are no disabled layouts to report. The filtered label is
+older, so `layout_title` is reported separately and is `true` on any Pro version that has the
+method. Nothing about this is guessed from a hidden meta key - the state comes from ACF's own public
+accessors, and the values from its own loader.
+
+**No ACF schema tools.** Field structure reaches a caller as metadata on a values read - the key,
+name, type and label of the fields this object holds, and the layout of each row it has - and never
+as a catalogue of what the site could hold. ACF's own abilities already describe field groups.
+
+**Nothing here writes.** `get-acf-values` is a read-scope tool and the module has no write half yet.
 
 ## HTTPS enforcement depends on your proxy
 
@@ -941,9 +1030,17 @@ that read and write files inside the active theme.
 The switch is not the only thing that has to be true. If `DISALLOW_FILE_EDIT` or
 `DISALLOW_FILE_MODS` is set in your `wp-config.php`, the six are **not listed at all**,
 whatever the switch says - a tool that can never run is not advertised. Either constant
-also turns the feature off for every token, including one minted before you set it. The
-third gate is the token's user: they need `edit_themes`, and a token whose user does not
-have it sees the tools listed (another token's user may) and is refused when it calls one.
+also turns the feature off for every token, including one minted before you set it. A
+hardening plugin that answers `false` from WordPress's own `file_mod_allowed` filter does
+the same thing.
+
+**On a multisite network the tools are listed only to a network administrator.** WordPress
+itself denies `edit_themes` to everybody else on a network, Site Administrators included,
+so anyone else would have been shown six tools and refused every one of them.
+
+The last gate is the token's user's role: they need `edit_themes`, and a token whose user
+does not have it sees the tools listed (another token's user may) and is refused when it
+calls one.
 
 The file API is fenced:
 
@@ -1172,11 +1269,28 @@ the built-ins are assembled and before scope filtering. An entry must declare a 
 and a callable `run`. An entry missing any of them is refused at registration rather than
 given a default, and it cannot re-declare a built-in's name.
 
+**Since 1.2.0 the `inputSchema` is held to what WordPress can validate.** A keyword outside that
+set - `$schema`, `$ref`, `allOf`, `not`, `const`, `oneOf`, a typo, or a `required` that is not an
+array - is left out of what `tools/list` publishes, and a `registry_strip` event names your tool
+and the keyword so you can find out why the constraint never fired; the tool registers and runs.
+Three arrangements go further and refuse the ENTRY, reason `schema_constraint_unreadable`, because
+leaving them out would change a verdict WordPress is already giving: an `exclusiveMinimum` or
+`exclusiveMaximum` with no `minimum`/`maximum` beside it, one written as anything but a boolean,
+and `enum: []`. See the 1.2.0 entry in CHANGELOG.md.
+
 Since 1.1.2 the plugin's own feature files register through the same checks. The menu tools
-live in `modules/menus.php` and `list-content-types` in `modules/discovery.php`, each one line
-of `wpmcp_register_module()` and nothing trusted: the entries a module returns meet the very
-list above, on the way out of registration, and a rejected one is named in the log with its
-reason. See **The module seam** in ARCHITECTURE.md. It changes nothing for this filter.
+live in `modules/menus.php`, `list-content-types` in `modules/discovery.php` and
+`get-acf-values` in `modules/acf.php`, each one line of `wpmcp_register_module()` and nothing
+trusted: the entries a module returns meet the very list above, on the way out of registration,
+and a rejected one is named in the log with its reason. See **The module seam** in
+ARCHITECTURE.md. It changes nothing for this filter.
+
+A module that needs another plugin also declares the API face it needs, and registers only when
+every symbol in it is present - so on a site without Advanced Custom Fields there is no
+`get-acf-values` in `tools/list` at all, and a call to that name answers the same
+`Unknown tool` a name nobody registered gets. **Settings > WP MCP prints a Feature modules
+table** saying, per module, whether it is serving and which symbols it is missing, so an absent
+feature can be told apart from a broken plugin.
 
 Two things about the description. A `description`, or any
 `inputSchema.properties.*.description`, over 1,000 characters is refused: clients cap

@@ -69,6 +69,7 @@ WpMcp\Tests\Integration\ListEnvelopeTest	98
 WpMcp\Tests\Integration\WriteToolCapabilityTest	95
 WpMcp\Tests\Integration\TokenLifetimeMigrationTest	92
 WpMcp\Tests\Integration\ConnectorAddressPoolTest	91
+WpMcp\Tests\Integration\SchemaKeywordsTest	90
 WpMcp\Tests\Integration\AuthEventsTest	88
 WpMcp\Tests\Integration\HandshakeTest	86
 WpMcp\Tests\Integration\ToolRegistryTest	86
@@ -97,6 +98,7 @@ WpMcp\Tests\Unit\ProtocolVersionTest	0
 WpMcp\Tests\Unit\SchemaValidatorTest	0
 WpMcp\Tests\Unit\SqlSelectRunTest	0
 WpMcp\Tests\Unit\SurfaceSweepTest	0
+WpMcp\Tests\Unit\TierImportTest	0
 WpMcp\Tests\Unit\TokenLifetimeTest	0
 WpMcp\Tests\Unit\TokenRenewTest	0
 WpMcp\Tests\Unit\ToolContractTest	0
