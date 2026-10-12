@@ -13,9 +13,14 @@ name: CI
 # reusing - never silently. The unit tier and the lint job ALWAYS run, docs included,
 # because VersionConsistencyTest ties the CHANGELOG's top heading to the version in the
 # code and a changelog edit really can fail a test.
+# THE WORK BRANCH IS `next`. It was called `v1.1` until 2026-10-12, which had stopped being
+# true three releases earlier: that one branch carried 1.1.0, 1.1.1, 1.1.2, 1.2.0 and now
+# 1.3.0, so its name described only the first of them. `v1.1` stays in this list for one
+# cycle so a push to either name is tested, and comes out on the next commit that touches
+# this file. A branch missing from this list is pushed WITHOUT CI and nothing says so.
 on:
   push:
-    branches: [main, v1, v1.1, ci-lab]
+    branches: [main, v1, v1.1, next, ci-lab]
   pull_request:
     branches: [main]
   schedule:
