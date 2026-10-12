@@ -4,19 +4,30 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.2.1
 
-**Unreleased.** The cycle is open and nothing is in it yet.
+**Unreleased.** The cycle is open.
 
-**Why this number is a PATCH.** Nothing is approved for this cycle, so its content is unknown, and
+**Why this number is a PATCH.** The release classification remains open, and
 `docs/RELEASE.md`'s rule is patch for a fix cycle and minor when the cycle adds features. A patch
-number is the honest default while there is nothing to read it off: it claims the least. **If a
+number remains the default until the cycle is classified: it claims the least. **If a
 feature lands, bump this to `## 1.3.0` - in `wp-mcp.php`'s `Version:` header and `WPMCP_VER` too -
 BEFORE that release is cut, not after it.** The three strings move together or
 `tests/unit/VersionConsistencyTest.php` goes red, which is the point of it.
 
-**And why this section exists at all, empty.** Without it every dev zip cut during this cycle
+**And why this section exists at all.** Without it every dev zip cut during this cycle
 reports `Version: 1.2.0`, which is false - those builds are not that release, they are what comes
 after it. Only `build.txt` would tell them apart, and sprint 14c exists because for a while nothing
 could. With it a dev zip reads as the version it will become, plus its own build stamp.
+
+- **`site-info` returns `db_prefix`**, the current site's table prefix for `sql-select`,
+  including the blog id on a multisite subsite - so the first query need not guess `wp_`.
+
+**THE TRIGGER IN THE PARAGRAPH ABOVE HAS NOW FIRED, and this note is here so a release does not
+cut on the wrong number.** `db_prefix` is a new response field, which is a FEATURE by
+`docs/RELEASE.md`'s rule, so this section is due to become `## 1.3.0` along with `wp-mcp.php`'s
+`Version:` header and `WPMCP_VER`. **It has deliberately NOT been bumped yet**: all three strings
+still read 1.2.1 and agree, so `VersionConsistencyTest` is green, and the number a cycle ships
+under is the repository owner's call rather than something a feature commit should decide for him.
+**Settle it before cutting any release from this branch.**
 
 ## 1.2.0
 

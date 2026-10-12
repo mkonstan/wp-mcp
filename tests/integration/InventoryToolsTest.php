@@ -197,6 +197,25 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
         Fixtures::purge();
     }
 
+    /**
+     * The required db_prefix must reach the live payload, not just outputSchema.
+     * Read the expectation from this site: neither wp_ nor the network base prefix
+     * is safe to assume. The unit getter test separately proves a non-default prefix
+     * and a second site switch, which default-prefix integration sites cannot prove.
+     */
+    public function testSiteInfoPayloadReportsTheSitesOwnDatabasePrefix(): void
+    {
+        $prefix = trim(WpCli::evaluate('global $wpdb; echo $wpdb->prefix;'));
+        self::assertNotSame('', $prefix, 'Could not read the site database prefix through wp-cli.');
+
+        $info = $this->mcp(self::$adminReadToken)->callTool('site-info');
+        self::assertFalse($info->isError, $info->text);
+
+        $data = $info->data();
+        self::assertArrayHasKey('db_prefix', $data, 'site-info omits its required db_prefix field.');
+        self::assertSame($prefix, $data['db_prefix'], 'site-info does not report this site\'s own database prefix.');
+    }
+
     /* ------------------------------------------------------------------
      * G1 - list-users, as core's REST endpoint draws the line
      * ---------------------------------------------------------------- */

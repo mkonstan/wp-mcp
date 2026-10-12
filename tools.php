@@ -719,6 +719,18 @@ function wpmcp_site_info_shape() {
             'description' => 'How many plugins are active. A count, never the list: a plugin inventory is not a read tool\'s to hand out.',
             'get'         => function ($header) { return count((array) get_option('active_plugins', array())); },
         ),
+        // A guessed wp_ made the first sql-select fail with "no such table" on a site
+        // whose prefix was WsEV9y_. Read the current site's prefix, which already
+        // includes the blog id on a multisite subsite; the network's base prefix is wrong there.
+        'db_prefix' => array(
+            'type'        => 'string',
+            'description' => 'The current site\'s table prefix for sql-select. Includes the blog id on a multisite subsite.',
+            'get'         => function ($header) {
+                global $wpdb;
+
+                return (string) $wpdb->prefix;
+            },
+        ),
         // NESTED, and not `wpmcp_version` beside `wp_version`. Two keys one character apart,
         // one meaning WordPress and the other meaning this plugin, is a misreading waiting to
         // happen in exactly the situation this field exists for: somebody trying to work out
@@ -2423,10 +2435,13 @@ function wpmcp_core_tools() {
                 'openWorldHint' => false,
             ),
             // The first sentence still ends by character 50, which is all a client shows
-            // until a tool is loaded. WHAT IT RETURNS IS NO LONGER SPELLED OUT HERE: this
-            // tool declares an outputSchema, and the field list lives in it with a
-            // description per field (the pilot, D19 - see wpmcp_site_info_shape()).
-            'description' => 'Get name, URL, WP version, theme, plugin count. Also wp_mcp:'
+            // until a tool is loaded. Name db_prefix after that summary so an agent
+            // can discover it before guessing table names in information_schema.
+            // The complete field list lives in outputSchema with a description per
+            // field (the pilot, D19 - see wpmcp_site_info_shape()).
+            'description' => 'Get name, URL, WP version, theme, plugin count.'
+                . ' Also db_prefix: the current site\'s database table prefix, including'
+                . ' the blog id on a multisite subsite. Also wp_mcp:'
                 . ' this plugin\'s own version and build, because "which build is this site'
                 . ' running" is a question an agent has to be able to answer without leaving'
                 . ' the tool surface. Every returned field is described in outputSchema.',
