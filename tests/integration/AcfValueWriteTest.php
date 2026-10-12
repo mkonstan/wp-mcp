@@ -26,6 +26,22 @@ final class AcfValueWriteTest extends FixtureIntegrationTestCase
     private static function fieldName(string $suffix): string { return self::prefix() . $suffix; }
     private static function label(): string { return Fixtures::name('acf-write-admin'); }
 
+    /**
+     * Why this class cannot run here, or ''. Set once, read per test.
+     *
+     * WHY THE SKIP IS NOT IN setUpBeforeClass, which is where it started and where it broke CI.
+     * A skip raised from setUpBeforeClass aborts the class before PHPUnit emits ANY testcase, so the
+     * class is simply absent from the JUnit file - and `bin/ci-merge-junit.php` reports it as
+     * "never ran", which is a CI failure rather than a skip. That is exactly what happened on the
+     * first push of this class: 1030 testcases, 0 failures, 0 errors, 19 skipped, and a red run.
+     * Both legs of the integration tier failed on an absence, not on a defect.
+     *
+     * Skipping PER TEST instead emits one skipped testcase per method, so a bare host records
+     * "this ran and declined" rather than "this is missing". AcfValueReadTest already does exactly
+     * this; it is the established pattern here and this class now follows it.
+     */
+    private static string $skip = '';
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -33,8 +49,23 @@ final class AcfValueWriteTest extends FixtureIntegrationTestCase
         $ready = trim(WpCli::evaluate(
             'echo (int) (function_exists("acf_add_local_field_group") && function_exists("acf_add_options_page")'
             . ' && function_exists("acf_get_field_type") && acf_get_field_type("repeater"));'));
-        if ($ready !== '1') { self::markTestSkipped('ACF Pro with options pages and repeater is required for acf-data write tests.'); }
+
+        if ($ready !== '1') {
+            self::$skip = 'ACF Pro with options pages and repeater is required for acf-data write tests.';
+
+            return;
+        }
+
         self::buildFixtures(self::build(...), self::destroy(...));
+    }
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (self::$skip !== '') {
+            self::markTestSkipped(self::$skip);
+        }
     }
 
     private static function build(): void
