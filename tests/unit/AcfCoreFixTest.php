@@ -368,7 +368,7 @@ final class AcfCoreFixTest extends TestCase
         self::assertNotContains('->get_disabled_layouts()', $missing);
 
         self::assertSame(
-            ['layout_metadata' => false, 'layout_title' => false],
+            ['write_values' => false, 'options_pages' => false, 'layout_metadata' => false, 'layout_title' => false],
             \wpmcp_module_face_capabilities('acf'),
             'The two optional capabilities are not reported separately, so the tool cannot tell a'
             . ' caller that this site filters its layout titles but has no disable/rename feature -'

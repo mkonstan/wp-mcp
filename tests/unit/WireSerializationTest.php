@@ -314,9 +314,9 @@ final class WireSerializationTest extends TestCase
         }
 
         self::assertCount(
-            40,
+            43,
             $tools,
-            'The catalog is not 39 tools any more. That is the product (see the build'
+            'The catalog is not 43 tools any more. That is the product (see the build'
             . " plan's constraints), so a change in the count is a decision, not a"
             . ' detail - update this number deliberately. Got: ' . implode(', ', array_keys($tools))
         );

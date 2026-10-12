@@ -5525,7 +5525,74 @@ function wpmcp_option_allow_list() {
         'permalink_structure' => 'string',
         'siteurl'             => 'string',
         'home'                => 'string',
+        'blog_public'         => 'integer',
+        'users_can_register'  => 'integer',
+        'default_role'        => 'string',
+        'WPLANG'              => 'string',
     );
+}
+
+/**
+ * Settings we may WRITE. This is deliberately a separate, narrower promise than the
+ * read list: a bad siteurl/home can sever the remote connection, permalinks change
+ * every public URL and need a rewrite flush, and gmt_offset belongs to timezone_string.
+ */
+function wpmcp_option_write_allow_list() {
+    return array(
+        'blogname'           => 'string',
+        'blogdescription'    => 'string',
+        'timezone_string'    => 'string',
+        'date_format'        => 'string',
+        'time_format'        => 'string',
+        'start_of_week'      => 'integer',
+        'WPLANG'             => 'string',
+        'blog_public'        => 'integer',
+        'users_can_register' => 'integer',
+        'default_role'       => 'string',
+    );
+}
+
+/** The read path's declared JSON types, also used for old and new write results. */
+function wpmcp_option_value($value, $type) {
+    if ($value === false) { return null; }
+    if ($type === 'integer') { return (int) $value; }
+    if ($type === 'number') { return (float) $value; }
+    return (string) $value;
+}
+
+/**
+ * Public registration must not grant access to code, users, settings, raw HTML or the network.
+ * Check grants rather than role names: a harmlessly named clone is just as dangerous.
+ * Both changing the default and enabling registration must use this one boundary.
+ * unfiltered_html permits arbitrary HTML and JavaScript: public registration makes
+ * stored XSS available to strangers, and XSS in wp-admin can reach an administrator's
+ * session. That is escalation, so refusing editor is an accepted product cost.
+ * This check reads the role's own capabilities and cannot see capabilities a plugin
+ * grants at runtime through user_has_cap or map_meta_cap.
+ */
+function wpmcp_registration_role_error($name) {
+    $role = is_string($name) && $name !== '' ? get_role($name) : null;
+    $label = is_scalar($name) ? (string) $name : gettype($name);
+    if (!$role) {
+        return new WP_Error('wpmcp_invalid_role', 'default_role "' . $label
+            . '" is unknown. Fix default_role first: choose an existing non-administrative role, e.g. subscriber.');
+    }
+    $administrative = array(
+        'create_users', 'edit_users', 'promote_users', 'manage_options', 'delete_users', 'remove_users',
+        'install_plugins', 'activate_plugins', 'install_themes', 'switch_themes', 'edit_plugins', 'edit_themes', 'edit_files',
+        'update_plugins', 'update_themes', 'update_core', 'unfiltered_html',
+        'manage_sites', 'create_sites', 'delete_sites', 'upgrade_network',
+    );
+    foreach ($role->capabilities as $capability => $granted) {
+        // Include the entire manage_network* family, including plugin-defined network grants.
+        if ($granted && (in_array($capability, $administrative, true) || strpos($capability, 'manage_network') === 0)) {
+            return new WP_Error('wpmcp_unsafe_role', 'default_role "' . $label . '" grants administrative capability "'
+                . $capability . '". Fix default_role first: choose an existing role without access to code, users, settings, raw HTML or the network, e.g. subscriber.'
+                . ' This agent-driven tool declines the change because its consequences are invisible at the call site.'
+                . ' You can still make the change in wp-admin.');
+        }
+    }
+    return null;
 }
 
 /**
@@ -5863,12 +5930,12 @@ function wpmcp_inventory_tools() {
         'annotations' => $readHints,
         'description' => 'Read one site setting from a fixed list. Args: name (required), one of'
             . ' blogname, blogdescription, timezone_string, gmt_offset, date_format, time_format,'
-            . ' start_of_week, permalink_structure, siteurl and home - values the public site'
-            . ' already shows. Every other name gets one identical refusal, whether or not such'
-            . ' an option exists. Returns name and value (start_of_week an integer, gmt_offset a'
+            . ' start_of_week, permalink_structure, siteurl, home, blog_public, users_can_register,'
+            . ' default_role and WPLANG. Every other name gets one identical refusal, whether or not such'
+            . ' an option exists. Returns name and value (start_of_week, blog_public and users_can_register integers, gmt_offset a'
             . ' number of hours, the rest strings). Needs permission to edit posts.',
         'inputSchema' => array('type' => 'object', 'properties' => array(
-            'name' => array('type' => 'string', 'description' => 'One of the ten option names the description lists.'),
+            'name' => array('type' => 'string', 'description' => 'One of the fourteen option names the description lists.'),
         ), 'required' => array('name')),
         'run' => function ($a) {
             if (!current_user_can('edit_posts')) { return wpmcp_cannot('read site options'); }
@@ -5897,6 +5964,132 @@ function wpmcp_inventory_tools() {
             }
 
             return array('name' => $name, 'value' => $value);
+        },
+    ),
+
+    'update-option' => array(
+        'write' => true,
+        // Replaces a value rather than adding one; a repeat has no further effect.
+        'annotations' => array(
+            'readOnlyHint' => false,
+            'destructiveHint' => true,
+            'idempotentHint' => true,
+            'openWorldHint' => false,
+        ),
+        'description' => 'Update one writable site setting. Args: name and value (required).'
+            . ' Writable: blogname, blogdescription, timezone_string, date_format, time_format,'
+            . ' start_of_week, WPLANG, blog_public, users_can_register, default_role.'
+            . ' siteurl, home, permalink_structure and gmt_offset are read-only.'
+            . ' String settings need strings; integer settings accept integers or integer strings.'
+            . ' blog_public and users_can_register allow 0 or 1; start_of_week allows 0 through 6.'
+            . ' default_role must exist and grant no access to code, users, settings, raw HTML or the network.'
+            . ' Enabling registration checks the current default_role too; fix unsafe defaults first.'
+            . ' Returns name, old_value, new_value (declared option types; null if absent) and changed.'
+            . ' Needs an admin-scope token and manage_options.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(
+            'name' => array('type' => 'string', 'description' => 'One of the writable option names in the description, e.g. blog_public.'),
+            'value' => array('type' => array('string', 'integer'), 'description' => 'New setting value: string or integer according to name, e.g. blog_public with 0.'),
+        ), 'required' => array('name', 'value')),
+        'run' => function ($a) {
+            // Core's update_option checks no capability. Gate EVERY branch before reads,
+            // validation, role lookups or writes; permission is the Settings screen's gate.
+            if (!current_user_can('manage_options')) { return wpmcp_cannot('update site options'); }
+
+            $allowed = wpmcp_option_write_allow_list();
+            $name = isset($a['name']) && is_string($a['name']) ? $a['name'] : '';
+            if (!array_key_exists($name, $allowed)) {
+                if (array_key_exists($name, wpmcp_option_allow_list())) {
+                    return new WP_Error('wpmcp_option_read_only', 'Option "' . $name . '" is read-only. Read it with get-option. Writable options: '
+                        . implode(', ', array_keys($allowed)) . '.');
+                }
+                return new WP_Error('wpmcp_option_not_listed', 'update-option writes only these options: '
+                    . implode(', ', array_keys($allowed)) . '. Example: name blog_public, value 0.');
+            }
+
+            if (!array_key_exists('value', $a)) {
+                return new WP_Error('wpmcp_invalid_param', 'value is required. Example: name blog_public, value 0.');
+            }
+            $value = $a['value'];
+            $type = $allowed[$name];
+            if ($type === 'integer') {
+                if (!is_int($value) && !(is_string($value) && preg_match('/^[0-6]$/D', $value))) {
+                    return new WP_Error('wpmcp_invalid_param', 'value for ' . $name . ' must be an integer or integer string in its allowed range. Example: value 0.');
+                }
+                $value = (int) $value;
+                $max = $name === 'start_of_week' ? 6 : 1;
+                if ($value < 0 || $value > $max) {
+                    return new WP_Error('wpmcp_invalid_param', 'value ' . $value . ' for ' . $name . ' must be between 0 and ' . $max . '. Example: value 0.');
+                }
+            } elseif (!is_string($value)) {
+                return new WP_Error('wpmcp_invalid_param', 'value for ' . $name . ' must be a string. Example: name blogname, value "My site".');
+            }
+
+            if ($name === 'default_role') {
+                $error = wpmcp_registration_role_error($value);
+                if ($error) { return $error; }
+            }
+            if ($name === 'users_can_register' && $value === 1) {
+                // Turning on registration arms a previously stored default, even if that
+                // default was written by hand. Use the effective role WordPress will assign.
+                $error = wpmcp_registration_role_error(get_option('default_role'));
+                if ($error) { return $error; }
+            }
+
+            // Persistence is a stored-row fact. get_option() can be forced by filters,
+            // hiding a real write or inventing a no-op. The read tool keeps its existing
+            // effective-value behavior; this write result deliberately uses raw rows.
+            global $wpdb;
+            $storedOld = wpmcp_raw_option($name);
+            if ($wpdb->last_error !== '') {
+                return new WP_Error('wpmcp_option_read_failed', 'Could not read stored option "' . $name
+                    . '" before updating; nothing was written. Check database read access, then retry.');
+            }
+            $old = $storedOld === null ? null : wpmcp_option_value($storedOld, $type);
+            if ($old === $value) {
+                return array('name' => $name, 'old_value' => $old, 'new_value' => $old, 'changed' => false);
+            }
+            $written = update_option($name, $value);
+            // Core still owns sanitization and write filters. Compare actual storage after
+            // the attempt, even when core returns false: false does not prove no row changed.
+            $storedNew = wpmcp_raw_option($name);
+            if ($wpdb->last_error !== '') {
+                return new WP_Error('wpmcp_option_read_failed', 'Update attempted for option "' . $name
+                    . '", but its stored result could not be read; it may have saved. Check the stored row and database read access before retrying.');
+            }
+            $new = $storedNew === null ? null : wpmcp_option_value($storedNew, $type);
+            $changed = $storedOld !== $storedNew;
+            if (!$written && !$changed && $new !== $value) {
+                return new WP_Error('wpmcp_option_update_failed', 'Could not update option "' . $name . '" to the requested value. Check its Settings screen and database write access.');
+            }
+            return array('name' => $name, 'old_value' => $old, 'new_value' => $new, 'changed' => $changed);
+        },
+    ),
+
+    'get-constants' => array(
+        // ADMIN SCOPE, following the inventory readers: write is the scope flag,
+        // not a claim of mutation. No name argument can cross this fixed boundary.
+        'write' => true,
+        'annotations' => $adminReadHints,
+        'description' => 'Read allowed wp-config constants. No arguments.'
+            . ' Returns constants keyed by name, each with defined (boolean) and value'
+            . ' (the actual constant value, or null when not defined). A defined false differs'
+            . ' from an absent constant. Only DISALLOW_FILE_EDIT, DISALLOW_FILE_MODS, WP_DEBUG,'
+            . ' WP_DEBUG_LOG, WP_DEBUG_DISPLAY, SCRIPT_DEBUG, WP_ENVIRONMENT_TYPE, MULTISITE and'
+            . ' WP_POST_REVISIONS are returned. Never reads database credentials, keys or salts.'
+            . ' Needs an admin-scope token and manage_options.',
+        'inputSchema' => array('type' => 'object', 'properties' => array(), 'additionalProperties' => false),
+        'run' => function ($a) {
+            if (!current_user_can('manage_options')) { return wpmcp_cannot('read wp-config constants'); }
+            if ($a) { return new WP_Error('wpmcp_invalid_param', 'get-constants takes no arguments. Example: arguments {}.'); }
+            $constants = array();
+            // Never enumerate all constants or accept a caller-supplied name: DB_PASSWORD,
+            // AUTH_KEY and salts would otherwise share this very same PHP lookup API.
+            foreach (array('DISALLOW_FILE_EDIT', 'DISALLOW_FILE_MODS', 'WP_DEBUG', 'WP_DEBUG_LOG',
+                'WP_DEBUG_DISPLAY', 'SCRIPT_DEBUG', 'WP_ENVIRONMENT_TYPE', 'MULTISITE', 'WP_POST_REVISIONS') as $name) {
+                $defined = defined($name);
+                $constants[$name] = array('defined' => $defined, 'value' => $defined ? constant($name) : null);
+            }
+            return array('constants' => $constants);
         },
     ),
 

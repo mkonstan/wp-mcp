@@ -2,9 +2,9 @@
 /**
  * Copyright (C) 2026 Max Konstantinovski. GPLv2 or later (see LICENSE).
  *
- * WP MCP MODULE: Advanced Custom Fields, READ ONLY. get-acf-values.
+ * WP MCP MODULE: Advanced Custom Fields values. get-acf-values and set-acf-values.
  *
- * ONE TOOL, VALUES ONLY, NO SCHEMA TOOLS (D9's 2026-09-23 scope cut). D9's older sprint-one
+ * VALUES ONLY, NO SCHEMA TOOLS (D9's 2026-09-23 scope cut). D9's older sprint-one
  * line listed discovery tools - `acf_get_field_groups`, `acf_get_fields` - and the later cut
  * governs: ACF's own abilities already describe field groups, and on jaygroup's seven live
  * groups every one carries `show_in_rest: 0`, so a schema tool of ours would describe fields no
@@ -17,7 +17,7 @@
  * ------------------------------------------------------------------------------
  * WHY THE VALUES DO NOT COME FROM get_field(), WHICH IS THE ENTIRE SECURITY STORY.
  *
- * ACF checks NO capability on the value path (`analysis/71` §4), and since 6.8.7 / 6.8.10 it
+ * ACF checks NO capability on the value path (`analysis/71` Ãƒâ€šÃ‚Â§4), and since 6.8.7 / 6.8.10 it
  * reduces User, Relationship, Post Object, Image, Gallery, File and Icon Picker values to bare
  * IDs when the caller cannot read the referenced object - but ONLY in its REST path.
  * `get_field()` inherits none of it and hands back fully expanded post objects, attachment
@@ -39,7 +39,7 @@
  * method on `acf_get_field_type($field['type'])`, which is NULL for a type nothing registered -
  * measured, same test. `'standard'` never touches the type object.
  *
- * `escape_html` IS NOT A PARAMETER AND MUST NOT BECOME ONE (`analysis/71` §2c-2d).
+ * `escape_html` IS NOT A PARAMETER AND MUST NOT BECOME ONE (`analysis/71` Ãƒâ€šÃ‚Â§2c-2d).
  * `acf_format_value_for_rest()` calls `acf_format_value()` with three arguments, so escaping is
  * always off - which is what this plugin's contract wants: ACF escapes on the way IN, in
  * `acf-form-functions.php`, exactly as D5 has us do. And `escape_html = true` is illegal with
@@ -80,12 +80,12 @@
  *   - `get_field_object("content_0_fields_title", $page)` returns **false**. The flattened
  *     reference row `_content_0_fields_title` holds `field_69d89b38e8de9_field_69d89b0959509` -
  *     a clone COMPOSITE key, not a field key - and `acf_get_field()` cannot resolve it, so
- *     `acf_get_meta_field()` gives up. `analysis/72` §2c concluded that `acf_maybe_get_field()`
+ *     `acf_get_meta_field()` gives up. `analysis/72` Ãƒâ€šÃ‚Â§2c concluded that `acf_maybe_get_field()`
  *     "resolves exactly those"; it does not, and the reference row the scout itself quoted is a
  *     composite too.
  *   - `get_field("content_0_fields_title", $page)` DOES answer - but only because `get_field`
  *     falls back to a DUMMY text field and returns the RAW meta with `$format_value` forced to
- *     false (`analysis/71` §6.3b). So an Image sub-field comes back as a bare ID with no
+ *     false (`analysis/71` Ãƒâ€šÃ‚Â§6.3b). So an Image sub-field comes back as a bare ID with no
  *     formatting AND no permission reduction: the exact disclosure this module exists to avoid,
  *     arriving through the one route that looked safe.
  *
@@ -112,7 +112,7 @@
  * read a migration of the real data performs, and the `display: group` one because it is the clone
  * shape that actually broke.
  *
- * THERE IS AN ACCESSOR AND ACF USES IT ITSELF. `analysis/72` §2b says "there is no supported
+ * THERE IS AN ACCESSOR AND ACF USES IT ITSELF. `analysis/72` Ãƒâ€šÃ‚Â§2b says "there is no supported
  * accessor" for these values and that claim, carried into the sprint brief and then into this
  * file's own comments as measured fact, is FALSE. `Flexible_Content::load_value()` builds a
  * surviving row's values with exactly two lines:
@@ -235,6 +235,12 @@ function wpmcp_acf_api_face() {
             ),
         ),
         'optional' => array(
+            // A write must not change the read module's availability on an older host.
+            // These symbols are checked at call time, after the operator opts in.
+            'write_values' => array('functions' => array(
+                'acf_get_field_groups', 'acf_get_fields', 'update_field', 'acf_get_field_type',
+            )),
+            'options_pages' => array('functions' => array('acf_get_options_pages')),
             // The name is reported verbatim in the tool's `acf` object, so it is the caller's
             // word for the guarantee as well as ours.
             'layout_metadata' => array(
@@ -367,7 +373,7 @@ function wpmcp_acf_object_id($raw) {
 
 /**
  * Resolve the caller's object and APPLY OUR OWN CAPABILITY GATE, which is mandatory because ACF
- * applies none (`analysis/71` §4: the only `current_user_can` on ACF's read path sits inside the
+ * applies none (`analysis/71` Ãƒâ€šÃ‚Â§4: the only `current_user_can` on ACF's read path sits inside the
  * revision-substitution filter and is unreachable outside `is_preview()`).
  *
  * THE RULE, AND IT IS ONE SENTENCE: the capability required is the one that opens the wp-admin
@@ -563,8 +569,8 @@ function wpmcp_acf_field_entry($field, $object) {
  * future sprint will have a good reason to loosen one, and that is the moment this paragraph has to
  * be read again rather than discovered.
  *
- * And the module has no write surface, so nothing read here is written back. A site that does not
- * want a sub-value in a layout title does not put one there.
+ * The write surface refuses Flexible Content, so nothing read here is written back by it.
+ * A site that does not want a sub-value in a layout title does not put one there.
  *
  * @param array      $field  the Flexible Content field array
  * @param array|null $layout the layout definition, or null when the stored name has none
@@ -626,7 +632,7 @@ function wpmcp_acf_layout_label($field, $layout, $index, $value) {
  * index, so the difference is a gap rather than a shorter list. MEASURED: three rows with the
  * middle one switched off come back keyed [0, 2].
  *
- * A CORRECTION TO `analysis/71` §6.1, MEASURED because that report asked for it by name. It
+ * A CORRECTION TO `analysis/71` Ãƒâ€šÃ‚Â§6.1, MEASURED because that report asked for it by name. It
  * reasoned from `api-template.php:636` that a gapped value makes `have_rows()` stop at the gap,
  * and that a disabled row 0 makes it "yield nothing". Neither happens on 6.8.10: with row 1
  * disabled `have_rows()` yielded both survivors, and with row 0 disabled it yielded both of the
@@ -634,7 +640,7 @@ function wpmcp_acf_layout_label($field, $layout, $index, $value) {
  *
  * ALSO MEASURED, and it matters to anything that writes: `get_layout_meta()` caches per request
  * in the field type's own `$layout_meta` and is NOT invalidated by a write in the same request.
- * This module never writes, so it cannot be bitten; a future write sprint can.
+ * set-acf-values refuses Flexible Content, so it cannot be bitten by this cache.
  *
  * @return list<array<string, mixed>>
  */
@@ -1110,7 +1116,7 @@ function wpmcp_acf_user_out($user) {
 
 /** The module's tools. Registered through the seam at the foot of this file. */
 function wpmcp_acf_tools() {
-    return array(
+    $tools = array(
 
     'get-acf-values' => array(
         'write' => false,
@@ -1217,13 +1223,328 @@ function wpmcp_acf_tools() {
                 // should not have to know that to interpret the other.
                 'acf' => array_merge(
                     array('values' => true),
-                    wpmcp_module_face_capabilities('acf')
+                    array_intersect_key(wpmcp_module_face_capabilities('acf'),
+                        array('layout_metadata' => true, 'layout_title' => true))
                 ),
                 'fields' => $entries,
             );
         },
     ),
 
+    );
+
+    $tools['set-acf-values'] = wpmcp_acf_write_tool();
+
+    return $tools;
+}
+
+/**
+ * Discover only top-level fields on applicable screens. Never resolve an arbitrary key via
+ * get_field_object(): that would let a known key bypass location rules. Sub-fields belong to
+ * their parent's value, not to an independent top-level write.
+ */
+function wpmcp_acf_write_fields($object) {
+    $groups = array();
+    if ($object['type'] === 'options') {
+        if (!function_exists('acf_get_options_pages')) {
+            return new WP_Error('wpmcp_acf_pro_required',
+                'object_type options requires ACF Pro options pages (acf_get_options_pages).');
+        }
+        foreach ((array) acf_get_options_pages() as $page) {
+            // Pages with a custom store are intentionally outside the generic options target.
+            $store = isset($page['post_id']) ? $page['post_id'] : 'options';
+            if (wpmcp_acf_object_id($store) !== $object['acf_id']) { continue; }
+            // Generic options is a shared store: enforce every matching page's gate, even
+            // when the same field also appears on a less restrictive page. Capabilities
+            // are not ordered, so check the declared one in addition to manage_options.
+            $capability = isset($page['capability']) ? $page['capability'] : 'manage_options';
+            if (!current_user_can($capability)) {
+                return new WP_Error('wpmcp_forbidden', 'Options page ' . $page['menu_slug']
+                    . ' requires capability ' . $capability . '. Use a user allowed to edit that page.');
+            }
+            foreach ((array) acf_get_field_groups(array('options_page' => $page['menu_slug'])) as $group) {
+                $groups[] = $group;
+            }
+        }
+    } else {
+        // ACF's term/user location classes never derive their screen from post_id.
+        // Match the REST screen arguments; keep ACF's normalized ID for value storage.
+        $screen = array('post_id' => $object['acf_id']);
+        if ($object['type'] === 'term') {
+            // Re-fetch rather than widen resolve's shared read response with taxonomy.
+            $term = get_term($object['id']);
+            if (!$term || is_wp_error($term)) {
+                return new WP_Error('wpmcp_not_found', 'Term not found. No fields written.');
+            }
+            $screen['taxonomy'] = $term->taxonomy;
+        } elseif ($object['type'] === 'user') {
+            $screen['user_id'] = $object['id'];
+            $screen['user_form'] = 'edit';
+        }
+        $groups = acf_get_field_groups($screen);
+    }
+    $fields = array();
+    foreach ((array) $groups as $group) {
+        foreach ((array) acf_get_fields($group) as $field) {
+            $fields[$field['key']] = $field;
+        }
+    }
+    return $fields;
+}
+
+/** Refuse unsupported nested fields as well: one repeater row can contain Flexible Content. */
+function wpmcp_acf_write_supported($field) {
+    $type = $field['type'];
+    if (in_array($type, array('repeater', 'gallery', 'flexible_content'), true)) {
+        $feature = $type === 'flexible_content' ? wpmcp_acf_flexible_content() : acf_get_field_type($type);
+        if (!$feature) {
+            return new WP_Error('wpmcp_acf_pro_required',
+                'Field ' . $field['name'] . ' (' . $type . ') requires the ACF Pro ' . $type . ' feature.');
+        }
+        if ($type === 'flexible_content') {
+            return new WP_Error('wpmcp_acf_unsupported',
+                'Field ' . $field['name'] . ' has unsupported type flexible_content. Write a supported field instead.');
+        }
+    }
+    foreach (isset($field['sub_fields']) ? $field['sub_fields'] : array() as $child) {
+        $error = wpmcp_acf_write_supported($child);
+        if (is_wp_error($error)) { return $error; }
+    }
+    return true;
+}
+
+/**
+ * ACF updates only supplied repeater/group/clone children, retaining omitted old values.
+ * Require complete rows before ANY field is written, so saved:false cannot hide a hybrid
+ * row. Walk nested groups/repeaters/clones too. Raw key-based old rows remain undo values.
+ */
+function wpmcp_acf_write_complete($value, $field, $path, $repeaterRow = false) {
+    if ($field['type'] === 'repeater') {
+        // ACF's raw empty repeater can be false/null/empty text; preserve the undo path.
+        if ($value === false || $value === null || $value === '') { return true; }
+        if (!is_array($value) || !array_is_list($value)) {
+            return new WP_Error('wpmcp_bad_request', 'Field ' . $path
+                . ' requires a full array of repeater rows; e.g. [{"caption":"Hello"}].');
+        }
+        foreach ($value as $index => $row) {
+            // Reuse the object-shape check, retaining repeater's array_key_exists semantics.
+            // This flag applies only to this row; nested containers use their own type.
+            $error = wpmcp_acf_write_complete($row, array_merge($field, array('type' => 'group')),
+                $path . '[' . $index . ']', true);
+            if (is_wp_error($error)) { return $error; }
+        }
+    } elseif ($field['type'] === 'group' || $field['type'] === 'clone') {
+        if (!is_array($value)) {
+            return new WP_Error('wpmcp_bad_request', 'Field ' . $path
+                . ' requires an object containing every sub-field by name or key; e.g. {"caption":"Hello"}.');
+        }
+        $remaining = $value;
+        foreach (isset($field['sub_fields']) ? $field['sub_fields'] : array() as $child) {
+            $key = $child['key'];
+            // Clone update_value accepts the backend key or _name, which can differ
+            // from its prefixed storage name. Unprefixed definitions use name.
+            $name = $field['type'] === 'clone' && isset($child['_name']) ? $child['_name'] : $child['name'];
+            $hasKey = array_key_exists($key, $value);
+            $hasName = array_key_exists($name, $value);
+            if (!$hasKey && !$hasName) {
+                return new WP_Error('wpmcp_bad_request', 'Field ' . $path . ' is missing sub-field '
+                    . $name . ' (' . $key . '). Supply every defined sub-field, including empty values;'
+                    . ' e.g. "' . $name . '":"". No fields written.');
+            }
+            if ($key !== $name && $hasKey && $hasName) {
+                return new WP_Error('wpmcp_bad_request', 'Field ' . $path . ' supplies sub-field '
+                    . $name . ' twice. Use its name or key once; e.g. "' . $key . '":"".');
+            }
+            $childValue = $hasKey ? $value[$key] : $value[$name];
+            // ACF Pro 6.8.10 group/clone update_value uses isset, unlike repeater
+            // update_row's array_key_exists. Explicit null would skip this child
+            // but write its siblings. Refuse before ANY mutation, including preview.
+            if (!$repeaterRow && $childValue === null) {
+                return new WP_Error('wpmcp_bad_request', 'Field ' . $path . '.' . $name
+                    . ' (' . $key . ') is null in a ' . $field['type'] . '. ACF cannot clear this child through this path'
+                    . ' with null; it skips null children. Supply a non-null storage value;'
+                    . ' e.g. "' . $name . '":"" for a text child. No fields written.');
+            }
+            $error = wpmcp_acf_write_complete($childValue, $child, $path . '.' . $name);
+            if (is_wp_error($error)) { return $error; }
+            unset($remaining[$key], $remaining[$name]);
+        }
+        if ($remaining !== array()) {
+            return new WP_Error('wpmcp_bad_request', 'Field ' . $path . ' contains unknown sub-fields: '
+                . implode(', ', array_keys($remaining)) . '. Use only defined names or keys: '
+                . implode(', ', array_column(isset($field['sub_fields']) ? $field['sub_fields'] : array(),
+                    $field['type'] === 'clone' ? 'key' : 'name'))
+                . '. Supply every defined sub-field once.');
+        }
+    }
+    return true;
+}
+
+/**
+ * Compare storage shapes, not display formatting. ACF loads container children by KEY;
+ * callers can supply NAMEs. PHP scalar types also change across a meta round trip (ID 7 ->
+ * "7"). Canonicalise these two documented differences, keeping null distinct from text.
+ * No display formatter or update_field return value participates in this comparison.
+ */
+function wpmcp_acf_write_comparable($value, $field) {
+    if ($field['type'] === 'repeater') {
+        if ($value === false || $value === null || $value === '') { return array(); }
+        if (!is_array($value)) { return $value; }
+        $rows = array();
+        foreach ($value as $row) {
+            $rows[] = wpmcp_acf_write_comparable($row, array_merge($field, array('type' => 'group')));
+        }
+        return $rows;
+    }
+    if (($field['type'] === 'group' || $field['type'] === 'clone') && is_array($value)) {
+        $row = array();
+        $remaining = $value;
+        foreach (isset($field['sub_fields']) ? $field['sub_fields'] : array() as $child) {
+            $key = $child['key'];
+            $name = $field['type'] === 'clone' && isset($child['_name']) ? $child['_name'] : $child['name'];
+            $raw = array_key_exists($key, $value) ? $value[$key]
+                : (array_key_exists($name, $value) ? $value[$name]
+                    : (isset($child['default_value']) ? $child['default_value'] : null));
+            $row[$key] = wpmcp_acf_write_comparable($raw, $child);
+            unset($remaining[$key], $remaining[$name]);
+        }
+        // An unknown supplied child must make the comparison fail if ACF discards it;
+        // dropping it on both sides would manufacture saved:true for a lost value.
+        foreach ($remaining as $key => $raw) {
+            $row[$key] = wpmcp_acf_write_comparable($raw, array('type' => 'text'));
+        }
+        ksort($row);
+        return $row;
+    }
+    if (is_array($value)) {
+        $out = array();
+        foreach ($value as $key => $leaf) {
+            $out[$key] = wpmcp_acf_write_comparable($leaf, array('type' => 'text'));
+        }
+        if (!array_is_list($out)) { ksort($out); }
+        return $out;
+    }
+    if ($field['type'] === 'true_false' && is_bool($value)) { return $value ? '1' : '0'; }
+    return $value === null ? null : (string) $value;
+}
+
+/** The public write entry, including guards for direct provider/closure callers. */
+function wpmcp_acf_set_values($a) {
+    $type = isset($a['object_type']) ? $a['object_type'] : 'post';
+    if (!is_string($type) || !in_array($type, wpmcp_acf_object_types(), true)) {
+        return new WP_Error('wpmcp_bad_request', 'object_type must be post, term, user or options; e.g. post.');
+    }
+    if (($type !== 'options' && (!isset($a['id']) || !is_int($a['id']) || $a['id'] <= 0))
+        || (isset($a['id']) && !is_int($a['id']))) {
+        return new WP_Error('wpmcp_bad_request', 'id must be a positive integer for post, term or user; e.g. 123.');
+    }
+    if (!isset($a['fields']) || !is_array($a['fields']) || $a['fields'] === array() || array_is_list($a['fields'])) {
+        return new WP_Error('wpmcp_bad_request', 'fields must be a nonempty object of field names or keys to values; e.g. {"title":"Hello"}.');
+    }
+    if (isset($a['dry_run']) && !is_bool($a['dry_run'])) {
+        return new WP_Error('wpmcp_bad_request', 'dry_run must be a boolean; e.g. true.');
+    }
+    $missing = wpmcp_module_face_missing('acf');
+    if ($missing !== array()) {
+        return new WP_Error('wpmcp_acf_unavailable', 'ACF values API missing: ' . implode(', ', $missing));
+    }
+    // The same screen gate as the reader, before discovery, raw reads, audit or update_field.
+    $object = wpmcp_acf_resolve($type, isset($a['id']) ? $a['id'] : 0);
+    if (is_wp_error($object)) { return $object; }
+    $face = wpmcp_module_face_capabilities('acf');
+    if (empty($face['write_values'])) {
+        $missing = array();
+        foreach (wpmcp_acf_api_face()['optional']['write_values']['functions'] as $symbol) {
+            if (!function_exists($symbol)) { $missing[] = $symbol . '()'; }
+        }
+        return new WP_Error('wpmcp_acf_unavailable',
+            'ACF writes API missing: ' . implode(', ', $missing) . '. Install ACF with these functions.');
+    }
+    $available = wpmcp_acf_write_fields($object);
+    if (is_wp_error($available)) { return $available; }
+    $plan = array();
+    // Validate the entire request before the first mutation: a later typo must not half-save it.
+    foreach ($a['fields'] as $selector => $value) {
+        if (!is_string($selector) || $selector === '') {
+            return new WP_Error('wpmcp_bad_request', 'fields keys must be nonempty field names or keys; e.g. field_abc.');
+        }
+        $matches = array();
+        if (isset($available[$selector])) {
+            $matches[$selector] = $available[$selector];
+        } else {
+            foreach ($available as $key => $field) {
+                if ($field['name'] === $selector) { $matches[$key] = $field; }
+            }
+        }
+        if (count($matches) !== 1) {
+            return new WP_Error('wpmcp_bad_request', count($matches) === 0
+                ? 'Unknown field ' . $selector . ' in applicable groups. Use a field on this object\'s ACF screen.'
+                : 'Ambiguous field ' . $selector . '. Specify one key: ' . implode(', ', array_keys($matches)) . '.');
+        }
+        $field = reset($matches);
+        $error = wpmcp_acf_write_supported($field);
+        if (is_wp_error($error)) { return $error; }
+        $error = wpmcp_acf_write_complete($value, $field, $selector);
+        if (is_wp_error($error)) { return $error; }
+        if (isset($plan[$field['key']])) {
+            return new WP_Error('wpmcp_bad_request', 'fields names and keys resolve twice to ' . $field['key'] . '. Supply it once.');
+        }
+        $raw = get_field_object($field['key'], $object['acf_id'], false, true);
+        if (!is_array($raw) || !array_key_exists('value', $raw)) {
+            return new WP_Error('wpmcp_acf_unavailable', 'Cannot read raw old value for field ' . $field['key'] . '. No fields written.');
+        }
+        $plan[$field['key']] = array('field' => $field, 'old' => $raw['value'], 'new' => $value);
+    }
+    $dry = isset($a['dry_run']) ? $a['dry_run'] : false;
+    $entries = array();
+    foreach ($plan as $key => $item) {
+        $saved = false;
+        $new = $item['new'];
+        if (!$dry) {
+            // The raw old value in the response is the lossless undo path. The trace store's
+            // 2 KiB cap would silently truncate repeater rows (Order 002 mailbox answer 2).
+            update_field($key, $item['new'], $object['acf_id']);
+            acf_flush_value_cache($object['acf_id'], $item['field']['name']);
+            $raw = get_field_object($key, $object['acf_id'], false, true);
+            $new = is_array($raw) && array_key_exists('value', $raw) ? $raw['value'] : null;
+            $saved = is_array($raw) && array_key_exists('value', $raw)
+                && wpmcp_acf_write_comparable($new, $item['field'])
+                    === wpmcp_acf_write_comparable($item['new'], $item['field']);
+        }
+        $entries[] = array('key' => $key, 'name' => $item['field']['name'],
+            'old_value' => $item['old'], 'new_value' => $new, 'saved' => $saved,
+            'would_change' => wpmcp_acf_write_comparable($item['old'], $item['field'])
+                !== wpmcp_acf_write_comparable($item['new'], $item['field']));
+    }
+    return array('object' => $object, 'dry_run' => $dry, 'fields' => $entries);
+}
+
+/** Admin scope is enforced by the existing dispatcher's write flag, including dry_run. */
+function wpmcp_acf_write_tool() {
+    return array(
+        'write' => true,
+        'annotations' => array('readOnlyHint' => false, 'destructiveHint' => true,
+            'idempotentHint' => true, 'openWorldHint' => false),
+        'description' => 'Write ACF field values on one object. Requires an admin-scope token.'
+            . ' Uses the same object_type and id as get-acf-values. fields maps names or keys to raw storage values:'
+            . ' text, full repeater rows, links {title,url,target}, image attachment IDs, dates Ymd.'
+            . ' Resolves names in applicable groups before writing by key, including never-saved fields.'
+            . ' Ambiguous names list candidate keys; unknown fields and flexible_content are refused.'
+            . ' Pro-only features require their registered API. Returns raw old_value, reread new_value and'
+            . ' saved per field; saved compares the reread, even when update_field returns false.'
+            . ' dry_run returns proposed values and would_change with saved false, without writing.'
+            . ' Generic options store only; custom options-page stores are not addressed.'
+            . ' Returned raw old values provide an undo path. Needs permission to edit the object.',
+        'inputSchema' => array('type' => 'object', 'required' => array('fields'), 'properties' => array(
+            'object_type' => array('type' => 'string', 'enum' => wpmcp_acf_object_types(), 'default' => 'post',
+                'description' => 'What the fields are attached to. options takes no id.'),
+            'id' => array('type' => 'integer', 'description' => 'The post, term or user ID. Required unless object_type is options.'),
+            'fields' => array('type' => 'object', 'additionalProperties' => true,
+                'description' => 'Field names or keys mapped to raw values. Example: {"cta_label":"Contact"}.'),
+            'dry_run' => array('type' => 'boolean', 'default' => false,
+                'description' => 'Preview proposed changes without writing. saved is false during a preview.'),
+        )),
+        'run' => 'wpmcp_acf_set_values',
     );
 }
 
