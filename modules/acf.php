@@ -6,12 +6,12 @@
  *
  * VALUES ONLY, NO SCHEMA TOOLS (D9's 2026-09-23 scope cut). D9's older sprint-one
  * line listed discovery tools - `acf_get_field_groups`, `acf_get_fields` - and the later cut
- * governs: ACF's own abilities already describe field groups, and on jaygroup's seven live
+ * governs: ACF's own abilities already describe field groups, and on the stress site's seven live
  * groups every one carries `show_in_rest: 0`, so a schema tool of ours would describe fields no
  * value tool of ACF's could read. Field STRUCTURE therefore reaches the caller as METADATA ON A
  * VALUES READ - key, name, type, label, and per-row layout metadata - and never as a catalogue
  * of what this site COULD hold. That line is deliberate: "what is in this object" is about a
- * value; "what layouts exist" is a schema, and a read that dumped all 36 of jaygroup's layouts
+ * value; "what layouts exist" is a schema, and a read that dumped all 36 of the stress site's layouts
  * would be a schema tool wearing a value tool's name.
  *
  * ------------------------------------------------------------------------------
@@ -54,7 +54,7 @@
  * `load_value`, BEFORE any formatting, and `should_disable_layout()` returns false only when
  * `is_admin()` - which is every request of ours. So wp-admin shows four blocks with one greyed
  * out and ACF hands us three, with nothing saying a fourth exists. The driving use case is
- * moving jaygroup posts into a new template site, so a read feeds a write: a silently dropped
+ * moving the stress site posts into a new template site, so a read feeds a write: a silently dropped
  * block becomes a silently deleted one.
  *
  * So every row is reported: its index, its layout name, the label the editor sees after a
@@ -75,7 +75,7 @@
  * right and the first round was wrong in the way that mattered.
  *
  * THE SPRINT BRIEF'S ROUTE - `get_field("{$fc}_{$i}_{$sub}", $id)` - IS A TRAP, and that part of
- * round 1 stands. MEASURED on jaygroup, which is 71.5% clone composites:
+ * round 1 stands. MEASURED on the stress site, which is 71.5% clone composites:
  *
  *   - `get_field_object("content_0_fields_title", $page)` returns **false**. The flattened
  *     reference row `_content_0_fields_title` holds `field_69d89b38e8de9_field_69d89b0959509` -
@@ -104,10 +104,10 @@
  *     `-32603` - so ONE disabled row with a nested block cost the whole object read.
  *
  * AND A SEAMLESS CLONE IS NOT ONE OF THOSE SHAPES, which is worth stating because both the review
- * and this file's own first draft said it was. MEASURED on jaygroup's real field in round 3: ACF
+ * and this file's own first draft said it was. MEASURED on the stress site's real field in round 3: ACF
  * FLATTENS a seamless `prefix_name` clone into the resolved layout definition, so 36 layouts carry
  * ZERO `clone` entries and 189 flattened `fields_*` children, and those children are LEAVES whose
- * stored meta IS their value. jaygroup's own 35 seamless-clone layouts were therefore never affected
+ * stored meta IS their value. the stress site's own 35 seamless-clone layouts were therefore never affected
  * by the defect above. Both clone shapes are now in the fixture - the seamless one because it is the
  * read a migration of the real data performs, and the `display: group` one because it is the clone
  * shape that actually broke.
@@ -159,7 +159,7 @@
  * THE GUARD IS EVALUATED ON `plugins_loaded` AND NOT AT FILE SCOPE, and that is not tidiness.
  * wpmcp_bootstrap() runs at wp-mcp's own plugin file scope, so at the moment this file is loaded
  * "is ACF here" is a question about PLUGIN ORDER rather than about the site. MEASURED on
- * jaygroup: `active_plugins` is not alphabetical - it opens with gravityforms - so the order is
+ * the stress site: `active_plugins` is not alphabetical - it opens with gravityforms - so the order is
  * whatever activation left behind, and a site with wp-mcp as an mu-plugin, or with ACF in a
  * differently-named directory, would load us first and answer "no ACF" on a site that has it.
  * `plugins_loaded` is the earliest hook at which the question is about the site, and it is still
@@ -737,7 +737,7 @@ function wpmcp_acf_layout_rows($field, $object, $formatted) {
 
         // ONLY A DROPPED ROW CARRIES `values`, because a surviving row's values are already in
         // the field's own `value` under this index and repeating them would double the payload of
-        // every read on jaygroup's 20,638 repeater rows.
+        // every read on the stress site's 20,638 repeater rows.
         if ($dropped !== null) {
             $row['values'] = $dropped['values'];
         }
@@ -797,7 +797,7 @@ function wpmcp_acf_dropped_row($field, $object, $index, $layouts, $layoutName) {
         // (pro/fields/class-acf-field-flexible-content.php). READING THE META DIRECTLY WAS THE
         // BLOCKER OF ROUND 1 and it was wrong in the only way that mattered: acf_get_value() runs
         // the SUB-FIELD TYPE'S OWN load_value, and for every container type the stored meta is a
-        // MARKER rather than a value. jaygroup's one Flexible Content field has a seamless clone
+        // MARKER rather than a value. the stress site's one Flexible Content field has a seamless clone
         // (`prefix_name = 1`) as the sole sub-field of all 35 layouts, and there is no
         // `content_N_fields` meta row on any of its 294 posts - so a bare get_post_meta() returned
         // '' for every disabled row, Clone::format_value('') returned false at its empty() guard,
@@ -917,7 +917,7 @@ function wpmcp_acf_field_objects($object, $selectors) {
  * MAKE THE VALUE STORE MISS FOR A FLEXIBLE CONTENT FIELD WHOSE ROW LIST WE DID NOT SEE.
  *
  * `acf_get_value()` returns from the values store BEFORE `acf/load_value` runs, so any earlier read
- * of the same field in the same request - another plugin, ACF Extended (which jaygroup runs on this
+ * of the same field in the same request - another plugin, ACF Extended (which the stress site runs on this
  * very field), a theme - means our priority-9 subscriber never fires and the raw layout-name array
  * is not captured. The row still cannot vanish, because the disabled indices go into the union on
  * their own; but WITHOUT the raw array a dropped row has no layout NAME, with no name there is no
@@ -957,7 +957,7 @@ function wpmcp_acf_reload_gapped_rows($fields, $object) {
  * one (review 74, S5 - which under-rated it; measured in round 2).
  *
  * `wp_json_encode()` on an object serialises its PUBLIC PROPERTIES, which for WordPress's own
- * classes is the whole database row. MEASURED on jaygroup, on the values ACF's `'standard'`
+ * classes is the whole database row. MEASURED on the stress site, on the values ACF's `'standard'`
  * formatter actually produces:
  *
  *   - a Post Object / Relationship field with `return_format: object` gives a `WP_Post`, whose 24

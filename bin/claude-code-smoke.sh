@@ -7,7 +7,7 @@
 #
 # WHY THE CLAUDE CODE CLI AND NOT CLAUDE DESKTOP. The gate was written as "Max connects his
 # own Claude Desktop". He cannot: a Claude Desktop custom connector is reached from
-# Anthropic's infrastructure, which cannot resolve `jaygroup.local` or route to this
+# Anthropic's infrastructure, which cannot resolve `the stress site` or route to this
 # machine, and no certificate trust changes that. Claude Code runs ON this machine and
 # dials the site itself, so it is the only real client that can reach a Local site - and it
 # speaks the same protocol revision, over the same transport, with the same negotiation.
@@ -60,7 +60,7 @@ echo "smoke: site   ${SITE_URL}"
 #
 # MEASURED, NOT ASSUMED. Local issues a per-site certificate that is its own CA
 # (basicConstraints CA:TRUE, CN = the site host, self-issued - verified with
-# openssl_x509_parse on jaygroup.local.crt), so handing Node that one file is enough; there
+# openssl_x509_parse on the-stress-site.local.crt), so handing Node that one file is enough; there
 # is no separate Local root CA to hunt for. Windows' own trust store, which Local's "Trust"
 # button writes to, is invisible to Node - hence this variable rather than a GUI click.
 #

@@ -355,7 +355,7 @@ final class AcfModuleTest extends TestCase
      * SOURCE worth pinning rather than a detail.
      *
      * wpmcp_bootstrap() runs at wp-mcp's own plugin file scope, so at the moment the module file
-     * is loaded "is ACF here" is a question about plugin ORDER. MEASURED on jaygroup:
+     * is loaded "is ACF here" is a question about plugin ORDER. MEASURED on the stress site:
      * `active_plugins` is not alphabetical - it opens with gravityforms - so a site with wp-mcp as
      * an mu-plugin, or ACF in a differently-named directory, would answer "no ACF" on a site that
      * has it, and the module would serve nothing with nothing wrong.

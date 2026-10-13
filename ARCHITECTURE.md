@@ -507,8 +507,8 @@ no stripping of our own. On read, decode one level for a value wp-admin renders 
 and pass through untouched for one it renders in an HTML EDITOR. A new field is settled by
 looking at wp-admin's markup for it, not by argument.
 
-**The measurements that justify it**, all taken on sample.local against WordPress 7.1.1 on
-2026-09-21, and re-measured on jaygroup in 1.1.1:
+**The measurements that justify it**, all taken on the bare site against WordPress 7.1.1 on
+2026-09-21, and re-measured on the stress site in 1.1.1:
 
 - **kses is a fixed point.** `wp_filter_kses('x<y z')` is `x&lt;y z`, and a second and third
   pass change nothing. A bare `&` becomes `&amp;`; an existing `&lt;` is left alone.

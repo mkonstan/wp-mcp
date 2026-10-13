@@ -9,3 +9,4 @@ vendor/
 .phpunit.cache/
 .phpunit.result.cache
 .local-bin/
+bin/local-env.local.sh

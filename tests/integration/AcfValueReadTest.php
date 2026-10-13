@@ -349,7 +349,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             // THE TWO CLONE SHAPES, AND THEY ARE NOT THE SAME SHAPE (round 3, review 74 S6).
             // MEASURED: a SEAMLESS clone with prefix_name is FLATTENED by ACF into the resolved
             // layout definition - `fields_title` and `fields_target` arrive as ordinary leaf
-            // sub-fields and no `clone` entry exists at all - which is jaygroup's shape, 0 clone
+            // sub-fields and no `clone` entry exists at all - which is the stress site's shape, 0 clone
             // entries and 189 flattened children across its 36 layouts. A clone with
             // `display: group` stays a CONTAINER: the definition holds `boxed:clone`, the meta row
             // at its own key is '', and a bare meta read gives `false`. Same source group, same
@@ -371,7 +371,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             // AND THE STORE WARMER, which is the only way to reproduce S4 from outside the site.
             // ACF's value store is per-request and `acf_get_value()` returns from it before
             // `acf/load_value` fires, so a disabled row's index reaches the tool only if something
-            // put it there. On a real site the warmer is another plugin - jaygroup runs ACF Extended
+            // put it there. On a real site the warmer is another plugin - the stress site runs ACF Extended
             // on exactly this field type. Here it is one read on `rest_api_init`, which runs before
             // the route callback and therefore before the tool attaches its own subscriber, and it is
             // gated on a PER-REQUEST header so the same class can read the same object both ways.
@@ -713,7 +713,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         // meta is a MARKER and not a value, so reading the meta directly and formatting it gives
         // `false` for a group and a TypeError for a nested Flexible Content. Only
         // `acf_get_value()` - the call ACF's own load_value() makes for each sub-field of a row -
-        // runs the sub-field type's loader and turns the marker into rows. jaygroup's entire layout
+        // runs the sub-field type's loader and turns the marker into rows. the stress site's entire layout
         // set is a seamless clone, which fails the same way, so this is the case the feature exists
         // for rather than an edge.
         self::assertSame(
@@ -741,7 +741,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             "The nested block's own sub-value is missing."
         );
 
-        // THE TWO CLONE SHAPES (round 3, review 74 S6). jaygroup's ONLY Flexible Content field has
+        // THE TWO CLONE SHAPES (round 3, review 74 S6). the stress site's ONLY Flexible Content field has
         // a seamless prefix_name clone as the sole sub-field of 35 of its 36 layouts, so this is
         // the read a migration of the real data will actually perform - and until round 3 it was
         // held by no test at all.
@@ -749,7 +749,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
         // MEASURED, AND IT CORRECTS THE ROUND-1 BLOCKER'S ACCOUNT OF JAYGROUP: a SEAMLESS clone is
         // FLATTENED by ACF into the resolved layout definition, so its children arrive as ordinary
         // LEAF sub-fields and the bare-meta read of round 1 would have answered them correctly.
-        // Verified against jaygroup's own field, not only this fixture: 36 layouts, ZERO `clone`
+        // Verified against the stress site's own field, not only this fixture: 36 layouts, ZERO `clone`
         // entries in the resolved definition, 189 flattened `fields_*` children. The container
         // failure the blocker was really about needs a clone with `display: group`, which is the
         // second one here.
@@ -757,7 +757,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
             'Title through a seamless clone',
             $values[$prefix . 'blocks_1_fields_title'],
             "A seamless clone's flattened child did not come back. Its stored key is"
-            . ' {parent}_{index}_{clone}_{child}, which is jaygroup\'s content_0_fields_title shape.'
+            . ' {parent}_{index}_{clone}_{child}, which is the stress site\'s content_0_fields_title shape.'
         );
         self::assertSame(
             self::$draft,
@@ -974,7 +974,7 @@ final class AcfValueReadTest extends FixtureIntegrationTestCase
      *
      * THE WARMING IS REAL AND NOT SIMULATED. The mu-plugin reads the field on `rest_api_init`, which
      * runs before the route callback and therefore before the tool attaches its own subscriber - the
-     * same position another plugin occupies. jaygroup runs ACF Extended on this field type.
+     * same position another plugin occupies. the stress site runs ACF Extended on this field type.
      *
      * A TEST THAT ONLY EVER RUNS COLD CANNOT FAIL ON THIS, which is why the header exists.
      *

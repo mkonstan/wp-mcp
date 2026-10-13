@@ -12,7 +12,7 @@ use WpMcp\Tests\Support\WordPressStubs;
 /**
  * site-info declares and publishes the current site's database prefix, and its getter
  * follows the live wpdb rather than assuming wp_. That assumption made a first SQL
- * query fail with "no such table" on the site whose prefix was WsEV9y_.
+ * query fail with "no such table" on the site whose prefix was xk7f2q_.
  *
  * TEST THE FIELD, not the whole tool: this tier deliberately has no get_bloginfo(),
  * home_url() or wp_get_theme() stub. The ordered shape can prove the field sits after
@@ -50,15 +50,15 @@ final class SiteInfoDbPrefixTest extends TestCase
     public function testGetterFollowsLiveNonDefaultPrefix(): void
     {
         $wpdb = $this->wpdb;
-        $wpdb->prefix = 'WsEV9y_';
+        $wpdb->prefix = 'xk7f2q_';
         $getter = wpmcp_site_info_shape()['db_prefix']['get'];
 
-        self::assertSame('WsEV9y_', $getter(null));
+        self::assertSame('xk7f2q_', $getter(null));
 
         // Reuse the SAME closure after a site switch. Hardcoding even the friction
         // log's prefix, or capturing it when the shape was made, must go red here.
-        $wpdb->prefix = 'WsEV9y_7_';
-        self::assertSame('WsEV9y_7_', $getter(null));
+        $wpdb->prefix = 'xk7f2q_7_';
+        self::assertSame('xk7f2q_7_', $getter(null));
     }
 
     public function testRegistryPublishesRequiredStringPrefixWithDescription(): void

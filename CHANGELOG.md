@@ -1322,8 +1322,8 @@ marked (shape).**
 
 - **A backslash in anything you wrote was silently eaten.** A post title, body or excerpt,
   a term name or description, a media title or alt text, a comment - each lost one
-  backslash from every escape on the way to the database. `C:\Users\max` became
-  `C:Usersmax`; a regex `\d+` became `d+`; JSON stored as a string lost its escapes. The
+  backslash from every escape on the way to the database. `C:\Users\example` became
+  `C:Usersexample`; a regex `\d+` became `d+`; JSON stored as a string lost its escapes. The
   tool then re-read the row and reported the mangled value, which is why it looked right.
 - **Why.** WordPress's write functions take SLASHED input and unslash it on the way in -
   `wp_insert_post()`, `wp_insert_term()`, `wp_insert_comment()` and the whole meta API all
@@ -1389,7 +1389,7 @@ marked (shape).**
   measured and documented in README: a field that has been set through ACF at least once
   reads back correctly, and one that never has reads back as a raw string.
 - **Values go in slashed.** WordPress's meta API takes slashed input and unslashes it, so
-  a value written raw lost a backslash: `C:\Users\max` became `C:Usersmax`, a regex
+  a value written raw lost a backslash: `C:\Users\example` became `C:Usersexample`, a regex
   `\d+` became `d+`. `set-post-meta` now slashes the key and the value the way core's own
   REST meta layer does, and a backslash survives byte for byte. A key **containing** a
   backslash is refused outright, at save time and at call time: `is_protected_meta()` sees

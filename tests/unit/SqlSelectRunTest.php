@@ -47,7 +47,7 @@ final class SqlSelectRunTest extends TestCase
         WordPressRuntime::allowCap('manage_options');
 
         // The two session variables the tool reads before it changes them. Real values
-        // from jaygroup, so the restore has something recognisable to put back.
+        // from the stress site, so the restore has something recognisable to put back.
         $this->wpdb->vars = [
             'SELECT @@SESSION.MAX_EXECUTION_TIME' => '0',
             'SELECT @@SESSION.optimizer_switch'   => 'index_merge=on,derived_merge=on,hash_join=on',

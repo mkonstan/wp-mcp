@@ -193,6 +193,19 @@ jobs:
           done
           exit $status
 
+      # NOTHING MACHINE-SPECIFIC OR PERSONAL LEAVES THIS REPOSITORY. GitHub's secret
+      # scanning and push protection are on and they are good at what they do, but they
+      # recognise CREDENTIALS issued by known providers - never a Windows account name, a
+      # client's hostname or a real table prefix. On 2026-10-13 this repository publicly
+      # carried all three. Custom patterns that would catch them are a paid GHAS feature,
+      # so the check is ours and it runs here, on every push and every pull request.
+      #
+      # It matches SHAPES, never values, so the checker itself leaks nothing - and it
+      # prints the rule and the location WITHOUT the match, because a CI log on a public
+      # repository is public. See bin/privacy-check.php.
+      - name: privacy check (no personal or machine-specific data)
+        run: php bin/privacy-check.php
+
       - name: Guard - the parse check and the version-first rule are still wired in
         # TWO MARKERS, because the tools make two promises and one count cannot hold
         # both. The first WAS a count of the old backup-path helper, gone with the

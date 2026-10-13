@@ -266,7 +266,7 @@ function wpmcp_menu_stored_parent($id) {
  * parent is not an item of this menu used to be shown interleaved at the top level by
  * menu_order; `Walker::walk()` shows every orphan after every top-level tree, flat
  * (class-wp-walker.php:253-264), which is where `wp_nav_menu()` puts it. MEASURED 2026-09-21
- * on both real sites - jaygroup (81 items in 5 menus) and seosemia (44 items) - ZERO items
+ * on both real sites - the stress site (81 items in 5 menus) and a hosted staging site (44 items) - ZERO items
  * have a missing parent, so nothing observable changes on either; the CHANGELOG names it for
  * anybody else's site, because the next write persists the new order through the renumber.
  *
@@ -527,7 +527,7 @@ function wpmcp_menu_item_out($row, $parent, $position) {
         'id'         => (int) $row->ID,
         // The item's own label is its post_title column; only the fallback needs core. The
         // OWN label comes back decoded (sprint 14d): labels wp-admin saved can carry
-        // `&#038;` for `&` - jaygroup has eight - and wp-admin's own field, an HTML
+        // `&#038;` for `&` - the stress site has eight - and wp-admin's own field, an HTML
         // attribute, shows that as `&`. update-menu-item keeps the
         // stored bytes when it is sent this decoded text back. The fallback is a post
         // title, the raw column, as get-post returns it.

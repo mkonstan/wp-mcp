@@ -13,8 +13,8 @@
 #   WPMCP_PHP_SERVICE     Local lightning-services PHP folder    (default: php-8.2.29+0)
 #   WPMCP_LOCAL_BIN       Local's extraResources/bin folder      (default: Program Files (x86) path)
 #   WPMCP_LOCAL_SITE_ID   Local's per-site run id, for PHPRC     (default: qztNV-K_M)
-#   WPMCP_SITE_PATH       WordPress docroot of the test site     (default: jaygroup site)
-#   WPMCP_TEST_URL        base URL the integration suite hits    (default: https://jaygroup.local)
+#   WPMCP_SITE_PATH       WordPress docroot of the test site     (default: derived, see below)
+#   WPMCP_TEST_URL        base URL the integration suite hits    (default: https://$WPMCP_SITE_NAME.local)
 #   WPMCP_CAINFO          PEM bundle for composer TLS (see below) (default: unset)
 #
 # The site id and the PHP service version change when Local updates or the site is
@@ -28,6 +28,18 @@
 #
 # Exported: PHP, WPCLI, COMPOSER_PHAR, PHPRC, WPMCP_SITE_PATH, WPMCP_TEST_URL.
 # Defined:  php, wp, composer, phpunit shell functions.
+
+# MACHINE-SPECIFIC VALUES DO NOT BELONG IN A PUBLIC REPOSITORY. Your Windows username
+# and your sites' names are nobody else's business, so every default below is DERIVED
+# ($HOME, $APPDATA) rather than written down, and anything that cannot be derived goes
+# in an UNTRACKED file beside this one:
+#
+#     # bin/local-env.local.sh   (gitignored; create it once)
+#     WPMCP_SITE_NAME=my-site    # the Local site FOLDER, and the <name>.local host
+#
+# It is sourced first, so anything it sets wins over the defaults here.
+# shellcheck source=/dev/null
+[ -f "${BASH_SOURCE[0]%/*}/local-env.local.sh" ] && . "${BASH_SOURCE[0]%/*}/local-env.local.sh"
 
 WPMCP_LOCAL_APPDATA="${WPMCP_LOCAL_APPDATA:-$(cygpath -u "$APPDATA" 2>/dev/null || echo "$HOME/AppData/Roaming")}"
 WPMCP_PHP_SERVICE="${WPMCP_PHP_SERVICE:-php-8.2.29+0}"
@@ -50,8 +62,11 @@ unset COMPOSER
 # path because php.exe is a native Windows binary and cannot read /c/... form.
 export PHPRC="${PHPRC:-$(cygpath -w "$WPMCP_LOCAL_APPDATA/Local/run/$WPMCP_LOCAL_SITE_ID/conf/php" 2>/dev/null)}"
 
-export WPMCP_SITE_PATH="${WPMCP_SITE_PATH:-C:/Users/vbwiz/Local Sites/jaygroup/app/public}"
-export WPMCP_TEST_URL="${WPMCP_TEST_URL:-https://jaygroup.local}"
+# Derived from $HOME and the site NAME, so no username and no site name is hardcoded.
+# cygpath -m gives the C:/... form php.exe needs; the fallback covers a missing cygpath.
+WPMCP_SITE_NAME="${WPMCP_SITE_NAME:-primary}"
+export WPMCP_SITE_PATH="${WPMCP_SITE_PATH:-$(cygpath -m "$HOME/Local Sites/$WPMCP_SITE_NAME/app/public" 2>/dev/null || echo "$HOME/Local Sites/$WPMCP_SITE_NAME/app/public")}"
+export WPMCP_TEST_URL="${WPMCP_TEST_URL:-https://$WPMCP_SITE_NAME.local}"
 
 export WP_CLI_DISABLE_AUTO_CHECK_UPDATE=1
 

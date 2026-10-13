@@ -125,7 +125,7 @@ function wpmcp_code_forbidden() {
  * SPLIT OUT SO THE LISTING AND THE RUN CANNOT DRIFT. wpmcp_tools() decides whether the
  * code tools appear in tools/call and tools/list at all, and it used to ask only
  * wpmcp_code_enabled() - so a site with the switch on and DISALLOW_FILE_EDIT true in
- * wp-config ADVERTISED all six and refused every one of them. Measured on seosemia.net,
+ * wp-config ADVERTISED all six and refused every one of them. Measured on a hosted staging site,
  * a real public site: tools/list carried code-list, code-read, code-write, code-delete,
  * code-history and code-restore, and code-list answered "Theme file editing is disabled
  * on this site (DISALLOW_FILE_EDIT)."
@@ -268,7 +268,7 @@ function wpmcp_path_within($abs, $root) {
  * `inc/` blocks anything starting `inc/`. This function used to hand it the caller's own
  * spelling with nothing but a `..` and an absolute-path check applied, so `./inc/x.php`
  * did not start with `inc/` and walked straight past the rule, while `inc/x.php` and
- * `inc/./x.php` were both refused. Measured on jaygroup's live theme by the sprint-8
+ * `inc/./x.php` were both refused. Measured on the stress site's live theme by the sprint-8
  * review: `code-target('inc/ajax.php')` refused, `code-target('./inc/ajax.php')` allowed.
  * The bare-filename rules (`functions.php`) were never affected, because those match on
  * basename. Every code tool goes through here, so one canonical spelling closes it for
@@ -720,7 +720,7 @@ function wpmcp_site_info_shape() {
             'get'         => function ($header) { return count((array) get_option('active_plugins', array())); },
         ),
         // A guessed wp_ made the first sql-select fail with "no such table" on a site
-        // whose prefix was WsEV9y_. Read the current site's prefix, which already
+        // whose prefix was xk7f2q_. Read the current site's prefix, which already
         // includes the blog id on a multisite subsite; the network's base prefix is wrong there.
         'db_prefix' => array(
             'type'        => 'string',
@@ -1566,7 +1566,7 @@ function wpmcp_raw_title($post) {
  * so a title typed `x<y z` was stored as `x` - text destroyed, silently, on a write the
  * caller thought it understood. Neither wp-admin nor WP_REST_Posts_Controller does that.
  *
- * WHAT CORE DOES INSTEAD, read on WP 7.1.1 and measured on sample.local 2026-09-21:
+ * WHAT CORE DOES INSTEAD, read on WP 7.1.1 and measured on the bare site 2026-09-21:
  *
  *   - `title_save_pre` carries only `trim` by default (default-filters.php:328).
  *   - `wp_filter_kses` is added to it ONLY for a user without `unfiltered_html`
@@ -1613,7 +1613,7 @@ function wpmcp_raw_title($post) {
  * loop), so `Arts & Crafts` is stored as `Arts &amp; Crafts` and `x < y` as `x &lt; y` -
  * measured on both sites, every taxonomy. A client that read `&amp;` and showed it, compared
  * it, or built a new name from it was working with text nobody typed. The same is true of a
- * MENU LABEL wp-admin saved: jaygroup holds eight labels with `&#038;` for `&` - the form
+ * MENU LABEL wp-admin saved: the stress site holds eight labels with `&#038;` for `&` - the form
  * `convert_chars` gives it, believed to come from the label field being filled from the
  * displayed title (the cause is inferred; the stored bytes are measured).
  *
@@ -1697,7 +1697,7 @@ function wpmcp_iso_date_from_gmt($gmt) {
  * The active theme's name and version from its style.css header, shaped exactly as
  * list-themes shapes every theme's - the header read without a filter, tags stripped,
  * trimmed. site-info used to build "Name Version" from WP_Theme and a theme with no Version
- * header came back as `"JDA "` beside list-themes' `"JDA"` (seosemia.net, 2026-09-18): one
+ * header came back as `"JDA "` beside list-themes' `"JDA"` (a hosted staging site, 2026-09-18): one
  * value, two answers. Both tools now take it from here.
  *
  * @return array{name: string, version: string}
@@ -3244,7 +3244,7 @@ function wpmcp_revision_tools() {
             'openWorldHint' => false,
         ),
         // A READ TOOL, so a read-scope token sees this description and never sees
-        // update-post's or restore-revision's (sprint 14d, seosemia read-only cold client):
+        // update-post's or restore-revision's (sprint 14d, a hosted staging site read-only cold client):
         // which revision is which has to be said HERE, and restoring must not be offered as
         // something this token can do.
         'description' => 'List a post\'s revisions, newest first. Args: id (integer,'
@@ -3609,8 +3609,8 @@ function wpmcp_meta_tools() {
             // (wp-includes/meta.php:61-63, :218-222, :419-421, WP 7.1). Core's own REST
             // meta layer therefore slashes at every one of its five call sites
             // (class-wp-rest-meta-fields.php). Handing raw JSON straight in silently ate
-            // one backslash from every value that had one - `C:\Users\max` stored as
-            // `C:Usersmax`, `\d+` as `d+` - and, worse, turned a key `\_thumbnail_id`
+            // one backslash from every value that had one - `C:\Users\example` stored as
+            // `C:Usersexample`, `\d+` as `d+` - and, worse, turned a key `\_thumbnail_id`
             // that passed the protected-key check into the protected row `_thumbnail_id`
             // on the way to the database. The key check below refuses a backslash outright
             // as well: two independent answers, because a future call site that forgets
@@ -4802,7 +4802,7 @@ function wpmcp_version_author_login($userId) {
  * SQL parser written in PHP is a second, worse implementation of MySQL's grammar and
  * every one of them has been walked around.
  *
- * WHAT WAS MEASURED, on MySQL 8.4.0 (jaygroup, WordPress 7.1, PHP 8.2.29), wrapping
+ * WHAT WAS MEASURED, on MySQL 8.4.0 (the stress site, WordPress 7.1, PHP 8.2.29), wrapping
  * each statement as `SELECT * FROM (<sql>) AS wpmcp_q LIMIT 201`:
  *
  *   INTO OUTFILE / INTO DUMPFILE / INTO @var   1064, syntax error.
@@ -5304,7 +5304,7 @@ function wpmcp_sql_select_run($sql) {
     // truncated_by IS ALWAYS PRESENT, null when nothing was cut (sprint 14d). The
     // description promised the key and the result carried it only on a truncated answer,
     // so a client that read it unconditionally met a missing key on every ordinary query
-    // (seosemia.net, 2026-09-18). One shape, every time.
+    // (a hosted staging site, 2026-09-18). One shape, every time.
     $result = array(
         'columns'      => $columns,
         'rows'         => $out,

@@ -12,7 +12,7 @@
  *      with no revisions adds one
  *      revision whatever it changes - core's post_updated handler does it on its own - and
  *      an update of an identical title used to create it too, so "no text change, no
- *      revision" was false on a live site (seosemia.net, 2026-09-18). An update that
+ *      revision" was false on a live site (a hosted staging site, 2026-09-18). An update that
  *      changes nothing now writes nothing at all.
  *   3. The re-slug rule, stated as a rule: on a status change leaving draft or pending, a
  *      slug-less post gets a slug from its title and a slug another post holds gets a -N
@@ -375,7 +375,7 @@ final class UpdatePostTruthTest extends FixtureIntegrationTestCase
 
         // The SCHEME is not compared: wp-cli has no HTTPS request, so home_url() answers http
         // there while the tool, called over https, answers https (KB 0.8) - measured on
-        // jaygroup. What this asserts is the path: pretty, not the draft's `?p=N`.
+        // the stress site. What this asserts is the path: pretty, not the draft's `?p=N`.
         self::assertSame(self::unscheme(self::permalink($id)), self::unscheme($data['link']), 'Publishing a draft answered a link that is not its permalink now.');
         self::assertStringNotContainsString('?p=', $data['link'], 'Publishing a draft answered the draft link.');
 

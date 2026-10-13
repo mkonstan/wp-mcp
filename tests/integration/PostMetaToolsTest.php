@@ -326,7 +326,7 @@ final class PostMetaToolsTest extends FixtureIntegrationTestCase
      * ($meta_key)` and then wp_unslash() both arguments (wp-includes/meta.php:61-63,
      * :218-222, :419-421, WP 7.1), which is why core's own REST meta layer calls
      * wp_slash() at every one of its five call sites. Handing raw JSON straight in ate one
-     * backslash from every value that had one: `C:\Users\max` stored as `C:Usersmax`, a
+     * backslash from every value that had one: `C:\Users\example` stored as `C:Usersexample`, a
      * regex `\d+` as `d+`. The tool re-read the row and reported the mangled value, so the
      * answer was honest and the contract was broken.
      *

@@ -4,7 +4,7 @@
  *
  * ONE VALUE, TWO ANSWERS. site-info glued "Name Version" together from WP_Theme, so a theme
  * with no Version header came back as `"JDA "` while list-themes, reading the header itself,
- * said `"JDA"` (Max's live run on seosemia.net, 2026-09-18). Both now read the header through
+ * said `"JDA"` (Max's live run on a hosted staging site, 2026-09-18). Both now read the header through
  * one function, and site-info's version is a key of its own.
  *
  * The live comparison runs against whatever theme the site has; the case that went wrong -
