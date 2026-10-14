@@ -4,20 +4,22 @@ All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
 ## 1.3.0
 
-**Unreleased.** The cycle is open.
+**Released 2026-10-14.** Four features, from the first friction log this project ever had.
 
-**Why this number is a MINOR.** `docs/RELEASE.md`'s rule is patch for a fix cycle and
-minor when the cycle adds features, and this cycle adds features. The number was deliberately held
-at `1.2.1` while four of them landed, so that no feature commit decided it for the repository
-owner; **Max settled it on 2026-10-12: this cycle ships as a minor.** The three strings - this
-heading, `wp-mcp.php`'s `Version:` header and `WPMCP_VER` - move together or
-`tests/unit/VersionConsistencyTest.php` goes red, which is the point of it.
+**Why this number is a MINOR.** `docs/RELEASE.md`'s rule is patch for a fix cycle and minor when
+the cycle adds features, and this cycle adds four. The number was deliberately held at `1.2.1`
+while they landed, so that no feature commit decided it for the repository owner; Max settled it on
+2026-10-12. The three strings - this heading, `wp-mcp.php`'s `Version:` header and `WPMCP_VER` -
+move together or `tests/unit/VersionConsistencyTest.php` goes red, which is the point of it.
 
-**The release is deliberately NOT cut yet, and the version number was never what gated it.** Max's
-condition is that the feature list lands first: *"I don't want to trigger the whole build-deploy
-until we get every single feature that's on our build list in there."* Bumping a version string
-deploys nothing - `release.yml` fires on a version TAG and on nothing else - so this section stays
-`**Unreleased.**` and keeps accumulating features under `## 1.3.0` until that list is complete.
+**What gated this release was the feature list, never the number.** Max's condition:
+*"I don't want to trigger the whole build-deploy until we get every single feature that's on our
+build list in there."* That list came from one person's real session with the shipped plugin, and
+it was then cut from fourteen items to four by his own criterion - *"we just need to provide the
+most commonly used toolset"* - which retired Contact Form 7 as too niche, turned the backup-trigger
+request into a sentence of server instructions rather than a tool, and left three items
+(`get-acf-values` compact, render/preview, a site-wide text SEARCH with no bulk replace) for the
+next cycle.
 
 **And why this section exists at all.** Without it every dev zip cut during this cycle
 reports `Version: 1.2.0`, which is false - those builds are not that release, they are what comes
