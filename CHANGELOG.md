@@ -2,6 +2,23 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.3.1
+
+**Unreleased.** The cycle is open.
+
+**Why this section exists before anything has changed.** Without it every dev zip cut during this
+cycle would report `Version: 1.3.0`, which is false: those builds are not that release, they are
+what comes after it. Only `build.txt` could tell them apart. With it, a dev zip reads as the version
+it will become plus its own build stamp. `docs/RELEASE.md`, D15.
+
+**It opens as a PATCH on purpose, and that is not a prediction.** The rule is patch for a fix cycle
+and minor when the cycle adds features, and nothing has landed yet, so a patch claims the least.
+**If a feature lands, bump this to `## 1.4.0`** - in `wp-mcp.php`'s `Version:` header and `WPMCP_VER`
+too - BEFORE that release is cut, not after it. The three strings move together or
+`tests/unit/VersionConsistencyTest.php` goes red, which is the point of it. That is exactly what
+happened last cycle: `1.2.1` opened as a patch, four features landed under it, and the number became
+`1.3.0` once the repository owner settled it.
+
 ## 1.3.0
 
 **Released 2026-10-14.** Four features, from the first friction log this project ever had.
