@@ -204,7 +204,7 @@ jobs:
       # prints the rule and the location WITHOUT the match, because a CI log on a public
       # repository is public. See bin/privacy-check.php.
       - name: privacy check (no personal or machine-specific data)
-        run: php bin/privacy-check.php
+        run: php bin/privacy-check.php --root .
 
       - name: Guard - the parse check and the version-first rule are still wired in
         # TWO MARKERS, because the tools make two promises and one count cannot hold

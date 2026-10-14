@@ -98,7 +98,24 @@ if ($listOnly) {
     exit(0);
 }
 
-$root = dirname(__DIR__);
+// --root is REQUIRED and has no default. The tree this scans decides what the answer
+// means, so it is stated at the call site rather than inferred from where this file
+// happens to live - a default here would be a scan of something nobody chose.
+$root = null;
+foreach ($argv as $i => $arg) {
+    if ($arg === '--root') {
+        $root = $argv[$i + 1] ?? null;
+    }
+}
+if ($root === null || $root === '') {
+    fwrite(STDERR, "privacy-check: --root <dir> is required and has no default.\n");
+    fwrite(STDERR, "  the repository root to scan, e.g.  --root .\n");
+    exit(2);
+}
+if (!is_dir($root)) {
+    fwrite(STDERR, "privacy-check: --root '{$root}' is not a directory.\n");
+    exit(2);
+}
 chdir($root);
 
 exec('git ls-files', $files, $code);
