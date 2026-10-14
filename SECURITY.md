@@ -16,6 +16,7 @@ WP MCP exists to let an AI assistant reach a WordPress site without handing it a
   - Renew can never push the window past the lifetime, so a short window renewed indefinitely cannot outlive the hard end.
 - **Bound to a WordPress user**, chosen at mint time. The request runs as that user, so that user's capabilities are the ceiling on what the token can reach. Deleting the user stops the token working.
 - **Scope: `read` or `admin`**, narrowing from there. Read tokens are refused every write and code tool, and those tools are not even listed to them. Scope only subtracts; it cannot grant a capability the user does not have.
+- **What a `read` token learns about the installation itself.** `site-info` answers unconditionally with the site name and URL, the WordPress version, the active theme and its version, the number of active plugins, the plugin's own version and build, and - since 1.3.0 - the **database table prefix**, plus the blog id on a multisite subsite. None of this is a credential and the prefix is not a secret: WordPress hands it to every plugin and theme on the site, and it is useful to an attacker only together with `sql-select`, which needs **admin** scope *and* an explicit opt-in in the settings. It is stated here because a prefix is sometimes treated as an obscurity measure, and anyone relying on it that way should know that a read token sees it.
 
 ## No address binding, and why not
 
