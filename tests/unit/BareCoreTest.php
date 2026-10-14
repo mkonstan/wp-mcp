@@ -66,7 +66,8 @@ final class BareCoreTest extends TestCase
         'list-terms', 'create-term', 'delete-term',
         'list-media', 'get-media', 'upload-media', 'delete-media',
         'list-comments', 'moderate-comment', 'reply-comment',
-        'list-users', 'get-user', 'get-option', 'list-plugins', 'list-themes',
+        'list-users', 'get-user', 'get-option', 'update-option', 'get-constants',
+        'list-plugins', 'list-themes',
     ];
 
     /** Every tool that arrives through the seam. Absent from a bare core, present in the control. */

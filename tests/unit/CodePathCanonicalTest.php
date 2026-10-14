@@ -2,7 +2,7 @@
 /**
  * One file inside the theme has ONE spelling by the time anything acts on it.
  *
- * THE BYPASS THIS CLOSES, measured by the sprint-8 review on jaygroup's live client
+ * THE BYPASS THIS CLOSES, measured by the sprint-8 review on the stress site's live client
  * theme. `wpmcp_code_denied()` matches a directory rule by prefix, so `inc/` blocks
  * anything beginning `inc/`. `wpmcp_code_resolve()` handed it the caller's own string
  * after checking only for `..` and an absolute path - and `./inc/ajax.php` does not begin

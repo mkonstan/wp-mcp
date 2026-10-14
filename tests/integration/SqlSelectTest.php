@@ -486,7 +486,7 @@ final class SqlSelectTest extends FixtureIntegrationTestCase
      * transaction takes it too - the reviewer probed errno 0 from both, through this tool's
      * exact wrapper, on this site. What stops the bytes coming back is `secure_file_priv`
      * and the database user's `FILE` privilege, which belong to the operator and not to
-     * this plugin: on jaygroup `secure_file_priv` is NULL so the read is disabled, and the
+     * this plugin: on the stress site `secure_file_priv` is NULL so the read is disabled, and the
      * database user is `root` WITH `FILE`. On a host configured the other way,
      * `SELECT LOAD_FILE('.../wp-config.php')` is the database password and every salt.
      *

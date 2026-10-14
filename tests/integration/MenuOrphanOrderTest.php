@@ -11,8 +11,8 @@
  * So get-menu's `position` now agrees with what a visitor sees, by construction.
  *
  * NOTHING OBSERVABLE CHANGES ON A REAL SITE, which is why this is a free swap: D7 measured ZERO
- * orphaned items on jaygroup (81 items in 5 menus) and on seosemia (44 items), and re-measuring
- * the five jaygroup menus after the swap gave identical order and identical parents. The
+ * orphaned items on the stress site (81 items in 5 menus) and on a hosted staging site (44 items), and re-measuring
+ * the five the stress site menus after the swap gave identical order and identical parents. The
  * CHANGELOG names the move for anybody else's site, and this class is where the new rule is
  * held - on a menu built to have an orphan, because no real one does.
  *

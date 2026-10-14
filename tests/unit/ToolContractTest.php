@@ -264,6 +264,13 @@ final class ToolContractTest extends TestCase
             'list-users'       => [false, true,  false],
             'get-user'         => [false, true,  false],
             'get-option'       => [false, true,  false],
+            // Job 003. update-option REPLACES a stored setting, so destructiveHint is true for
+            // the same reason update-post's is: this project once shipped a tool claiming false
+            // while it replaced post bodies. Writing the same value twice lands the same site.
+            'update-option'    => [true,  true,  false],
+            // Job 003. get-constants reads allow-listed wp-config constants. Nothing destroyed,
+            // the same answer twice, and no other server reached.
+            'get-constants'    => [false, true,  false],
             'list-plugins'     => [false, true,  false],
             'list-themes'      => [false, true,  false],
             // Sprint SEAM. list-content-types reads the post-type and taxonomy registries and
@@ -275,6 +282,10 @@ final class ToolContractTest extends TestCase
             // object and the same caller, and no other server reached - the reduction asks core's
             // own REST controller in-process.
             'get-acf-values'     => [false, true,  false],
+            // Job 002. set-acf-values overwrites stored field values, so destructiveHint is
+            // true. Assigning the same value twice leaves the same object, and ACF's own API
+            // is called in-process, so no other server is reached.
+            'set-acf-values'     => [true,  true,  false],
         ];
 
         $catalog = WireSerializationTest::catalog();

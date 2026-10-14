@@ -2,6 +2,93 @@
 
 All notable changes to WP MCP. From 1.0.0 on, the version is semantic.
 
+## 1.3.0
+
+**Released 2026-10-14.** Four features, from the first friction log this project ever had.
+
+**Why this number is a MINOR.** `docs/RELEASE.md`'s rule is patch for a fix cycle and minor when
+the cycle adds features, and this cycle adds four. The number was deliberately held at `1.2.1`
+while they landed, so that no feature commit decided it for the repository owner; Max settled it on
+2026-10-12. The three strings - this heading, `wp-mcp.php`'s `Version:` header and `WPMCP_VER` -
+move together or `tests/unit/VersionConsistencyTest.php` goes red, which is the point of it.
+
+**What gated this release was the feature list, never the number.** Max's condition:
+*"I don't want to trigger the whole build-deploy until we get every single feature that's on our
+build list in there."* That list came from one person's real session with the shipped plugin, and
+it was then cut from fourteen items to four by his own criterion - *"we just need to provide the
+most commonly used toolset"* - which retired Contact Form 7 as too niche, turned the backup-trigger
+request into a sentence of server instructions rather than a tool, and left three items
+(`get-acf-values` compact, render/preview, a site-wide text SEARCH with no bulk replace) for the
+next cycle.
+
+**And why this section exists at all.** Without it every dev zip cut during this cycle
+reports `Version: 1.2.0`, which is false - those builds are not that release, they are what comes
+after it. Only `build.txt` would tell them apart, and sprint 14c exists because for a while nothing
+could. With it a dev zip reads as the version it will become, plus its own build stamp.
+
+- **`site-info` returns `db_prefix`**, the current site's table prefix for `sql-select`,
+  including the blog id on a multisite subsite - so the first query need not guess `wp_`.
+
+- **`set-acf-values` writes ACF field values** on posts, terms, users and the generic options store,
+  through ACF's own `update_field()` - including repeater rows and fields that have never been saved
+  on that target. Needs an admin-scope token and the capability that opens the wp-admin screen those
+  fields render on. Names are resolved to field KEYS first, because writing by name silently fails
+  when a target has no saved value yet; an ambiguous name is refused with the candidate keys listed,
+  an unknown name is refused rather than quietly creating meta, and `flexible_content` is refused
+  outright rather than half-supported. **A container written with only some of its children is
+  refused BEFORE anything is written** - repeaters, groups and clones, nested - because ACF skips a
+  child it was not given and leaves the old one, which would store half a row while reporting that
+  nothing saved. **And the containers do not agree with each other, measured on ACF Pro
+  6.8.10:** a repeater tests for a supplied child with `array_key_exists`, so an explicit `null`
+  clears it, while a clone AND a group test with `isset`, so an explicit `null` would be silently
+  skipped - three field types, two behaviours. **A `null` child of a clone or a group is therefore
+  refused and told that ACF cannot clear it that way**, rather than accepted and ignored; an empty
+  string is the documented way to clear one. **`update_field()` returns false even when it saved**, so the
+  tool re-reads and compares instead of trusting it. Returns the RAW old value per field, which is
+  the undo path, and `dry_run` reports what would change without writing. With this, ACF's
+  "Show in REST API" can stay off permanently.
+- **`get-option` reads four more settings** - `blog_public`, `users_can_register`, `default_role` and
+  `WPLANG` - each with its declared result type. Added because real use asked for exactly these; the
+  list grows on measured demand, not on a guess about what might be handy.
+- **`update-option` writes ten site settings**, admin scope, gated on `manage_options`, reporting the
+  old value, the new value and whether it changed. **`siteurl`, `home`, `permalink_structure` and
+  `gmt_offset` are deliberately refused for WRITING while staying readable**, and the refusal says
+  read-only rather than unknown: a wrong `siteurl` locks every user out of wp-admin including the
+  operator, over the very connection the tool is driven on, and a tool must not be able to sever
+  that. `permalink_structure` would rot every URL on the site; `gmt_offset` is derived from
+  `timezone_string`, and two writable spellings of one fact disagree.
+  **BOTH writes that decide what a stranger becomes on registration are guarded, not just one.**
+  `default_role` refuses any role with administrative reach, and **enabling `users_can_register`
+  refuses too when the role already stored is such a role** - otherwise an agent asked to turn on
+  registration would open a site whose `default_role` was set to administrator by hand to public
+  administrator sign-up. "Administrative reach" is judged on the role's CAPABILITIES and never on its
+  name, because a renamed or cloned administrator passes a name check, and the class is anything
+  reaching **code, users, settings or the network** - installing or editing plugins and themes is a
+  worse compromise than managing options, not a lesser one. **`unfiltered_html` is in that class too,
+  which means `editor` is refused as a public default role**: arbitrary HTML and JS from anyone who
+  signs up is stored cross-site scripting, and stored XSS in wp-admin reaches an administrator's
+  session. The refusal names the capability and says the change can still be made in wp-admin - this
+  tool declines it because at an agent's call site that consequence is invisible, not because the
+  site may not have it. **And the honest limit: a role check reads what the ROLE grants and cannot
+  see capabilities a plugin adds at runtime** through `user_has_cap` or `map_meta_cap`. An unknown role is refused too, naming
+  the capability that disqualified it.
+  **Old and new values are read from the STORED ROW, not through `get_option()`**, so an option whose
+  value a filter pins cannot conceal a successful write or produce a false failure after saving; and
+  when the read after a write cannot be made, the tool reports that uncertainty rather than implying
+  a retry is safe.
+- **`get-constants` reports nine allow-listed `wp-config` constants** and distinguishes
+  defined-false from not-defined-at-all, which are different explanations for the same behaviour.
+  The allowlist is the security boundary, not a convenience: credentials, keys and salts are
+  unreachable rather than merely absent from the output. It exists because someone had to infer a
+  missing Theme File Editor from a 403.
+
+**THE TRIGGER IN THE PARAGRAPH ABOVE FIRED, AND THE NUMBER IS NOW SETTLED.** `db_prefix` is a
+new response field, which is a FEATURE by `docs/RELEASE.md`'s rule, and three more features landed
+on top of it. All three version strings were held at `1.2.1` until the repository owner chose the
+number rather than a feature commit choosing it for him. **He chose a minor bump on 2026-10-12, so
+this cycle ships as `1.3.0`.** What is still open is WHEN the release is cut - his condition is the
+whole feature list, not the number.
+
 ## 1.2.0
 
 **Released 2026-09-26.** Four sprints. **Every `tools/call` argument is now validated by
@@ -1237,8 +1324,8 @@ marked (shape).**
 
 - **A backslash in anything you wrote was silently eaten.** A post title, body or excerpt,
   a term name or description, a media title or alt text, a comment - each lost one
-  backslash from every escape on the way to the database. `C:\Users\max` became
-  `C:Usersmax`; a regex `\d+` became `d+`; JSON stored as a string lost its escapes. The
+  backslash from every escape on the way to the database. `C:\Users\example` became
+  `C:Usersexample`; a regex `\d+` became `d+`; JSON stored as a string lost its escapes. The
   tool then re-read the row and reported the mangled value, which is why it looked right.
 - **Why.** WordPress's write functions take SLASHED input and unslash it on the way in -
   `wp_insert_post()`, `wp_insert_term()`, `wp_insert_comment()` and the whole meta API all
@@ -1304,7 +1391,7 @@ marked (shape).**
   measured and documented in README: a field that has been set through ACF at least once
   reads back correctly, and one that never has reads back as a raw string.
 - **Values go in slashed.** WordPress's meta API takes slashed input and unslashes it, so
-  a value written raw lost a backslash: `C:\Users\max` became `C:Usersmax`, a regex
+  a value written raw lost a backslash: `C:\Users\example` became `C:Usersexample`, a regex
   `\d+` became `d+`. `set-post-meta` now slashes the key and the value the way core's own
   REST meta layer does, and a backslash survives byte for byte. A key **containing** a
   backslash is refused outright, at save time and at call time: `is_protected_meta()` sees

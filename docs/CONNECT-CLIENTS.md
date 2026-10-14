@@ -35,7 +35,8 @@ composer test:client          # or: bash bin/claude-code-smoke.sh
    that actually ran.
 5. Revokes the token and removes the temp directory on any exit, through a trap.
 
-Real output, against a Local site, 2026-09-12:
+Illustrative output against a Local site, showing the current complete `site-info`
+payload. These values are examples, not a transcript of a recorded run:
 
 ```
 smoke: claude 2.1.266 (Claude Code)
@@ -44,7 +45,7 @@ smoke: NODE_EXTRA_CA_CERTS=%APPDATA%\Local\run\router\nginx\certs\example.local.
 smoke: expecting the tool to report site name 'Example' and WordPress 7.1
 smoke: token minted (read scope, 15 min, label wpmcp-test-claude-code-...).
 smoke: running the client...
-{"name":"Example","url":"https:\/\/example.local","wp_version":"7.1","active_theme":"Example Theme","active_plugins":18}
+{"name":"Example","url":"https:\/\/example.local","wp_version":"7.1","active_theme":"Example Theme","active_theme_version":"1.0.0","active_plugins":18,"db_prefix":"xk7f2q_","wp_mcp":{"version":"1.3.0","build":"source"}}
 smoke: PASS - the client reported 'Example' on WordPress 7.1, both read from the database ...
 smoke: token revoked.
 ```

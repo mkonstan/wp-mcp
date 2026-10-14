@@ -76,7 +76,7 @@ final class CoreFixTest extends TestCase
      * multisite install a Site Administrator - who holds `edit_themes` in their role - was shown
      * all six code tools in `tools/list` and refused every one of them at call time by
      * `current_user_can`. "Advertised and refused" is the exact state
-     * wpmcp_code_constants_forbid() was split out to prevent, measured on seosemia.net and named
+     * wpmcp_code_constants_forbid() was split out to prevent, measured on a hosted staging site and named
      * in that function's own docblock, so the copy reproduced the defect it documents fixing.
      *
      * PROVED WITHOUT A MULTISITE INSTALL, AND NOT BY READING THE SOURCE. `is_multisite()` and

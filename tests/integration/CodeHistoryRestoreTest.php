@@ -61,7 +61,7 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
     /**
      * A directory of OUR OWN added to the denylist for this run, and a file in it.
      *
-     * The shipped denylist names `inc/`, and jaygroup's active theme really has one - a
+     * The shipped denylist names `inc/`, and the stress site's active theme really has one - a
      * real client's `inc/ajax.php` and friends. This suite does not read, list or write
      * anything that was already in a theme, so the denylist gets a prefixed entry and the
      * listing is done over a prefixed directory this run created.
@@ -602,7 +602,7 @@ final class CodeHistoryRestoreTest extends FixtureIntegrationTestCase
     /**
      * A tool that can never run is not listed.
      *
-     * MEASURED ON A REAL PUBLIC SITE, seosemia.net, with the code switch on and
+     * MEASURED ON A REAL PUBLIC SITE, a hosted staging site, with the code switch on and
      * DISALLOW_FILE_EDIT true in wp-config: `tools/list` advertised all six code tools and
      * `code-list` then answered "Theme file editing is disabled on this site
      * (DISALLOW_FILE_EDIT)." The registry asked only wpmcp_code_enabled(); the constants

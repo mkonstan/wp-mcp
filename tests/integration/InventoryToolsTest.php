@@ -106,6 +106,7 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     private const ALLOWED_OPTIONS = [
         'blogname', 'blogdescription', 'timezone_string', 'gmt_offset', 'date_format',
         'time_format', 'start_of_week', 'permalink_structure', 'siteurl', 'home',
+        'blog_public', 'users_can_register', 'default_role', 'WPLANG',
     ];
 
     /** role key => WordPress role */
@@ -195,6 +196,25 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
 
         Fixtures::deleteTokensLabelled(self::label());
         Fixtures::purge();
+    }
+
+    /**
+     * The required db_prefix must reach the live payload, not just outputSchema.
+     * Read the expectation from this site: neither wp_ nor the network base prefix
+     * is safe to assume. The unit getter test separately proves a non-default prefix
+     * and a second site switch, which default-prefix integration sites cannot prove.
+     */
+    public function testSiteInfoPayloadReportsTheSitesOwnDatabasePrefix(): void
+    {
+        $prefix = trim(WpCli::evaluate('global $wpdb; echo $wpdb->prefix;'));
+        self::assertNotSame('', $prefix, 'Could not read the site database prefix through wp-cli.');
+
+        $info = $this->mcp(self::$adminReadToken)->callTool('site-info');
+        self::assertFalse($info->isError, $info->text);
+
+        $data = $info->data();
+        self::assertArrayHasKey('db_prefix', $data, 'site-info omits its required db_prefix field.');
+        self::assertSame($prefix, $data['db_prefix'], 'site-info does not report this site\'s own database prefix.');
     }
 
     /* ------------------------------------------------------------------
@@ -406,8 +426,23 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
                 self::assertSame($name, $data['name'] ?? null);
                 self::assertArrayHasKey('value', $data);
 
-                if ($name === 'start_of_week') {
-                    self::assertIsInt($data['value'], 'start_of_week is not an integer, as core registers it.');
+                // AN UNSTORED OPTION CAN STILL ANSWER, and WPLANG on the plugin-heavy site is the
+                // measured case: `SELECT ... WHERE option_name = 'WPLANG'` returns ZERO ROWS while
+                // get-option answers 'en_US' in the SAME HTTP request, and `has_filter('option_WPLANG')`
+                // is false under wp-cli. So something filters it in the HTTP context only, and this
+                // premise - read through wp-cli - cannot see that. `get_option()` applies the
+                // `option_<name>` filter for EVERY option, so "the tool returns the stored value" is
+                // not a truth this test can assert for a filterable name; it is only a truth about
+                // names nothing filters. WPLANG is therefore held to being READABLE, not to equalling
+                // the row. The general gap - a filtered value cannot be safely written back - is a
+                // backlog entry with its trigger, not something to paper over here.
+                if ($name === 'WPLANG') {
+                    self::assertTrue($data['value'] === null || is_string($data['value']),
+                        'WPLANG is neither absent nor a string.');
+                } elseif ($site[$name] === false) {
+                    self::assertNull($data['value'], "{$name} is absent.");
+                } elseif (in_array($name, ['start_of_week', 'blog_public', 'users_can_register'], true)) {
+                    self::assertIsInt($data['value'], "{$name} is not an integer, as core registers it.");
                     self::assertSame((int) $site[$name], $data['value']);
                 } elseif ($name === 'gmt_offset') {
                     self::assertTrue(is_int($data['value']) || is_float($data['value']), 'gmt_offset is not a number.');
@@ -430,21 +465,20 @@ final class InventoryToolsTest extends FixtureIntegrationTestCase
     {
         $nowhere = Fixtures::name('no-such-option');
         $exists  = self::decode(WpCli::evaluate(sprintf(
-            'global $wpdb; $o = array(); foreach (array("admin_email", "wpmcp_db_ver", "users_can_register", "active_plugins", %s) as $n) {'
+            'global $wpdb; $o = array(); foreach (array("admin_email", "wpmcp_db_ver", "active_plugins", %s) as $n) {'
             . ' $o[$n] = (bool) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name = %%s", $n)); }'
             . ' echo wp_json_encode($o);',
             var_export($nowhere, true)
         )));
         self::assertTrue($exists['admin_email'], 'Premise: admin_email is not stored on this site.');
         self::assertTrue($exists['wpmcp_db_ver'], 'Premise: wpmcp_db_ver is not stored on this site.');
-        self::assertTrue($exists['users_can_register'], 'Premise: users_can_register is not stored on this site.');
         self::assertTrue($exists['active_plugins'], 'Premise: active_plugins is not stored on this site.');
         self::assertFalse($exists[$nowhere], 'Premise: the made-up option name exists.');
 
         $adminEmail = trim(WpCli::evaluate('echo get_option("admin_email");'));
 
         $texts = [];
-        foreach (['admin_email', 'wpmcp_db_ver', $nowhere, 'users_can_register', 'active_plugins', 'BlogName'] as $name) {
+        foreach (['admin_email', 'wpmcp_db_ver', $nowhere, 'active_plugins', 'BlogName'] as $name) {
             foreach (['admin' => self::$adminToken, 'editor' => self::$editorReadToken] as $who => $token) {
                 $result = $this->mcp($token)->callTool('get-option', ['name' => $name]);
 

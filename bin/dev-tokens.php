@@ -3,7 +3,7 @@
  * Keep the local MCP servers' tokens usable - on a LOCAL development site only.
  *
  *   DEVTOKENS_CMD=status DEVTOKENS_MCP_JSON=/path/to/.mcp.json wp eval-file bin/dev-tokens.php
- *   bin/dev-tokens.sh status          # both Local sites, jaygroup then sample
+ *   bin/dev-tokens.sh status          # both Local sites, the stress site then sample
  *
  * Commands (DEVTOKENS_CMD):
  *   status   each matching server's token: active, dormant or dead, minutes left in its

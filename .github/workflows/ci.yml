@@ -13,9 +13,15 @@ name: CI
 # reusing - never silently. The unit tier and the lint job ALWAYS run, docs included,
 # because VersionConsistencyTest ties the CHANGELOG's top heading to the version in the
 # code and a changelog edit really can fail a test.
+# THE WORK BRANCH IS `next`. It was called `v1.1` until 2026-10-12, which had stopped being
+# true three releases earlier: that one branch carried 1.1.0, 1.1.1, 1.1.2, 1.2.0 and now
+# 1.3.0, so its name described only the first of them. `v1` and `ci-lab` were deleted the
+# same day, each fully contained in `main` with no commit of its own.
+# A BRANCH MISSING FROM THIS LIST IS PUSHED WITHOUT CI AND NOTHING SAYS SO, so add a new
+# working branch here before pushing to it, not after.
 on:
   push:
-    branches: [main, v1, v1.1, ci-lab]
+    branches: [main, next]
   pull_request:
     branches: [main]
   schedule:
@@ -186,6 +192,19 @@ jobs:
             echo "::endgroup::"
           done
           exit $status
+
+      # NOTHING MACHINE-SPECIFIC OR PERSONAL LEAVES THIS REPOSITORY. GitHub's secret
+      # scanning and push protection are on and they are good at what they do, but they
+      # recognise CREDENTIALS issued by known providers - never a Windows account name, a
+      # client's hostname or a real table prefix. On 2026-10-13 this repository publicly
+      # carried all three. Custom patterns that would catch them are a paid GHAS feature,
+      # so the check is ours and it runs here, on every push and every pull request.
+      #
+      # It matches SHAPES, never values, so the checker itself leaks nothing - and it
+      # prints the rule and the location WITHOUT the match, because a CI log on a public
+      # repository is public. See bin/privacy-check.php.
+      - name: privacy check (no personal or machine-specific data)
+        run: php bin/privacy-check.php --root .
 
       - name: Guard - the parse check and the version-first rule are still wired in
         # TWO MARKERS, because the tools make two promises and one count cannot hold

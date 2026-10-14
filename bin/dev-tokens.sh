@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run bin/dev-tokens.php against both of THIS CHECKOUT's Local sites: jaygroup, then
-# sample. Those two are this machine's; another copy of the repository edits run_site
+# Run bin/dev-tokens.php against each of THIS CHECKOUT's Local sites, in order. Which
+# sites those are is machine-specific and is configured outside this file; see the
 # below. docs/CONNECT-CLIENTS.md section 3b documents the PHP script, which is general -
 # and this wrapper is named there rather than spelled out, because it is not in the zip.
 #
@@ -17,7 +17,7 @@
 # The .mcp.json path is never assumed: DEVTOKENS_MCP_JSON is required. Each site runs in
 # its own subshell, with its variables set BEFORE bin/local-env.sh is sourced - that file
 # keeps any value already set, so a variable set after it would be silently ignored and
-# both runs would reach jaygroup.
+# both runs would reach the first site.
 #
 # The PHP script refuses any site whose environment type is not "local", prints no token
 # and no hash, and touches only servers whose URL host is the site's own. See its header.
@@ -53,7 +53,7 @@ run_site() {
     echo "== $label"
     (
         # A value inherited from the caller's shell would win over local-env.sh's
-        # default, so jaygroup starts from nothing and sample sets its own.
+        # default, so the first site starts from nothing and each later one sets its own.
         unset PHPRC PHP WPCLI WPMCP_LOCAL_SITE_ID WPMCP_SITE_PATH WPMCP_TEST_URL
         # And the suite's label seam never reaches an operator's run by accident: a stray
         # `export DEVTOKENS_LABEL=...` would otherwise be written onto real dev tokens.
@@ -71,10 +71,26 @@ run_site() {
     ) || status=1
 }
 
-run_site jaygroup
-run_site sample \
-    "WPMCP_LOCAL_SITE_ID=q6Urfd_zx" \
-    "WPMCP_SITE_PATH=C:/Users/vbwiz/Local Sites/sample/app/public" \
-    "WPMCP_TEST_URL=http://sample.local"
+# WHICH SITES TO RUN AGAINST IS MACHINE-SPECIFIC and is therefore NOT in this public
+# repository - a site name identifies a real project and a path carries a username.
+# Define them in the UNTRACKED file beside this one, which local-env.sh also sources:
+#
+#     # bin/local-env.local.sh   (gitignored)
+#     WPMCP_SITE_NAME=my-primary-site
+#     dev_token_sites() {
+#         run_site primary
+#         run_site secondary #             "WPMCP_LOCAL_SITE_ID=xxxxxxxxx" #             "WPMCP_SITE_PATH=$(cygpath -m "$HOME/Local Sites/secondary/app/public")" #             "WPMCP_TEST_URL=http://secondary.local"
+#     }
+#
+# Failing loudly beats silently defaulting to somebody else's machine.
+# shellcheck source=/dev/null
+[ -f "${BASH_SOURCE[0]%/*}/local-env.local.sh" ] && . "${BASH_SOURCE[0]%/*}/local-env.local.sh"
+
+if ! declare -f dev_token_sites >/dev/null 2>&1; then
+    echo "dev-tokens: no sites configured. Define dev_token_sites() in" >&2
+    echo "            ${BASH_SOURCE[0]%/*}/local-env.local.sh - see the comment above." >&2
+    exit 2
+fi
+dev_token_sites
 
 exit $status

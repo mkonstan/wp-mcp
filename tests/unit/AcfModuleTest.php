@@ -40,7 +40,8 @@ final class AcfModuleTest extends TestCase
         'list-terms', 'create-term', 'delete-term',
         'list-media', 'get-media', 'upload-media', 'delete-media',
         'list-comments', 'moderate-comment', 'reply-comment',
-        'list-users', 'get-user', 'get-option', 'list-plugins', 'list-themes',
+        'list-users', 'get-user', 'get-option', 'update-option', 'get-constants',
+        'list-plugins', 'list-themes',
         'list-menus', 'get-menu', 'add-menu-item', 'update-menu-item', 'remove-menu-item',
         'list-content-types',
     ];
@@ -159,7 +160,7 @@ final class AcfModuleTest extends TestCase
         // accessors, so an ACF Pro 5.11-6.4 site filters its layout titles and has no disable
         // feature. Reporting them as one left the label wrong on that whole version range.
         self::assertSame(
-            ['layout_metadata' => false, 'layout_title' => false],
+            ['write_values' => false, 'options_pages' => false, 'layout_metadata' => false, 'layout_title' => false],
             \wpmcp_module_face_capabilities('acf'),
             'The optional capabilities are not reported, so the tool cannot state which of the'
             . ' guarantees the host site provides.'
@@ -354,7 +355,7 @@ final class AcfModuleTest extends TestCase
      * SOURCE worth pinning rather than a detail.
      *
      * wpmcp_bootstrap() runs at wp-mcp's own plugin file scope, so at the moment the module file
-     * is loaded "is ACF here" is a question about plugin ORDER. MEASURED on jaygroup:
+     * is loaded "is ACF here" is a question about plugin ORDER. MEASURED on the stress site:
      * `active_plugins` is not alphabetical - it opens with gravityforms - so a site with wp-mcp as
      * an mu-plugin, or ACF in a differently-named directory, would answer "no ACF" on a site that
      * has it, and the module would serve nothing with nothing wrong.

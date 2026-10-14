@@ -45,7 +45,7 @@ final class PlatformApiTest extends TestCase
     /**
      * The file-mod gate follows the `file_mod_allowed` FILTER, not just the constant.
      *
-     * THE DEFECT THIS CLOSES was measured on seosemia.net in the other direction: a site with
+     * THE DEFECT THIS CLOSES was measured on a hosted staging site in the other direction: a site with
      * the code switch on and DISALLOW_FILE_EDIT set advertised all six code tools and refused
      * every call. A hardening plugin does not set a constant - it returns false from
      * `file_mod_allowed`, which is what `map_meta_cap` consults for `edit_themes`
